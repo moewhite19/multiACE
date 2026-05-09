@@ -11,7 +11,7 @@ Eine vollwertige Steuerzentrale für dein Multi-ACE-Setup. https://printer-ip/mu
 - **Speicherbare Filament-Loadouts** - aktuelle Spulen-Konfiguration als Snapshot sichern und mit einem Klick beim nächsten Druck wieder anwenden
 - Trockner-Steuerung pro ACE, Mid-Print-Slot-Picker, und vollständige Mehrsprachen-Oberfläche (EN / DE ab Werk)
 
-In Aktion ansehen: https://youtu.be/JauKpkZ0omY
+In Aktion ansehen: https://youtu.be/9uLE1uydWmo
 
 ## Was ist neu in multiACE 0.92b "Vibrant Fungi"
 
