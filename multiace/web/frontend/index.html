@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#15bdc6">
+  <title>mUlt1ACE</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE <small>{{ version }}</small></h1>
+    <nav>
+      <button v-if="state.mode !== 'normal'"
+              :class="{active: tab==='dashboard'}" @click="tab='dashboard'">{{ t('ui.tabs.dashboard') }}</button>
+      <button :class="{active: tab==='config'}" @click="tab='config'">{{ t('ui.tabs.config') }}</button>
+    </nav>
+    <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
+           class="upload-input" @change="onUploadGcode($event.target.files)">
+    <button class="upload-btn" @click="triggerUpload()"
+            :disabled="uploading"
+            :title="t('ui.upload.tooltip')">
+      <span v-if="!uploading">⬆ {{ t('ui.upload.button') }}</span>
+      <span v-else>{{ t('ui.upload.in_progress') }}</span>
+    </button>
+    <select class="lang-select" :value="language" @change="setLanguage($event.target.value)">
+      <option v-for="l in languages" :key="l.code" :value="l.code">{{ l.name }}</option>
+    </select>
+    <span class="conn" :class="connClass">{{ connText }}</span>
+  </header>
+
+  <main>
+    
+    <section v-show="tab==='dashboard' && state.mode !== 'normal'">
+      <p v-if="loadError" class="error">{{ loadError }}</p>
+
+      <div class="status-row">
+        <span class="pill" :class="'state-' + (state.printer_state || 'idle')">
+          {{ t('ui.dashboard.status_pill') }}: <strong>{{ state.printer_state || '–' }}</strong>
+        </span>
+        <span class="pill">{{ t('ui.dashboard.active_pill') }}: <strong>ACE {{ dispIdx(state.active_device) }}</strong></span>
+        <span class="pill">{{ t('ui.dashboard.mode_pill') }}: <strong>{{ state.mode || '–' }}</strong></span>
+        <button v-if="screenAvailable" class="pill pill-btn"
+                :class="{active: screenPopout}"
+                @click="toggleScreenPopout"
+                :title="t('ui.dashboard.show_display_hint')">
+          {{ screenPopout ? t('ui.dashboard.hide_display') : t('ui.dashboard.show_display') }}
+        </button>
+      </div>
+
+      <div ref="wiringContainerEl" class="ace-th-wrap">
+        <svg v-if="wiringPaths.length"
+             class="wiring-overlay"
+             :viewBox="wiringViewBox"
+             preserveAspectRatio="none">
+          <path v-for="(p, i) in wiringPaths"
+                :key="i"
+                :d="p.d"
+                :stroke="p.color"
+                stroke-width="4"
+                fill="none"
+                stroke-linecap="round"></path>
+        </svg>
+
+        <h3>{{ t('ui.dashboard.aces') }}</h3>
+        <p v-if="state.aces.length === 0 && !loadError" class="muted">
+          {{ t('ui.dashboard.no_aces') }}
+        </p>
+        <div class="ace-grid">
+          <article v-for="ace in state.aces" :key="ace.idx" class="ace-card"
+                   :class="{primary: ace.idx === state.active_device, clickable: ace.idx !== state.active_device}"
+                   @click="ace.idx !== state.active_device && switchAce(ace.idx)">
+            <h2>
+              <span class="ace-name">ACE {{ dispIdx(ace.idx) }}
+                <span class="ace-proto" v-if="ace.protocol">({{ ace.protocol.toUpperCase() }})</span>
+                <small v-if="ace.idx === state.active_device">{{ t('ui.common.active') }}</small>
+              </span>
+              <span class="ace-status">
+                <span v-if="ace.temp != null">{{ ace.temp }} °C</span>
+                <span v-if="ace.status" class="ace-state-text"> · {{ ace.status }}</span>
+              </span>
+              <span class="ace-card-actions" @click.stop>
+                <button class="ace-dry-btn"
+                        :class="{active: dryOpenAce === ace.idx, running: aceDrying(ace)}"
+                        @click="toggleDryPanel(ace.idx)"
+                        :title="t('ui.dashboard.dryer')">☀</button>
+                <button class="ace-load-all" @click.stop="loadAll(ace.idx)">{{ t('ui.dashboard.load_all') }}</button>
+              </span>
+            </h2>
+
+            <div class="slot-row" @click.stop>
+              <div v-for="slot in ace.slots"
+                   :key="slot.idx"
+                   :ref="el => setSlotEl(ace.idx, slot.idx, el)"
+                   class="slot-cell">
+                <button class="slot"
+                        :class="['state-' + slot.state]"
+                        :style="slot.color ? {background: slot.color} : {}"
+                        @click.stop="openPicker(ace, slot)"
+                        :title="slotTitle(ace, slot)">
+                  <span class="slot-num">{{ dispIdx(slot.idx) }}</span>
+                  <em v-if="slot.material">{{ slot.material }}</em>
+                  <em v-else-if="slot.state === 'empty'" class="muted">{{ t('ui.common.empty') }}</em>
+                  <em v-else-if="slot.state !== 'unknown'">{{ slot.state }}</em>
+                </button>
+                <button class="slot-load-btn"
+                        @click.stop="loadSlot(ace.idx, slot.idx)"
+                        :disabled="isToolheadOccupied(ace.idx, slot.idx)"
+                        :title="t('ui.dashboard.load')">
+                  {{ t('ui.dashboard.load') }}
+                </button>
+              </div>
+            </div>
+
+            <transition name="dry-fade">
+              <div v-if="dryOpenAce === ace.idx" class="dry-panel" @click.stop>
+                <div class="dry-row">
+                  <label>{{ t('ui.dashboard.temp_pill') }}
+                    <input type="number" v-model.number="dryerCfg[ace.idx].temp"
+                           min="35" max="80" step="1"> °C
+                  </label>
+                  <label>{{ t('ui.dashboard.duration') }}
+                    <input type="number" v-model.number="dryerCfg[ace.idx].duration"
+                           min="1" max="600" step="5"> min
+                  </label>
+                  <button @click="dryStart(ace.idx)">{{ t('ui.common.start') }}</button>
+                  <button @click="dryStop(ace.idx)" class="warn">{{ t('ui.common.stop') }}</button>
+                </div>
+                <div class="dry-status"
+                     v-if="ace.dryer && ace.dryer.status && ace.dryer.status !== 'stop'">
+                  <strong>{{ ace.dryer.status }}</strong>
+                  <span v-if="ace.dryer.target_temp"> · {{ ace.dryer.target_temp }} °C</span>
+                  <span v-if="ace.dryer.remain_time"> · {{ Math.round(ace.dryer.remain_time / 60) }} min</span>
+                </div>
+              </div>
+            </transition>
+          </article>
+        </div>
+
+        <h3 class="th-section-head">
+          <span>{{ t('ui.dashboard.toolheads') }}</span>
+          <button class="unload-all-btn" @click="run('ACE_UNLOAD_ALL_HEADS')">{{ t('ui.dashboard.unload_all') }}</button>
+        </h3>
+        <div class="toolhead-grid">
+          <article v-for="t_ in state.toolheads" :key="t_.idx"
+                   :ref="el => setThEl(t_.idx, el)"
+                   class="toolhead-card"
+                   :class="{empty: !t_.module_exist, present: t_.head_source_known, unknown: !t_.head_source_known && t_.filament_at_extruder, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
+            <h2>T{{ dispIdx(t_.idx) }}
+              <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
+              <span class="th-color" v-if="t_.color && t_.head_source_known && !toolheadOps[t_.idx]" :style="{background: t_.color}"></span>
+            </h2>
+            <p class="meta" v-if="toolheadOps[t_.idx]">
+              <span class="muted">{{ toolheadOps[t_.idx] === 'loading' ? t('ui.dashboard.load') : t('ui.dashboard.unload') }}…</span>
+            </p>
+            <p class="meta" v-else-if="t_.head_source_known">
+              <span v-if="t_.ace != null && t_.slot != null">ACE {{ dispIdx(t_.ace) }} / Slot {{ dispIdx(t_.slot) }}</span>
+              <span v-if="t_.material"> · {{ t_.material }}</span>
+            </p>
+            <p class="meta" v-else-if="t_.filament_at_extruder">
+              <span class="muted">{{ t('ui.common.unknown_source') }}</span>
+            </p>
+            <p class="meta" v-else>
+              <span class="muted">{{ t('ui.common.empty') }}</span>
+            </p>
+            <p class="meta" v-if="t_.channel_state">
+              <code>{{ t_.channel_state }}</code>
+              <span v-if="t_.channel_error && t_.channel_error !== 'ok'" class="error-inline">
+                · {{ t_.channel_error }}
+              </span>
+            </p>
+            <div class="toolhead-actions" v-if="t_.module_exist">
+              <button class="warn" @click="unloadHead(t_.idx)" :disabled="!t_.head_source_known && !t_.filament_at_extruder">{{ t('ui.dashboard.unload') }}</button>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <h3>{{ t('ui.dashboard.snapshots') }}</h3>
+      <div class="snapshot-row">
+        <select v-model="selectedSnapshot">
+          <option value="">— {{ t('ui.dashboard.snapshot_select_or_new') }} —</option>
+          <option v-for="s in snapshots" :key="s.name" :value="s.name">
+            {{ s.name }}{{ s.saved ? ' · ' + s.saved.slice(0,16) : '' }}
+          </option>
+        </select>
+        <button @click="loadSnapshot" :disabled="!selectedSnapshot">{{ t('ui.common.apply') }}</button>
+        <button @click="saveSnapshot" class="primary">{{ t('ui.dashboard.save_current') }}</button>
+        <button @click="deleteSnapshot" :disabled="!selectedSnapshot" class="warn">×</button>
+      </div>
+      <div v-if="snapshotPreview" class="snapshot-preview">
+        <strong>{{ snapshotPreview.name }}</strong>
+        <div class="snapshot-thds">
+          <span v-for="t_ in snapshotPreview.toolheads" :key="t_.idx" class="snapshot-th"
+                :style="t_.color ? {background: t_.color} : {}">
+            T{{ dispIdx(t_.idx) }}: ACE {{ dispIdx(t_.ace) }}/{{ dispIdx(t_.slot) }}
+            <em v-if="t_.material">{{ t_.material }}</em>
+          </span>
+        </div>
+      </div>
+
+      <transition name="macrolog-fade">
+        <pre v-if="macroLog" class="macro-log">{{ macroLog }}</pre>
+      </transition>
+    </section>
+
+    <section v-show="tab==='config'">
+      <p v-if="configLoadError" class="error">{{ configLoadError }}</p>
+
+      <h3>{{ t('ui.config.mode') }}</h3>
+      <div class="mode-row">
+        <button v-for="m in ['normal','multi']"
+                :key="m"
+                :class="{active: state.mode === m}"
+                @click="setMode(m)">{{ m }}</button>
+        <span v-if="modeChangePending" class="pill warn-pill">
+          {{ t('ui.config.mode_change_pending') }}
+        </span>
+      </div>
+
+      <h3>{{ t('ui.config.parameters') }}</h3>
+      <div class="config-form">
+        <div class="config-row">
+          <label>{{ t('ui.config.ace_count') }}</label>
+          <select v-model.number="configForm.ace_device_count">
+            <option v-for="n in [1,2,3,4]" :key="n" :value="n">{{ n }}</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.feed_speed') }}</label>
+          <input type="number" v-model.number="configForm.feed_speed" min="1" max="500">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.retract_speed') }}</label>
+          <input type="number" v-model.number="configForm.retract_speed" min="1" max="500">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.load_length') }}</label>
+          <input type="number" v-model.number="configForm.load_length" min="0" max="5000">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.retract_length') }}</label>
+          <input type="number" v-model.number="configForm.retract_length" min="0" max="5000">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.dryer_temp') }}</label>
+          <input type="number" v-model.number="configForm.dryer_temp" min="0" max="80" step="1" placeholder="—">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.dryer_duration') }}</label>
+          <input type="number" v-model.number="configForm.dryer_duration" min="0" max="600" step="5" placeholder="—">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.display_index_base') }}</label>
+          <select v-model.number="configForm.display_index_base">
+            <option :value="0">0</option>
+            <option :value="1">1</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.load_retry') }}</label>
+          <input type="number" v-model.number="configForm.load_retry" min="0" max="20" step="1" placeholder="—">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.extrusion_retry') }}</label>
+          <input type="number" v-model.number="configForm.extrusion_retry" min="0" max="20" step="1" placeholder="—">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.unload_retry') }}</label>
+          <input type="number" v-model.number="configForm.unload_retry" min="0" max="20" step="1" placeholder="—">
+        </div>
+        <fieldset>
+          <legend>{{ t('ui.config.debug_logs') }}</legend>
+          <label><input type="checkbox" v-model="configForm.state_debug"> state_debug</label>
+          <label><input type="checkbox" v-model="configForm.usb_debug"> usb_debug</label>
+          <label><input type="checkbox" v-model="configForm.fa_debug"> fa_debug</label>
+        </fieldset>
+      </div>
+
+      <h3>{{ t('ui.config.per_ace') }}</h3>
+      <div class="per-ace-grid">
+        <div class="per-ace-card" v-for="i in configForm.ace_device_count" :key="i-1">
+          <h4>ACE {{ dispIdx(i-1) }}</h4>
+          <div class="per-ace-row">
+            <label>{{ t('ui.config.dryer_temp_override') }}
+              <input type="number" v-model.number="configForm.perAce[i-1].dryer_temp"
+                     min="0" max="80" step="1" placeholder="—"> °C
+            </label>
+          </div>
+          <div class="per-ace-row">
+            <label>{{ t('ui.config.dryer_duration_override') }}
+              <input type="number" v-model.number="configForm.perAce[i-1].dryer_duration"
+                     min="0" max="600" step="5" placeholder="—"> min
+            </label>
+          </div>
+          <div class="per-ace-row">
+            <label><input type="checkbox" v-model="configForm.perAce[i-1].fa_print_disable">
+              {{ t('ui.config.fa_print_disable') }}
+            </label>
+          </div>
+          <div class="per-ace-row">
+            <label><input type="checkbox" v-model="configForm.perAce[i-1].fa_load_disable">
+              {{ t('ui.config.fa_load_disable') }}
+            </label>
+          </div>
+          <div class="per-ace-row">
+            <label>{{ t('ui.config.load_length') }}
+              <input type="number" v-model.number="configForm.perAce[i-1].load_length"
+                     min="0" max="5000" step="10" placeholder="—"> mm
+            </label>
+          </div>
+          <div class="per-ace-row">
+            <label>{{ t('ui.config.retract_length') }}
+              <input type="number" v-model.number="configForm.perAce[i-1].retract_length"
+                     min="0" max="5000" step="10" placeholder="—"> mm
+            </label>
+          </div>
+          <details class="per-slot-block">
+            <summary>{{ t('ui.config.per_slot_overrides') }}</summary>
+            <table class="per-slot-table">
+              <thead>
+                <tr>
+                  <th>Slot</th>
+                  <th>{{ t('ui.config.load_length') }}</th>
+                  <th>{{ t('ui.config.retract_length') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in 4" :key="s-1">
+                  <td>{{ dispIdx(s-1) }}</td>
+                  <td><input type="number" v-model.number="configForm.perAce[i-1].perSlot[s-1].load_length"
+                             min="0" max="5000" step="10" placeholder="—"></td>
+                  <td><input type="number" v-model.number="configForm.perAce[i-1].perSlot[s-1].retract_length"
+                             min="0" max="5000" step="10" placeholder="—"></td>
+                </tr>
+              </tbody>
+            </table>
+          </details>
+        </div>
+      </div>
+
+      <div class="row">
+        <button @click="loadConfig">{{ t('ui.common.reload') }}</button>
+        <button @click="saveConfigForm" class="primary">{{ t('ui.config.save_restart') }}</button>
+        <button @click="showRawConfig = !showRawConfig">{{ showRawConfig ? t('ui.config.form_view') : t('ui.config.raw_view') }}</button>
+      </div>
+
+      <details v-if="showRawConfig">
+        <summary>{{ t('ui.config.raw_editor') }}</summary>
+        <textarea v-model="config.content" rows="30" spellcheck="false"></textarea>
+        <div class="row">
+          <label><input type="checkbox" v-model="config.restartKlipper"> {{ t('ui.config.restart_klipper_after_save') }}</label>
+          <button @click="saveConfigRaw" class="primary">{{ t('ui.config.raw_save') }}</button>
+        </div>
+      </details>
+
+      <pre v-if="configLog">{{ configLog }}</pre>
+    </section>
+
+  </main>
+
+  <div v-if="screenPopout && screenAvailable" class="screen-popout" :style="popoutStyle">
+    <div class="screen-popout-head"
+         @pointerdown="popoutDragStart"
+         @pointermove="popoutDragMove"
+         @pointerup="popoutDragEnd"
+         @pointercancel="popoutDragEnd">
+      <span>{{ t('ui.dashboard.show_display') }} · {{ screenFps.toFixed(1) }} fps</span>
+      <button class="screen-popout-close" @click.stop="toggleScreenPopout"
+              :title="t('ui.common.cancel')">×</button>
+    </div>
+    <canvas ref="floatScreenCanvas"
+            width="1024" height="600"
+            @pointerdown.prevent="screenDown"
+            @pointermove.prevent="screenMove"
+            @pointerup.prevent="screenUp"
+            @pointercancel.prevent="screenUp"
+            @contextmenu.prevent></canvas>
+  </div>
+
+  <div v-if="notifications.length" class="notif-strip"
+       :class="{shifted: visibleQueue.length}">
+    <div class="notif-head">
+      <strong>{{ t('ui.notifications.title') }}</strong>
+      <button class="notif-clear" @click="dismissAllNotifications"
+              :title="t('ui.notifications.clear_all')">×!</button>
+    </div>
+    <transition-group name="notif" tag="div" class="notif-list">
+      <div v-for="n in notifications" :key="n.id" class="notif-item">
+        <span class="notif-msg">{{ n.msg }}</span>
+        <button class="notif-dismiss" @click="dismissNotification(n.id)"
+                :title="t('ui.common.cancel')">×</button>
+      </div>
+    </transition-group>
+  </div>
+
+  <div class="cmd-queue-bar" v-if="visibleQueue.length">
+    <div class="queue-controls">
+      <button class="queue-toggle" @click="cmdPaused ? resumeQueue() : pauseQueue()"
+              :class="{paused: cmdPaused}"
+              :title="cmdPaused ? 'Resume queue' : 'Pause queue'">
+        <span v-if="cmdPaused">▶</span>
+        <span v-else>⏸</span>
+      </button>
+      <button class="queue-clear-err"
+              v-if="cmdQueue.some(it => it.status === 'error')"
+              @click="clearAllErrors" title="Clear errors">×!</button>
+    </div>
+    <div class="cmd-queue-track">
+      <transition-group name="cmd" tag="div" class="cmd-queue-strip">
+        <div v-for="it in visibleQueue" :key="it.id"
+             class="cmd-item"
+             :class="'cmd-' + it.status"
+             :title="it.error || (it.cmd + ' ' + fmtArgs(it.args))">
+          <span class="cmd-name">{{ cmdLabel(it) || it.cmd }}</span>
+          <span class="cmd-args" v-if="!cmdLabel(it) && it.args && Object.keys(it.args).length">{{ fmtArgs(it.args) }}</span>
+          <span v-if="it.status === 'running'" class="cmd-spinner">●</span>
+          <span v-if="it.status === 'error'"   class="cmd-err-icon">!</span>
+          <button v-if="it.status === 'queued' || it.status === 'error'"
+                  class="cmd-del" @click="removeFromQueue(it.id)" title="Remove">×</button>
+        </div>
+      </transition-group>
+    </div>
+  </div>
+
+  <div v-if="picker.show" class="overlay" @click.self="closePicker">
+    <div class="dialog">
+      <h3>
+        {{ t('ui.dialog.picker_title', {ace: dispIdx(picker.ace), slot: dispIdx(picker.slot)}) }}
+        <button v-if="pickerHasRfid" class="rfid-btn" @click="readPickerRfid"
+                :style="pickerRfidStyle"
+                :title="t('ui.dialog.picker_read_rfid_hint')">
+          {{ t('ui.dialog.picker_read_rfid') }}
+        </button>
+      </h3>
+      <div class="config-form">
+        <div class="config-row">
+          <label>{{ t('ui.dialog.picker_material') }}</label>
+          <select v-model="picker.material">
+            <option v-for="m in pickerMaterials" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.dialog.picker_subtype') }}</label>
+          <input type="text" v-model="picker.subtype" placeholder="Basic">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.dialog.picker_vendor') }}</label>
+          <input type="text" v-model="picker.vendor" placeholder="Generic">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.dialog.picker_color') }}</label>
+          <input type="color" v-model="picker.color" style="width: 4rem; height: 2rem;">
+        </div>
+      </div>
+      <div class="row">
+        <button @click="closePicker">{{ t('ui.common.cancel') }}</button>
+        <button @click="savePicker(false)" class="primary">{{ t('ui.dialog.picker_save') }}</button>
+        <button @click="savePicker(true)" :disabled="isToolheadOccupied(picker.ace, picker.slot)">{{ t('ui.dialog.picker_load_after') }}</button>
+      </div>
+    </div>
+  </div>
+
+  <div v-if="confirmDialog.show" class="overlay" @click.self="cancelConfirm">
+    <div class="dialog">
+      <h3>{{ confirmDialog.title }}</h3>
+      <p v-html="confirmDialog.message"></p>
+      <label v-if="confirmDialog.checkboxLabel" class="dialog-checkbox">
+        <input type="checkbox" v-model="confirmDialog.checkboxChecked">
+        <span>{{ confirmDialog.checkboxLabel }}</span>
+      </label>
+      <div class="row">
+        <button v-if="!confirmDialog.dismissOnly" @click="cancelConfirm">{{ t('ui.common.cancel') }}</button>
+        <button v-if="confirmDialog.altLabel" @click="altConfirm">{{ confirmDialog.altLabel }}</button>
+        <button @click="okConfirm" class="primary">{{ confirmDialog.okLabel || 'OK' }}</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

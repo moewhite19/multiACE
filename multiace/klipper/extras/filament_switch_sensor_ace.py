@@ -1,11 +1,9 @@
 import logging, os
-
-POSTFIX_CONFIG_FILE ='_runout_sensor.json'
-DEFAULT_CONFIG = {
-    'enable': True
-}
+POSTFIX_CONFIG_FILE = '_runout_sensor.json'
+DEFAULT_CONFIG = {'enable': True}
 
 class RunoutHelper:
+
     def __init__(self, config):
         self.name = config.get_name().split()[-1]
         self.printer = config.get_printer()
@@ -17,41 +15,28 @@ class RunoutHelper:
         self.runout_gcode = self.insert_gcode = None
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         if self.runout_pause or config.get('runout_gcode', None) is not None:
-            self.runout_gcode = gcode_macro.load_template(
-                config, 'runout_gcode', '')
+            self.runout_gcode = gcode_macro.load_template(config, 'runout_gcode', '')
         if config.get('insert_gcode', None) is not None:
-            self.insert_gcode = gcode_macro.load_template(
-                config, 'insert_gcode')
-        self.pause_delay = config.getfloat('pause_delay', .5, above=.0)
-        self.event_delay = config.getfloat('event_delay', 3., above=0.)
+            self.insert_gcode = gcode_macro.load_template(config, 'insert_gcode')
+        self.pause_delay = config.getfloat('pause_delay', 0.5, above=0.0)
+        self.event_delay = config.getfloat('event_delay', 3.0, above=0.0)
         self.min_event_systime = self.reactor.NEVER
         self.filament_present = False
         self.sensor_enabled = True
-
         self.extruder_index = self._get_extruder_index(config.get('extruder'))
         self.exception_manager = self.printer.lookup_object('exception_manager', None)
-
         config_dir = self.printer.get_snapmaker_config_dir()
         config_name = self.name + POSTFIX_CONFIG_FILE
         self.config_path = os.path.join(config_dir, config_name)
         self.config = self.printer.load_snapmaker_config_file(self.config_path, DEFAULT_CONFIG)
         self.sensor_enabled = self.config['enable']
+        self.printer.register_event_handler('klippy:ready', self._handle_ready)
+        self.gcode.register_mux_command('QUERY_FILAMENT_SENSOR', 'SENSOR', self.name, self.cmd_QUERY_FILAMENT_SENSOR, desc=self.cmd_QUERY_FILAMENT_SENSOR_help)
+        self.gcode.register_mux_command('SET_FILAMENT_SENSOR', 'SENSOR', self.name, self.cmd_SET_FILAMENT_SENSOR, desc=self.cmd_SET_FILAMENT_SENSOR_help)
+        self.gcode.register_mux_command('CHECK_FILAMENT_RUNOUT', 'SENSOR', self.name, self.cmd_CHECK_FILAMENT_RUNOUT, desc=self.cmd_CHECK_FILAMENT_RUNOUT_help)
 
-        self.printer.register_event_handler("klippy:ready", self._handle_ready)
-        self.gcode.register_mux_command(
-            "QUERY_FILAMENT_SENSOR", "SENSOR", self.name,
-            self.cmd_QUERY_FILAMENT_SENSOR,
-            desc=self.cmd_QUERY_FILAMENT_SENSOR_help)
-        self.gcode.register_mux_command(
-            "SET_FILAMENT_SENSOR", "SENSOR", self.name,
-            self.cmd_SET_FILAMENT_SENSOR,
-            desc=self.cmd_SET_FILAMENT_SENSOR_help)
-        self.gcode.register_mux_command(
-            "CHECK_FILAMENT_RUNOUT", "SENSOR", self.name,
-            self.cmd_CHECK_FILAMENT_RUNOUT,
-            desc=self.cmd_CHECK_FILAMENT_RUNOUT_help)
     def _handle_ready(self):
-        self.min_event_systime = self.reactor.monotonic() + 2.
+        self.min_event_systime = self.reactor.monotonic() + 2.0
         self.print_task_config = self.printer.lookup_object('print_task_config', None)
 
     def _get_extruder_index(self, extruder_name):
@@ -63,46 +48,36 @@ class RunoutHelper:
     def _runout_event_handler(self, eventtime):
         ace = self.printer.lookup_object('ace', None)
         if ace is not None and getattr(ace, '_swap_in_progress', False):
-            logging.info("[multiACE] filament_switch_sensor: blocking runout during swap")
+            logging.info('[multiACE] filament_switch_sensor: blocking runout during swap')
             return
-        pause_prefix = ""
+        pause_prefix = ''
         if self.runout_pause:
             if self.exception_manager is not None:
-                self.printer.send_event("print_stats:update_exception_info",
-                                        self.exception_manager.list.MODULE_ID_TOOLHEAD,
-                                        self.extruder_index,
-                                        self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT,
-                                        '%s runout' % (self.name),
-                                        2)
+                self.printer.send_event('print_stats:update_exception_info', self.exception_manager.list.MODULE_ID_TOOLHEAD, self.extruder_index, self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT, '%s runout' % self.name, 2)
             pause_resume = self.printer.lookup_object('pause_resume')
             pause_resume.send_pause_command()
-            pause_prefix = "PAUSE IS_RUNOUT=1\n"
+            pause_prefix = 'PAUSE IS_RUNOUT=1\n'
             self.printer.get_reactor().pause(eventtime + self.pause_delay)
         self._exec_gcode(pause_prefix, self.runout_gcode)
         if self.runout_pause:
             try:
                 self.gcode.run_script(f'\nM400\nINNER_AUTO_REPLENISH_FILAMENT EXTRUDER={self.extruder_index}\n')
             except Exception:
-                logging.exception("Script running error")
+                logging.exception('Script running error')
             if self.print_task_config.perform_auto_replenish == False:
                 if self.exception_manager is not None:
-                    self.exception_manager.raise_exception_async(
-                        id = self.exception_manager.list.MODULE_ID_TOOLHEAD,
-                        index = self.extruder_index,
-                        code = self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT,
-                        message = '%s runout' % (self.name),
-                        oneshot = 0,
-                        level = 2)
+                    self.exception_manager.raise_exception_async(id=self.exception_manager.list.MODULE_ID_TOOLHEAD, index=self.extruder_index, code=self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT, message='%s runout' % self.name, oneshot=0, level=2)
 
     def _insert_event_handler(self, eventtime):
-        self._exec_gcode("", self.insert_gcode)
+        self._exec_gcode('', self.insert_gcode)
 
     def _exec_gcode(self, prefix, template):
         try:
-            self.gcode.run_script(prefix + template.render() + "\nM400")
+            self.gcode.run_script(prefix + template.render() + '\nM400')
         except Exception:
-            logging.exception("Script running error")
+            logging.exception('Script running error')
         self.min_event_systime = self.reactor.monotonic() + self.event_delay
+
     def note_filament_present(self, is_filament_present, force=False):
         if is_filament_present == self.filament_present and force == False:
             return
@@ -110,80 +85,63 @@ class RunoutHelper:
         eventtime = self.reactor.monotonic()
         if eventtime < self.min_event_systime or not self.sensor_enabled:
             return
-
         if self.filament_present:
-            logging.info("Filament Sensor %s: insert event detected, Time %.2f" %
-                         (self.name, eventtime))
+            logging.info('Filament Sensor %s: insert event detected, Time %.2f' % (self.name, eventtime))
         else:
-            logging.info("Filament Sensor %s: remove event detected, Time %.2f" %
-                         (self.name, eventtime))
-
+            logging.info('Filament Sensor %s: remove event detected, Time %.2f' % (self.name, eventtime))
         if self.print_task_config is not None:
             self.print_task_config.backup_filament_info(self.extruder_index)
-        self.printer.send_event("filament_switch_sensor:runout",
-                                self.extruder_index, is_filament_present)
-
+        self.printer.send_event('filament_switch_sensor:runout', self.extruder_index, is_filament_present)
         print_stats = self.printer.lookup_object('print_stats')
-        is_printing = print_stats.state == "printing"
+        is_printing = print_stats.state == 'printing'
         if is_filament_present:
             if not is_printing and self.insert_gcode is not None:
                 self.min_event_systime = self.reactor.NEVER
                 self.reactor.register_callback(self._insert_event_handler)
             if self.exception_manager is not None:
-                self.exception_manager.clear_exception(
-                    id = self.exception_manager.list.MODULE_ID_TOOLHEAD,
-                    index = self.extruder_index,
-                    code = self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT)
+                self.exception_manager.clear_exception(id=self.exception_manager.list.MODULE_ID_TOOLHEAD, index=self.extruder_index, code=self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT)
         elif is_printing and self.runout_gcode is not None:
             ace = self.printer.lookup_object('ace', None)
             if ace is not None and getattr(ace, '_swap_in_progress', False):
-                logging.info("[multiACE] note_filament_present: blocking runout callback during swap")
+                logging.info('[multiACE] note_filament_present: blocking runout callback during swap')
                 return
             self.min_event_systime = self.reactor.NEVER
-            logging.info(
-                "Filament Sensor %s: runout event detected, Time %.2f" %
-                (self.name, eventtime))
+            logging.info('Filament Sensor %s: runout event detected, Time %.2f' % (self.name, eventtime))
             self.reactor.register_callback(self._runout_event_handler)
 
     def get_status(self, eventtime):
-        return {
-            "filament_detected": bool(self.filament_present),
-            "enabled": bool(self.sensor_enabled)}
-    cmd_QUERY_FILAMENT_SENSOR_help = "Query the status of the Filament Sensor"
+        return {'filament_detected': bool(self.filament_present), 'enabled': bool(self.sensor_enabled)}
+    cmd_QUERY_FILAMENT_SENSOR_help = 'Query the status of the Filament Sensor'
+
     def cmd_QUERY_FILAMENT_SENSOR(self, gcmd):
         if self.filament_present:
-            msg = "Filament Sensor %s: filament detected" % (self.name)
+            msg = 'Filament Sensor %s: filament detected' % self.name
         else:
-            msg = "Filament Sensor %s: filament not detected" % (self.name)
+            msg = 'Filament Sensor %s: filament not detected' % self.name
         gcmd.respond_info(msg)
-    cmd_SET_FILAMENT_SENSOR_help = "Sets the filament sensor on/off"
-    def cmd_SET_FILAMENT_SENSOR(self, gcmd):
-        self.sensor_enabled = gcmd.get_int("ENABLE", 1)
-        self.config['enable'] = bool(self.sensor_enabled)
-        logging.info("Filament Sensor: set enable/disable -- %d", self.sensor_enabled)
+    cmd_SET_FILAMENT_SENSOR_help = 'Sets the filament sensor on/off'
 
+    def cmd_SET_FILAMENT_SENSOR(self, gcmd):
+        self.sensor_enabled = gcmd.get_int('ENABLE', 1)
+        self.config['enable'] = bool(self.sensor_enabled)
+        logging.info('Filament Sensor: set enable/disable -- %d', self.sensor_enabled)
         need_save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
-        if (need_save):
+        if need_save:
             load_config = self.printer.load_snapmaker_config_file(self.config_path, DEFAULT_CONFIG)
             load_config['enable'] = self.config['enable']
             ret = self.printer.update_snapmaker_config_file(self.config_path, load_config, DEFAULT_CONFIG)
             if not ret:
-                raise gcmd.error("save startup stay failed!")
-    cmd_CHECK_FILAMENT_RUNOUT_help = "Check for filament runout during printing process."
+                raise gcmd.error('save startup stay failed!')
+    cmd_CHECK_FILAMENT_RUNOUT_help = 'Check for filament runout during printing process.'
+
     def cmd_CHECK_FILAMENT_RUNOUT(self, gcmd):
         print_stats = self.printer.lookup_object('print_stats', None)
-        if print_stats is not None and print_stats.state in ["printing", "paused"]:
-            if bool(self.sensor_enabled) and not bool(self.filament_present):
-                raise gcmd.error(
-                        message = f'{self.name} runout',
-                        action = 'pause',
-                        id = 523,
-                        index = self.extruder_index,
-                        code = 0,
-                        oneshot = 0,
-                        level = 2)
+        if print_stats is not None and print_stats.state in ['printing', 'paused']:
+            if bool(self.sensor_enabled) and (not bool(self.filament_present)):
+                raise gcmd.error(message=f'{self.name} runout', action='pause', id=523, index=self.extruder_index, code=0, oneshot=0, level=2)
 
 class SwitchSensor:
+
     def __init__(self, config):
         printer = config.get_printer()
         buttons = printer.load_object(config, 'buttons')
@@ -192,10 +150,11 @@ class SwitchSensor:
             buttons.register_buttons([switch_pin], self._button_handler)
         else:
             amin, amax = config.getfloatlist('analog_range', count=2)
-            pullup = config.getfloat('analog_pullup_resistor', 4700., above=0.)
+            pullup = config.getfloat('analog_pullup_resistor', 4700.0, above=0.0)
             buttons.register_adc_button(switch_pin, amin, amax, pullup, self._button_handler)
         self.runout_helper = RunoutHelper(config)
         self.get_status = self.runout_helper.get_status
+
     def _button_handler(self, eventtime, state):
         self.runout_helper.note_filament_present(state)
 

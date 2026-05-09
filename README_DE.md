@@ -1,8 +1,19 @@
 # mUlt1ACE
 
-Hotfix 1 - löst FA probleme.
+Hotfix 2 - löst FA-Probleme, Retract bei Swaps und BRANDNEUES WEB-UI
 
-## Was ist neu in multiACE 0.90b "Vibrant Fungi"
+## 🌐 Brandneues Reaktives Web-UI
+
+Eine vollwertige Steuerzentrale für dein Multi-ACE-Setup. https://printer-ip/multiace/
+
+- **Live-Multi-ACE-Dashboard** mit Verkabelungs-Overlay, das auf einen Blick zeigt, welcher Slot welchen Toolhead speist
+- **Editierbare Befehls-Warteschlange** - anstehende Load- / Unload- / Swap-Aufträge pausieren oder verwerfen, bevor sie laufen
+- **Speicherbare Filament-Loadouts** - aktuelle Spulen-Konfiguration als Snapshot sichern und mit einem Klick beim nächsten Druck wieder anwenden
+- Trockner-Steuerung pro ACE, Mid-Print-Slot-Picker, und vollständige Mehrsprachen-Oberfläche (EN / DE ab Werk)
+
+In Aktion ansehen: https://youtu.be/JauKpkZ0omY
+
+## Was ist neu in multiACE 0.92b "Vibrant Fungi"
 
 **Das ist KEINE AMS-Lösung mit tausenden zuverlässigen Swaps, und ich glaube auch nicht, dass sie das jemals sein wird — aber sie pausiert, wenn etwas schief geht, sodass du das Problem lösen und fortfahren kannst.**
 
@@ -272,8 +283,13 @@ Vor der Installation von multiACE Folgendes sicherstellen:
    ```
    bash /tmp/multiace/install_multiace.sh
    ```
-4. Drucker rebooten
-5. multiACE startet im **Multi mode** - alle angeschlossenen ACE-Einheiten werden automatisch erkannt
+4. Mit WEB UI installieren https://printer-ip/multiace/
+   ```
+   bash /tmp/multiace/install_multiace.sh --install-web
+   
+   ```
+5. Drucker rebooten
+6. multiACE startet im **Multi mode** - alle angeschlossenen ACE-Einheiten werden automatisch erkannt
 
 ### Manuelle Installation
 

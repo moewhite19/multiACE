@@ -1,13 +1,6 @@
 #!/bin/bash
-# multiACE Uninstaller for Snapmaker U1
-# Restores original files from _pre_multiace or _stock backups
-# Usage: bash uninstall_multiace.sh [-y|--yes|--force]
-
-# Fix Windows line endings
 sed -i 's/\r$//' "$0" 2>/dev/null
-
 set -e
-
 HOME_DIR="/home/lava"
 EXTRAS_DIR="${HOME_DIR}/klipper/klippy/extras"
 KINEMATICS_DIR="${HOME_DIR}/klipper/klippy/kinematics"
@@ -16,29 +9,22 @@ MULTIACE_DIR="${CONFIG_DIR}/multiace"
 ACE_VARS="${MULTIACE_DIR}/ace_vars.cfg"
 PRINTER_CFG="${HOME_DIR}/printer_data/config/printer.cfg"
 LOGFILE="/tmp/multiace_uninstall.log"
-
 FORCE=0
 for arg in "$@"; do
     case "$arg" in
         -y|--yes|--force) FORCE=1 ;;
     esac
 done
-
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [multiACE] $1" | tee -a "$LOGFILE"
 }
-
 log "=== multiACE Uninstall ==="
-
-# --- Pre-flight: warn if any toolheads are currently registered as loaded ---
 LOADED_HEADS=""
 LOADED_COUNT=0
 if [ -f "$ACE_VARS" ]; then
     HS_LINE=$(grep '^ace__head_source' "$ACE_VARS" 2>/dev/null || true)
     if [ -n "$HS_LINE" ]; then
         for i in 0 1 2 3; do
-            # Loaded entry looks like '0': {ace_index: ...}, empty is '0': None
-            # Klipper save_variables uses single quotes (Python repr)
             if echo "$HS_LINE" | grep -q "'$i': {"; then
                 LOADED_COUNT=$((LOADED_COUNT + 1))
                 LOADED_HEADS="$LOADED_HEADS T$i"
@@ -46,7 +32,6 @@ if [ -f "$ACE_VARS" ]; then
         done
     fi
 fi
-
 if [ "$LOADED_COUNT" -gt 0 ]; then
     echo ""
     echo "================================================================"
@@ -80,17 +65,12 @@ if [ "$LOADED_COUNT" -gt 0 ]; then
         esac
     fi
 fi
-
-# --- Restore original files from backups ---
 log "Restoring original files..."
-
-# Helper: restore from _pre_multiace or _stock backup
 restore_file() {
     local dir="$1"
     local name="$2"
     local pre_multiace="${dir}/${name}_pre_multiace.py"
     local stock="${dir}/${name}_stock.py"
-
     if [ -f "$pre_multiace" ]; then
         cp "$pre_multiace" "${dir}/${name}.py"
         log "  Restored ${name}.py from _pre_multiace backup"
@@ -101,19 +81,17 @@ restore_file() {
         log "  WARNING: No backup found for ${name}.py, skipping"
     fi
 }
-
 restore_file "$EXTRAS_DIR" "filament_feed"
 restore_file "$EXTRAS_DIR" "filament_switch_sensor"
 restore_file "$KINEMATICS_DIR" "extruder"
-
-# Always remove ace.cfg — it references multiace/ which will be deleted
 rm -f "$CONFIG_DIR/ace.cfg"
 rm -f "$CONFIG_DIR/ace_pre_multiace.cfg"
 log "  Removed ace.cfg"
-
-# --- Remove multiACE files ---
 log "Removing multiACE files..."
 rm -f "$EXTRAS_DIR/ace.py"
+rm -f "$EXTRAS_DIR/ace_protocol.py"
+rm -f "$EXTRAS_DIR/ace_protocol_v1.py"
+rm -f "$EXTRAS_DIR/ace_protocol_v2.py"
 rm -f "$EXTRAS_DIR/filament_feed_ace.py"
 rm -f "$EXTRAS_DIR/filament_switch_sensor_ace.py"
 rm -f "$EXTRAS_DIR/filament_feed_pre_multiace.py"
@@ -122,30 +100,62 @@ rm -f "$KINEMATICS_DIR/extruder_ace.py"
 rm -f "$KINEMATICS_DIR/extruder_pre_multiace.py"
 rm -f "$CONFIG_DIR/ace_pre_multiace.cfg"
 log "  multiACE files removed"
-
-# --- Remove multiace config directory ---
+for init_path in /etc/init.d/S55multiace_v2d /etc/init.d/multiace_v2d; do
+    if [ -x "$init_path" ]; then
+        "$init_path" stop 2>/dev/null || true
+        rm -f "$init_path"
+        log "  Legacy V2 daemon init script removed: $init_path"
+    fi
+done
+if pgrep -f multiace_v2d.py >/dev/null 2>&1; then
+    pkill -TERM -f multiace_v2d.py 2>/dev/null || true
+    sleep 0.5
+    pkill -KILL -f multiace_v2d.py 2>/dev/null || true
+    log "  Running V2 daemon stopped"
+fi
+rm -f /usr/local/bin/multiace_v2d.py
+rm -f /tmp/multiace_v2.sock
+rm -f /var/run/multiace_v2d.pid
+WEB_INITD="/etc/init.d/S98multiace-web"
+if [ -x "$WEB_INITD" ]; then
+    "$WEB_INITD" stop 2>/dev/null || true
+    rm -f "$WEB_INITD"
+    log "  Web init script stopped and removed"
+fi
+if [ -f /tmp/multiace_web.pid ]; then
+    kill -TERM "$(cat /tmp/multiace_web.pid 2>/dev/null)" 2>/dev/null || true
+    rm -f /tmp/multiace_web.pid
+fi
+pkill -TERM -f "uvicorn main:app" 2>/dev/null || true
+WEB_NGINX="/etc/nginx/fluidd.d/multiace-web.conf"
+if [ -f "$WEB_NGINX" ]; then
+    rm -f "$WEB_NGINX"
+    log "  Nginx drop-in removed: $WEB_NGINX"
+    if command -v nginx >/dev/null 2>&1; then
+        nginx -s reload 2>/dev/null || true
+    fi
+fi
+if [ -d /home/lava/multiace_web ]; then
+    rm -rf /home/lava/multiace_web
+    log "  /home/lava/multiace_web removed"
+fi
+rm -f /home/lava/printer_data/logs/multiace_web.log
 if [ -d "$MULTIACE_DIR" ]; then
     rm -rf "$MULTIACE_DIR"
     log "  multiace config directory removed"
 fi
-
-# --- Remove include from printer.cfg ---
 if [ -f "$PRINTER_CFG" ]; then
     if grep -q "extended/ace.cfg" "$PRINTER_CFG"; then
         sed -i '/\[include extended\/ace.cfg\]/d' "$PRINTER_CFG"
-        # Remove blank line left behind
         sed -i '/^$/N;/^\n$/d' "$PRINTER_CFG"
         log "  Removed [include extended/ace.cfg] from printer.cfg"
     fi
 fi
-
-# --- Clear Python cache ---
 find "$EXTRAS_DIR/__pycache__" -name "ace*" -delete 2>/dev/null
 find "$EXTRAS_DIR/__pycache__" -name "filament_feed*" -delete 2>/dev/null
 find "$EXTRAS_DIR/__pycache__" -name "filament_switch_sensor*" -delete 2>/dev/null
 find "$KINEMATICS_DIR/__pycache__" -name "extruder*" -delete 2>/dev/null
 log "Python cache cleared"
-
 log ""
 log "=== Uninstall complete ==="
 log "Please reboot the printer to restore stock operation."

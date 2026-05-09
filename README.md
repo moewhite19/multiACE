@@ -1,8 +1,19 @@
 # mUlt1ACE
 
-Hotfix 1 out - solves FA problems with initial release.
+Hotfix 2 out - solves FA problems, Retract during swaps and BRAND NEW WEB UI
 
-## What's new in multiACE 0.91b "Vibrant Fungi"
+## 🌐 Brand-new Reactive Web UI
+
+A full real-time control panel for your multi-ACE setup.  https://printer-ip/multiace/
+
+- **Live multi-ACE dashboard** with an wiring overlay that shows  which slot is feeding which toolhead
+- **Editable command queue** - pause,  drop pending load / unload / swap jobs before they run
+- **Saveable filament loadouts** - snapshot the current spool configuration and re-apply it on the next print with a single click
+- Dryer Settings per ACE, Slot-Picker, und multilanguage UI (EN / DE, more to come)
+
+See it in action: https://youtu.be/JauKpkZ0omY
+
+## What's new in multiACE 0.92b "Vibrant Fungi"
 
 **This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be — but it recovers to a pause if it fails, so you can solve the problem and continue.**
 
@@ -271,8 +282,13 @@ Before installing multiACE, ensure the following:
    ```
    bash /tmp/multiace/install_multiace.sh
    ```
-4. Reboot the printer
-5. multiACE starts in **Multi mode** - all connected ACE units are detected automatically
+4. Install with WEB UI https://printer-ip/multiace/
+   ```
+   bash /tmp/multiace/install_multiace.sh --install-web
+   
+   ```
+5. Reboot the printer
+6. multiACE starts in **Multi mode** - all connected ACE units are detected automatically
 
 ### Manual Install
 

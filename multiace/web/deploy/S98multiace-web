@@ -1,0 +1,56 @@
+#!/bin/sh
+NAME="multiace-web"
+DAEMON_DIR="/home/lava/multiace_web/backend"
+DAEMON="/usr/bin/python3"
+ARGS="-m uvicorn main:app --host 127.0.0.1 --port 7126 --log-level warning"
+PIDFILE="/tmp/multiace_web.pid"
+LOGFILE="/home/lava/printer_data/logs/multiace_web.log"
+USER="lava"
+export MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
+export MULTIACE_CFG_PATH="${MULTIACE_CFG_PATH:-/home/lava/printer_data/config/extended/ace.cfg}"
+export MULTIACE_FRONTEND_DIR="${MULTIACE_FRONTEND_DIR:-/home/lava/multiace_web/frontend}"
+start() {
+    printf "Starting %s: " "$NAME"
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "already running"
+        return 1
+    fi
+    if [ ! -d "$DAEMON_DIR" ]; then
+        echo "FAIL ($DAEMON_DIR missing)"
+        return 1
+    fi
+    HOME_LAVA="/home/lava"
+    PATH_LAVA="${HOME_LAVA}/.local/bin:/usr/bin:/bin"
+    start-stop-daemon -S -b -m -p "$PIDFILE" -c "$USER" \
+        -x /bin/sh -- -c "
+            export HOME='$HOME_LAVA' USER='$USER' PATH='$PATH_LAVA';
+            cd '$DAEMON_DIR' || exit 1;
+            exec $DAEMON $ARGS >>'$LOGFILE' 2>&1
+        "
+    echo "OK"
+}
+stop() {
+    printf "Stopping %s: " "$NAME"
+    if [ -f "$PIDFILE" ]; then
+        start-stop-daemon -K -p "$PIDFILE" -s TERM
+        rm -f "$PIDFILE"
+        echo "OK"
+    else
+        echo "not running"
+    fi
+}
+restart() { stop; sleep 1; start; }
+case "$1" in
+    start)        start;;
+    stop)         stop;;
+    restart|reload) restart;;
+    status)
+        if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "$NAME running (pid $(cat "$PIDFILE"))"
+        else
+            echo "$NAME not running"
+        fi
+        ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1;;
+esac
+exit $?

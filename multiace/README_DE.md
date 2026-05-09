@@ -408,6 +408,8 @@ Wenn etwas durcheinander geraten ist (falsches Filament angezeigt, unerwartetes 
 
 ## Lizenz
 
+Copyright (c) postapocalyptic-diy/decay71 — [github.com/decay71/multiACE](https://github.com/decay71/multiACE)
+
 Dieses Projekt basiert auf [SnapACE](https://github.com/BlackFrogKok/SnapACE) und [Klipper](https://github.com/Klipper3d/klipper), beide lizenziert unter GPL-3.0. multiACE ist daher ebenfalls GPL-3.0.
 
 ## Hinweis zur KI-gestützten Entwicklung
