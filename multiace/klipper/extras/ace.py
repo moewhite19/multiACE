@@ -174,6 +174,7 @@ class MultiAce:
         self._fa_print_disable = _parse_idx_list('fa_print_disable')
         self._fa_load_disable = _parse_idx_list('fa_load_disable')
         self.fa_debug = config.getboolean('fa_debug', False)
+        self._enable_ace_v2 = config.getboolean('enable_ace_v2', False)
         self._feed_assist_index = -1
         self._request_id = 0
         self._serials = {}
@@ -316,7 +317,8 @@ class MultiAce:
         scan_start = time.monotonic()
         self._usb_stats['scans'] += 1
         ace_devices = []
-        for protocol_cls in KNOWN_PROTOCOLS:
+        active_protocols = KNOWN_PROTOCOLS if self._enable_ace_v2 else tuple(p for p in KNOWN_PROTOCOLS if p is not AceProtocolV2)
+        for protocol_cls in active_protocols:
             for path in protocol_cls.discover():
                 if path in ace_devices:
                     continue
