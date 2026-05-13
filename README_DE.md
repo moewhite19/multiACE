@@ -509,7 +509,7 @@ Lookup-Priorität: `[ace N] load_length_Y` → `[ace N] load_length` → `[ace] 
 
 - **Air Print Detection muss ausgeschaltet sein** - Wird im nächsten Hotfix behandelt.
 - **Auto-Loading im Display nicht deaktivieren** - Wirft Fehler.
-- **Purge-Finetuning** - Muss ich mir nochmal anschauen.
+- **Prime-Finetuning** - Muss ich mir nochmal anschauen.
 - **Unload vor Erstnutzung** - Nach einer frischen Installation oder beim Upgrade von einer vorherigen Version alle Toolheads entladen, bevor multiACE gestartet wird. Filament, das aus einer vorherigen Installation geladen ist, kann zu unerwartetem Verhalten führen, da multiACE keine Kenntnis vom vorherigen State hat. Vorher **ACEC__Unload_All** nutzen oder über das Display entladen.
 - **Unload All löscht Display-Info** - Nach **ACEC__Unload_All** werden manuell gesetzte Filamenttypen und Farben gelöscht. So gewollt - nach dem Entladen Filament-Info neu setzen und neu laden.
 
