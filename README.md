@@ -5,8 +5,10 @@
 ```
   Post-release issues (will be fixed in the next update)
 
+  Web UI works on paxx firmware only
+
   If a load or extrude fails during a color swap, use the default Display Load routine before continuing 
-  — not Manual Load.
+  - not Manual Load.
 ```
 
 Hotfix 2 out - solves FA problems, Retract during swaps and BRAND NEW WEB UI
