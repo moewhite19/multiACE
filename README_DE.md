@@ -5,6 +5,8 @@
 ```
  Post-release issues (werden mit dem nächsten Update behoben)
 
+ Web UI funktioniert nur auf paxx Firmware
+
  Wenn während eines Color-Swaps load oder extrude fehlschlägt, mit der Standard Display Laderoutine wiederholen.
   — nicht Manual Load.
 ```
