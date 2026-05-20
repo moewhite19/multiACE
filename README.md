@@ -2,33 +2,50 @@
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
-```
-  Post-release issues (will be fixed in the next update)
+## What's new in multiACE 0.97b "Kindred Allies"
 
-  Web UI works on paxx firmware only
+**ACE Pro 2 Support - up to 4 or mixed mode with ACE 1 Units / 4 Max not matter what type**
 
-  Priming will be fixed in the next version
+**PAXX Firmware with integrated mUlt1ACE** 
 
-  If a load or extrude fails during a color swap, use the default Display Load routine before continuing 
-  - not Manual Load.
-```
+Bin Files & Manuals @ 
 
-Hotfix 2 out - solves FA problems, Retract during swaps and BRAND NEW WEB UI
+https://postapocalyptic-diy.com/multiace
+
+Source: https://github.com/decay71/SnapmakerU1-Extended-Firmware  
+
+
+ACE Pro 2 Unit has to be on Firmware: 1.1.31 - please make sure you are able to update it.
+
+There is a update script available, but use at you own risk.
+
+https://gist.github.com/hakimio/39c71fa7174e699c6470b7c79323b189 Thanks to hakimio for making this possible.
+
+https://drive.google.com/file/d/1SUnXyiJ28iv01P94k4XbRpL4bjl3HbdU/view?usp=sharing
+
+**Online Updates (touch /oem/.debug needed)**
+
+**Post processing replaced by Web Preflight, just upload unprocessed GCode via Multiace-Web**
+
+**Matched to 1.3 Firmware routines**
+
+**Priming fixed**
+
 
 ## 🌐 Brand-new Reactive Web UI
 
-A full real-time control panel for your multi-ACE setup.  https://printer-ip/multiace/
+A full real-time control panel for your multi-ACE setup. https://printer-ip/multiace/
 
-- **Live multi-ACE dashboard** with an wiring overlay that shows  which slot is feeding which toolhead
-- **Editable command queue** - pause,  drop pending load / unload / swap jobs before they run
+- **Live multi-ACE dashboard** with a wiring overlay that shows which slot is feeding which toolhead
+- **Editable command queue** - pause, drop pending load / unload / swap jobs before they run
 - **Saveable filament loadouts** - snapshot the current spool configuration and re-apply it on the next print with a single click
-- Dryer Settings per ACE, Slot-Picker, und multilanguage UI (EN / DE, more to come)
+- Dryer settings per ACE, slot-picker, and multi-language UI (EN / DE, more to come)
 
 See it in action: https://youtu.be/9uLE1uydWmo
 
 ## What's new in multiACE 0.92b "Vibrant Fungi"
 
-**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be — but it recovers to a pause if it fails, so you can solve the problem and continue.**
+**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be - but it recovers to a pause if it fails, so you can solve the problem and continue.**
 
 **In-print color swaps up to 16 colors** - layer-boundary and mid-layer swaps during an active print are now stable enough for real prints rather than tests. The USB rewrite, the hardened load/unload path, and the FA/Load toggles together close the failure modes that previously made mid-print swaps fragile. 
 
@@ -36,7 +53,7 @@ See it in action: https://youtu.be/9uLE1uydWmo
 
 The real star is **`--layer`**: it detects whether every layer of the print stays within ≤4 colors, and if so, rewrites the gcode so swaps only ever happen at layer boundaries (Belady-optimal). That typically means an order of magnitude fewer swaps than naive assignment, and no mid-layer toolchange interruptions at all. Example: a 7-color Toad print from MakerWorld drops from 120 mid-print swaps to 3 layer-boundary swaps - at ~3:48 per swap, that's ~7.4 hours of print time back.
 
-**Auto-Load Spools** - The Post-Processing Script Loads spools across all Aces, and unloads where needed. Full Automatic.
+**Auto-Load Spools** - the post-processing script loads spools across all ACEs and unloads where needed. Fully automatic.
 
 **Rewritten USB engine** - cross-ACE toolchanges now run at stock speed *with* feed_assist on every head. The start-ACE-only restriction from 0.81b is gone: every connected ACE stays fully available for the duration of a print, and the reset-cycle edge cases that forced the 0.81b workaround are handled at the engine level.
 
@@ -50,7 +67,7 @@ Many color changes possible without U1 load / unload errors - all caught by the 
 
 
 
-## multiACE v0.90b "Vibrant Fungi"
+## multiACE 
 
 **Multi-ACE Pro support for Snapmaker U1 with Klipper**
 
@@ -60,7 +77,7 @@ Many color changes possible without U1 load / unload errors - all caught by the 
 
 ## What is multiACE?
 
-multiACE extends the [SnapACE](https://github.com/BlackFrogKok/SnapACE) software to support **multiple ACE Pro units** on a single Snapmaker U1 printer. Switch between ACE units to use different filament sets - for example, PLA on ACE 0 and PETG on ACE 1 - without physically swapping spools.
+multiACE supports **multiple ACE Pro / ACE Pro 2 units** on a single Snapmaker U1 printer. Switch between ACE units to use different filament sets - for example, PLA on ACE 0 and PETG on ACE 1 - without physically swapping spools.
 
 ## Typical Workflow
 
@@ -104,7 +121,7 @@ Use the Fluidd macros **ACEA__Switch_0..3** to switch between ACE units.
 - **Full Cross-ACE Feed_Assist** - All connected ACEs stay fully available during a print, feed_assist on every head, at stock toolchange speed (rewritten USB engine)
 - **Hardened Load / Unload** - Retract-recovery between extrude retries, pause-state snapshot before failure, safer resume path (pre-heat before travel, Z-hop before XY)
 - **FA / Load Toggle per ACE** - Disable feed_assist per-ACE and separately for print-time / load-time (`fa_print_disable` / `fa_load_disable`)
-- **Multi-ACE Support** - Connect up to 4 ACE Pro units simultaneously
+- **Multi-ACE Support** - Connect up to 4 ACE Pro / ACE Pro 2 units simultaneously
 - **ACE Switching** - Switch between ACE units via Fluidd macros or console
 - **Auto-Load** - Load all filled slots from selected ACE with one command
 - **Unload All** - Unload all toolheads, automatically switching to correct ACE for retract
@@ -112,14 +129,14 @@ Use the Fluidd macros **ACEA__Switch_0..3** to switch between ACE units.
 - **Manual Filament Support** - Works with both RFID and non-RFID spools
 - **Per-ACE Dryer Settings** - Configurable temperature and duration per ACE
 - **Normal Mode** - Switch back to stock Snapmaker operation at any time (only original files active, no ACE code running). Useful for filaments the ACE Pro cannot handle, such as TPU/TPE
-- **PAXX Firmware Compatible** - Works with PAXX firmware which provides display mirroring, allowing full load/unload control from your computer
+- **PAXX Firmware Compatible / Installer** - Works with PAXX firmware which provides display mirroring, allowing full load/unload control from your computer / Integrated PAXX Firmware 
 - **Clean Install/Uninstall** - One-command scripts with automatic backup and restore
 
 ## Requirements
 
 - Snapmaker U1 printer
-- Snapmaker firmware or PAXX firmware (tested with Snapmaker 1.2, 1.3 and PAXX 12-14, 12-15)
-- 1-4 Anycubic ACE Pro units connected via USB (tested with 3)
+- Snapmaker firmware or PAXX firmware (tested with Snapmaker  1.3 and PAXX 12-16, 12-17)
+- 1-4 Anycubic ACE Pro units connected via USB (tested with 3 and 2/2)
 - SSH access to the printer
 - Fluidd web interface
 - PTFE tube splitters (1-to-N per toolhead) - also allows switching to Normal Mode without recabling
@@ -127,7 +144,7 @@ Use the Fluidd macros **ACEA__Switch_0..3** to switch between ACE units.
 ## Q & A
 
 **Why go back to "poop" printing?**
-You don't have to. The main goal of this software is still clean filament handling, not color-swap printing. You don't need to produce 1000-color swap prints that poop out more filament than the part weighs (and mulitACE isn't designed for that) - but adding 1-12 extra colors on top of standard multi-material work is nice without much added waste. Or just adding Gold and Silver to your CMYKW Full Spectrum print.
+You don't have to. The main goal of this software is still clean filament handling, not color-swap printing. You don't need to produce 1000-color swap prints that poop out more filament than the part weighs (and multiACE isn't designed for that) - but adding 1-12 extra colors on top of standard multi-material work is nice without much added waste. Or just adding Gold and Silver to your CMYKW Full Spectrum print.
 
 **You still use tip forming - why not a cutter?**
 Tip forming is one of several ACE/U1 load-unload quirks. The first approach here is to solve them in software: sensor-reading retries, hardened recovery paths, changes to tip forming. If you want to build a physical cutter, I'll gladly build the routines for it - get in touch. And if something does fail, you can still walk to the printer, sort it out by hand, and hit resume.
@@ -137,7 +154,7 @@ It doesn't produce as much poop as a cutter, that's an advantage.
 No. Tip forming instead of a cutter, plus the bowden length, retries, puts a single color swap at up to 3-4 minutes. And since swaps don't happen at the park position, every change adds directly to print time. That said, stock Snapmaker per-layer color changes aren't any faster and require manual intervention every time - here it's at least automated. Park-position swaps are an option for the future.
 
 **Does it work with ACE 2, AnkerMake Vivid, or other changers?**
-No. But the ACE2 is reverse engineered now, I'll look into it. If you know another changer that is *proven* reliably better than the ACE Pro (and Klipper compatible), let me know - I've seen no trustworthy tests on the Vivid, and self-built machines are much pricier. multiACE aims for a solution anyone can set up.
+The Anycubic ACE 2 is supported as of 0.97b "Kindred Allies" - V1 (ACE Pro) and V2 (ACE 2) devices can run side by side. AnkerMake Vivid and other third-party changers are not supported. If you know another changer that is *proven* reliably better than the ACE Pro (and Klipper compatible), let me know - I've seen no trustworthy tests on the Vivid, and self-built machines are much pricier. multiACE aims for a solution anyone can set up.
 
 **Can I use multiACE with just one ACE Pro?**
 Yes. With a single ACE, multiACE still manages loads, unloads, and auto-feed cleanly and adds the hardened retry/resume path. `ace_device_count` defaults to `1`, no extra config needed.
@@ -173,6 +190,11 @@ The ACE Pro connects to the Snapmaker U1 via USB using a Molex Micro-Fit 3.0 con
 - 1x Molex Micro-Fit 3.0 Male 2x3 connector with pre-crimped wires - [AliExpress](https://de.aliexpress.com/item/1005010370245711.html)
 - 1x USB Type-A screw terminal adapter - [Amazon](https://www.amazon.com/dp/B0825TWRW7)
 
+**For ACE Pro 2** 1 Cable per ACE PRO 2, not daisy chain atm
+- 1x Molex Micro-Fit 3.0 Female 2x2 connector with pre-crimped wires - [AliExpress](https://de.aliexpress.com/item/1005010370245711.html)
+- 1x USB Type-A screw terminal adapter - [Amazon](https://www.amazon.com/dp/B0825TWRW7)
+
+
 **Pinout:**
 
 ```
@@ -185,15 +207,26 @@ ACE Pro Molex (2x3) - front view          Connection
                                           Pin 6 (VCC) -> NOT CONNECTED
 ```
 
-Refer to the [SnapAce pinout diagram](https://github.com/BlackFrogKok/SnapAce/blob/main/.github/img/pinout.png) for the exact Molex pin positions.
+```
+ACE Pro 2 Molex (2x2) - front view  mating side     Connection
+        ||  <- clip
+   ┌─────────┐
+   │ [2] [1] │                        Pin 1 (D-)  -> USB D-
+   │ [4] [3] │                        Pin 2 (D+)  -> USB D+
+   └─────────┘                        Pin 4 (GND) -> USB GND
+                                      Pin 3 (VCC) -> NOT CONNECTED
+```
 
-> **Important:** Do **not** connect Pin 6 (VCC) - the ACE Pro has its own power supply, and connecting VCC can damage your printer. Molex cables have no standardized color coding - always measure continuity before connecting.
+
+
+> **Important:** Do **not** connect Pin  (VCC) - the ACE Pro / 2 has its own power supply, and connecting VCC can damage your printer. Molex cables have no standardized color coding - always measure continuity before connecting.
 
 **Assembly:**
 1. Connect D-, D+, and GND from the Molex connector to D-, D+, and GND on the USB connector
 2. Twist D+ and D- wires together (2-3 twists per cm) to reduce electromagnetic interference
 3. If using a cut USB cable: wrap the exposed section with aluminum foil overlapping the cable shield
 4. Additional ACE units connect via the daisy chain cable (included with ACE Pro) - no additional USB cables needed for units 2+
+5. ACE Pro 2 one cable per ACE, Hub needed for more than 1 unit.
 
 ### ACE Connection Overview
 
@@ -224,7 +257,7 @@ ACE 2  Slot 3 ──────┘
 
 ### USB Connection
 
-Each ACE Pro connects to the Snapmaker U1 via USB (data only - each ACE has its own power supply). The ACE units are daisy-chained through the USB ports on the back of each ACE:
+Each ACE Pro 2 connects to the Snapmaker U1 via USB (data only - each ACE has its own power supply). The ACE units are daisy-chained through the USB ports on the back of each ACE:
 
 ```
 Snapmaker U1 USB Port
@@ -232,10 +265,15 @@ Snapmaker U1 USB Port
       ACE 0 ─── ACE 1 ─── ACE 2 ─── ACE 3
        (USB out → USB in, daisy chain)
 ```
+```
+Snapmaker U1 USB Port - HUB
+        │           │        │         │
+      ACE2 0      ACE2 1    ACE2 2     ACE2 3
+       (USB out → USB in, daisy chain)
+```
 
 > **Note:** VCC (5V) is not connected in the USB cable - only data lines. Each ACE Pro is powered by its own external power supply.
 
-multiACE detects ACE units automatically by USB vendor/product ID (28e9:018a). The order of the daisy chain determines the ACE index (0, 1, 2, 3).
 
 ### PTFE Tube Splitters
 
@@ -585,6 +623,17 @@ Also mention:
 - Whether your spools have RFID tags or not
 - Whether Developer Mode is enabled (`ls /oem/.debug`)
 
+## ℹ️ Before you install
+
+multiACE is a **community project** — built by hobbyists, for hobbyists. A quick orientation before SSH'ing into your printer:
+
+- multiACE needs **root access** to your Snapmaker U1 (`touch /oem/.debug` + reboot). With root enabled and custom code running, **this may affect your manufacturer warranty**. Snapmaker support generally cannot help with a modified printer.
+- The installer **modifies live Klipper files** under `/home/lava/klipper/klippy/extras/` and `/kinematics/` (filament feed, switch-sensor, extruder). Stock files are backed up as `*_pre_multiace.py` and the included `uninstall_multiace.sh` restores everything cleanly.
+- The project is **not endorsed or supported by Snapmaker, Anycubic, or the PAXX upstream maintainers**.
+- This software comes **without warranty** — formally covered by GPL-3.0 §15–17. Translation: I do my best, but the responsibility for using it stays with you.
+
+If any of that doesn't sit right, no worries — your printer keeps working with stock Snapmaker firmware as it is. If you're on board: have fun, and feedback / issues are always welcome.
+
 ## License
 
 This project is based on [SnapACE](https://github.com/BlackFrogKok/SnapACE) and [Klipper](https://github.com/Klipper3d/klipper), both licensed under GPL-3.0. multiACE is therefore also GPL-3.0.
@@ -596,10 +645,10 @@ All content is reviewed by humans before inclusion.
 
 ## Credits
 
+- **[ Hakimio](https://github.com/hakimio)** for ACE Pro 2 reverse engineering and support
 - **[SnapACE](https://github.com/BlackFrogKok/SnapACE)** by BlackFrogKok - Foundation for ACE Pro Klipper integration
 - **[DuckACE](https://github.com/utkabobr/DuckACE)** - ACE Pro reverse engineering and protocol documentation
 - **[ACE Research](https://github.com/printers-for-people/ACEResearch)** by Printers for People - ACE Pro protocol research
-- **[3D Print Forum](https://forum.drucktipps3d.de/)** - Tips, tricks, and community knowledge
 - **Snapmaker** - Printer hardware and firmware
 - **Anycubic** - ACE Pro filament changer
 - **Community** - Testing, feedback, and bug reports (hopefully!)

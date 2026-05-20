@@ -8,7 +8,7 @@ USB-Fehlverhalten in Verbindung mit dem internen Reset-Zyklus des ACE Pro konnte
 
 **Bonus:** Cross-ACE-Toolchanges zahlen den bisherigen ~5–10 Sekunden USB-Disconnect/Reconnect-Aufschlag nicht mehr.
 
-**Logging:** Dedizierte State-, USB- und FA-Debug-Logs stehen für Post-Mortem-Analyse bereit (`state_debug` / `usb_debug` / `fa_debug` in `[ace]`). Alle **default AUS** — bitte vor dem Melden eines Bugs aktivieren, damit die Logs das Problem mitschneiden.
+**Logging:** Dedizierte State-, USB- und FA-Debug-Logs stehen für Post-Mortem-Analyse bereit (`state_debug` / `usb_debug` / `fa_debug` in `[ace]`). Alle **default AUS** - bitte vor dem Melden eines Bugs aktivieren, damit die Logs das Problem mitschneiden.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
@@ -289,7 +289,7 @@ Alle Einstellungen sind in `config/extended/ace.cfg` unter dem `[ace]` Abschnitt
 # vorübergehend fehlende ACE führt nie zu Index-Verschiebungen.
 # ace_device_count: 3
 
-# Logging — default AUS für normalen Betrieb. Vor einem Bug-Report
+# Logging - default AUS für normalen Betrieb. Vor einem Bug-Report
 # bitte EINSCHALTEN: ohne diese Traces sind nondeterministische
 # Probleme nicht diagnostizierbar. Siehe Abschnitt `Debug logging`
 # weiter unten.
@@ -346,9 +346,9 @@ dryer_duration: 240     # Standard-Trocknungsdauer (Minuten)
 
 **ace_device_count** - Default `1`. **Erforderlich für Multi-ACE-Setups**: auskommentieren und auf physische Anzahl (2..8) setzen. Die 20s Startup-Wartezeit stellt sicher dass alle Geräte erkannt werden, auch wenn einige beim Klipper-Start gerade in einem USB-Reset-Zyklus sind. Ohne expliziten Wert riskieren Multi-ACE-Setups dass die canonical Mapping mit einem fehlenden Gerät gesperrt wird.
 
-**state_debug / usb_debug / fa_debug** - Default `false`. Für den normalen Betrieb aus lassen — Log-Dateien bleiben klein, `klippy.log` bleibt lesbar.
+**state_debug / usb_debug / fa_debug** - Default `false`. Für den normalen Betrieb aus lassen - Log-Dateien bleiben klein, `klippy.log` bleibt lesbar.
 
-> 🐞 **Bug melden?** Bitte alle drei Flags **vor** dem Reproduzieren des Problems einschalten und die frisch geschriebenen Logs (`klippy.log`, `multiace_state.log`, `multiace_usb.log`) an den Report hängen. Nondeterministische multiACE-Probleme (hängende Swaps, FA-Fehlverhalten, Errno-5-Kaskaden) lassen sich ohne diese Traces kaum diagnostizieren — ein Bug-Report ohne sie ist oft nicht bearbeitbar.
+> 🐞 **Bug melden?** Bitte alle drei Flags **vor** dem Reproduzieren des Problems einschalten und die frisch geschriebenen Logs (`klippy.log`, `multiace_state.log`, `multiace_usb.log`) an den Report hängen. Nondeterministische multiACE-Probleme (hängende Swaps, FA-Fehlverhalten, Errno-5-Kaskaden) lassen sich ohne diese Traces kaum diagnostizieren - ein Bug-Report ohne sie ist oft nicht bearbeitbar.
 
 - `state_debug` → schreibt `multiace_state.log` mit Audit-Einträgen pro Toolchange / Load / Swap
 - `usb_debug` → schreibt `multiace_usb.log` mit Scan- / Connect-Events der Serial-Schicht
@@ -408,7 +408,7 @@ Wenn etwas durcheinander geraten ist (falsches Filament angezeigt, unerwartetes 
 
 ## Lizenz
 
-Copyright (c) postapocalyptic-diy/decay71 — [github.com/decay71/multiACE](https://github.com/decay71/multiACE)
+Copyright (c) postapocalyptic-diy/decay71 - [github.com/decay71/multiACE](https://github.com/decay71/multiACE)
 
 Dieses Projekt basiert auf [SnapACE](https://github.com/BlackFrogKok/SnapACE) und [Klipper](https://github.com/Klipper3d/klipper), beide lizenziert unter GPL-3.0. multiACE ist daher ebenfalls GPL-3.0.
 

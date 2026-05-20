@@ -9,6 +9,7 @@ class AceProtocol(object):
 
     @classmethod
     def open_transport(cls, path, baud, **kwargs):
+
         import serial
         merged = dict(cls.SERIAL_KWARGS)
         merged.update(kwargs)

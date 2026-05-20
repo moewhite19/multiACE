@@ -9,7 +9,7 @@ for arg in "$@"; do
         --help|-h)
             echo "Usage: $0 [--install-web] [--keep-config]"
             echo "  --install-web   Also install multiACE Web (FastAPI + Vue UI)"
-            echo "  --keep-config   Don't overwrite existing ace.cfg (keep edits in place)"
+            echo "  --keep-config   Don't touch existing ace.cfg at all (default: merge user values from old cfg into new shipped defaults)"
             exit 0
             ;;
     esac
@@ -23,6 +23,19 @@ CONFIG_DIR="${HOME_DIR}/printer_data/config/extended"
 MULTIACE_DIR="${CONFIG_DIR}/multiace"
 PRINTER_CFG="${HOME_DIR}/printer_data/config/printer.cfg"
 LOGFILE="/tmp/multiace_install.log"
+IS_ROOT=0
+if [ "$(id -u)" = "0" ]; then
+    IS_ROOT=1
+fi
+run_as_lava() {
+    if [ "$IS_ROOT" = "1" ]; then
+        su - lava -c "$1"
+    elif [ "$(id -un 2>/dev/null)" = "lava" ]; then
+        sh -c "$1"
+    else
+        return 127
+    fi
+}
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [multiACE] $1" | tee -a "$LOGFILE"
 }
@@ -82,11 +95,37 @@ log "  Klipper extras installed"
 cp "$INSTALL_DIR/klipper/kinematics/extruder_ace.py" "$KINEMATICS_DIR/extruder_ace.py"
 chmod 644 "$KINEMATICS_DIR/extruder_ace.py"
 log "  Klipper kinematics installed"
-if [ "$KEEP_CONFIG" -eq 1 ] && [ -f "$CONFIG_DIR/ace.cfg" ]; then
+NEW_CFG="$INSTALL_DIR/config/extended/ace.cfg"
+ACTIVE_CFG="$CONFIG_DIR/ace.cfg"
+MERGER="$INSTALL_DIR/tools/merge_ace_cfg.py"
+ACE_CFG_MERGED=0
+if [ "$KEEP_CONFIG" -eq 1 ] && [ -f "$ACTIVE_CFG" ]; then
     log "  ace.cfg kept (--keep-config)"
+elif [ -f "$ACTIVE_CFG" ] && [ -f "$MERGER" ]; then
+    ts=$(date -u '+%Y%m%d-%H%M%S')
+    backup="$ACTIVE_CFG.bak.$ts"
+    cp "$ACTIVE_CFG" "$backup"
+    tmp_out="$ACTIVE_CFG.merged.$$"
+    if python3 "$MERGER" "$ACTIVE_CFG" "$NEW_CFG" "$tmp_out"; then
+        mv "$tmp_out" "$ACTIVE_CFG"
+        chmod 644 "$ACTIVE_CFG"
+        ACE_CFG_MERGED=1
+        log "  ace.cfg merged with shipped defaults (backup: $backup)"
+    else
+        rm -f "$tmp_out"
+        cp "$NEW_CFG" "$ACTIVE_CFG"
+        chmod 644 "$ACTIVE_CFG"
+        log "  ace.cfg merge failed - clean install (backup: $backup)"
+    fi
 else
-    cp "$INSTALL_DIR/config/extended/ace.cfg" "$CONFIG_DIR/ace.cfg"
-    chmod 644 "$CONFIG_DIR/ace.cfg"
+    if [ -f "$ACTIVE_CFG" ]; then
+        ts=$(date -u '+%Y%m%d-%H%M%S')
+        backup="$ACTIVE_CFG.bak.$ts"
+        cp "$ACTIVE_CFG" "$backup"
+        log "  existing ace.cfg backed up to $backup"
+    fi
+    cp "$NEW_CFG" "$ACTIVE_CFG"
+    chmod 644 "$ACTIVE_CFG"
     log "  ace.cfg installed"
 fi
 mkdir -p "$MULTIACE_DIR"
@@ -115,10 +154,45 @@ if [ -d "$INSTALL_DIR/tools" ]; then
     cp "$INSTALL_DIR/tools/"*.py "${HOME_DIR}/printer_data/config/tools/" 2>/dev/null || true
     log "  Tools installed"
 fi
-if [ -f "$INSTALL_DIR/tools/multiace_v2d.py" ]; then
-    cp "$INSTALL_DIR/tools/multiace_v2d.py" /usr/local/bin/multiace_v2d.py
-    chmod 755 /usr/local/bin/multiace_v2d.py
-    log "  V2 daemon installed at /usr/local/bin/multiace_v2d.py"
+if [ -f "$INSTALL_DIR/tools/multiace_update.sh" ]; then
+    mkdir -p "$MULTIACE_DIR/.."
+    cp "$INSTALL_DIR/tools/multiace_update.sh" "$HOME_DIR/multiace_update.sh"
+    chmod 755 "$HOME_DIR/multiace_update.sh"
+    chown lava:lava "$HOME_DIR/multiace_update.sh" 2>/dev/null || true
+    log "  Updater installed at $HOME_DIR/multiace_update.sh"
+    # PAXX-baked firmware ships a copy at /home/lava/multiace/tools/
+    # from the squashfs. Refresh it too so the Web backend's fallback
+    # path doesn't lag behind the canonical one.
+    if [ -d "$HOME_DIR/multiace/tools" ]; then
+        cp "$INSTALL_DIR/tools/multiace_update.sh" \
+            "$HOME_DIR/multiace/tools/multiace_update.sh" 2>/dev/null && {
+            chmod 755 "$HOME_DIR/multiace/tools/multiace_update.sh" 2>/dev/null || true
+            chown lava:lava "$HOME_DIR/multiace/tools/multiace_update.sh" 2>/dev/null || true
+            log "  Updater also refreshed at $HOME_DIR/multiace/tools/multiace_update.sh"
+        } || log "  WARN: could not refresh $HOME_DIR/multiace/tools/multiace_update.sh"
+    fi
+fi
+if [ -f "$INSTALL_DIR/tools/merge_ace_cfg.py" ]; then
+    MERGER_TARGET_DIR=/usr/local/bin
+    if ! mkdir -p "$MERGER_TARGET_DIR" 2>/dev/null \
+       || ! [ -w "$MERGER_TARGET_DIR" ]; then
+        MERGER_TARGET_DIR="${HOME_DIR}/bin"
+        mkdir -p "$MERGER_TARGET_DIR" 2>/dev/null || true
+    fi
+    if [ -d "$MERGER_TARGET_DIR" ] && [ -w "$MERGER_TARGET_DIR" ]; then
+        cp "$INSTALL_DIR/tools/merge_ace_cfg.py" \
+            "$MERGER_TARGET_DIR/multiace_merge_cfg.py"
+        chmod 755 "$MERGER_TARGET_DIR/multiace_merge_cfg.py"
+        log "  cfg merger installed at $MERGER_TARGET_DIR/multiace_merge_cfg.py"
+    else
+        log "  WARN: skipping merger install - no writable target"
+    fi
+fi
+if pgrep -f multiace_v2d.py >/dev/null 2>&1; then
+    pkill -TERM -f multiace_v2d.py 2>/dev/null || true
+    sleep 1
+    pkill -KILL -f multiace_v2d.py 2>/dev/null || true
+    log "  Stopped legacy multiace_v2d daemon"
 fi
 for old_init in /etc/init.d/S55multiace_v2d /etc/init.d/multiace_v2d; do
     if [ -e "$old_init" ]; then
@@ -127,6 +201,7 @@ for old_init in /etc/init.d/S55multiace_v2d /etc/init.d/multiace_v2d; do
         log "  Removed obsolete init script: $old_init"
     fi
 done
+rm -f /usr/local/bin/multiace_v2d.py 2>/dev/null || true
 rm -f /var/run/multiace_v2d.pid /tmp/multiace_v2.sock 2>/dev/null || true
 find "$EXTRAS_DIR/__pycache__" -name "ace*" -delete 2>/dev/null || true
 find "$EXTRAS_DIR/__pycache__" -name "filament_feed*" -delete 2>/dev/null || true
@@ -158,8 +233,8 @@ log "Mode switch script prepared"
 log "Activating ACE file swap..."
 bash "$MULTIACE_DIR/ace_mode_switch.sh" ace
 log "ACE files activated"
-rm -rf "$EXTRAS_DIR/__pycache__"
-rm -rf "$KINEMATICS_DIR/__pycache__"
+rm -rf "$EXTRAS_DIR/__pycache__" 2>/dev/null || true
+rm -rf "$KINEMATICS_DIR/__pycache__" 2>/dev/null || true
 log "Python cache deleted"
 log ""
 log "Verifying install integrity..."
@@ -199,9 +274,23 @@ verify_match "$INSTALL_DIR/klipper/kinematics/extruder_ace.py" \
              "$KINEMATICS_DIR/extruder_ace.py" "extruder_ace.py"
 if [ "$KEEP_CONFIG" -eq 1 ] && [ -f "$CONFIG_DIR/ace.cfg" ]; then
     log "  SKIP: ace.cfg (--keep-config, user edits preserved)"
+elif [ "$ACE_CFG_MERGED" -eq 1 ]; then
+    if [ -s "$CONFIG_DIR/ace.cfg" ]; then
+        log "  OK:   ace.cfg (merged with user values)"
+    else
+        log "  FAIL: ace.cfg merged but file is empty or missing"
+        VERIFY_FAILED=1
+    fi
 else
     verify_match "$INSTALL_DIR/config/extended/ace.cfg" \
                  "$CONFIG_DIR/ace.cfg" "ace.cfg"
+fi
+if [ -f "$INSTALL_DIR/tools/merge_ace_cfg.py" ] \
+   && [ -n "${MERGER_TARGET_DIR:-}" ] \
+   && [ -f "$MERGER_TARGET_DIR/multiace_merge_cfg.py" ]; then
+    verify_match "$INSTALL_DIR/tools/merge_ace_cfg.py" \
+                 "$MERGER_TARGET_DIR/multiace_merge_cfg.py" \
+                 "multiace_merge_cfg.py"
 fi
 verify_match "$EXTRAS_DIR/filament_feed_ace.py" \
              "$EXTRAS_DIR/filament_feed.py" "filament_feed.py (mode swap)"
@@ -244,7 +333,7 @@ if [ "$INSTALL_WEB" = "1" ]; then
     NGINX_DROPIN="/etc/nginx/fluidd.d/multiace-web.conf"
     INITD_SCRIPT="/etc/init.d/S98multiace-web"
     if [ ! -d "$WEB_SRC" ]; then
-        log "ERROR: $WEB_SRC not found — multiace/web/ missing in install bundle"
+        log "ERROR: $WEB_SRC not found - multiace/web/ missing in install bundle"
         exit 1
     fi
     mkdir -p "$WEB_DEST/backend" "$WEB_DEST/frontend" "$WEB_DEST/i18n"
@@ -256,39 +345,105 @@ if [ "$INSTALL_WEB" = "1" ]; then
     rm -rf "$WEB_DEST/backend/__pycache__"
     chown -R lava:lava "$WEB_DEST"
     log "  Copied web/ to $WEB_DEST (incl. i18n catalogs)"
-    if su - lava -c "command -v pip3 >/dev/null"; then
+    if run_as_lava "command -v pip3 >/dev/null" 2>/dev/null; then
         log "  Installing Python deps (fastapi, uvicorn, httpx) for user lava ..."
-        su - lava -c "pip3 install --user --upgrade -r '$WEB_DEST/backend/requirements.txt'" \
-            >>"$LOGFILE" 2>&1 || log "  WARN: pip install reported errors — see $LOGFILE"
+        run_as_lava "pip3 install --user --upgrade -r '$WEB_DEST/backend/requirements.txt'" \
+            >>"$LOGFILE" 2>&1 || log "  WARN: pip install reported errors - see $LOGFILE"
     else
-        log "  WARN: pip3 nicht gefunden — install backend dependencies manually"
+        log "  WARN: pip3 not reachable in lava context - install backend dependencies manually"
     fi
     mkdir -p "${HOME_DIR}/printer_data/logs"
     touch    "${HOME_DIR}/printer_data/logs/multiace_web.log"
-    chown lava:lava "${HOME_DIR}/printer_data/logs/multiace_web.log"
-    if [ -d /etc/nginx/fluidd.d ]; then
-        cp "$WEB_SRC/deploy/multiace-web.nginx.conf" "$NGINX_DROPIN"
-        log "  Installed nginx drop-in: $NGINX_DROPIN"
-        if nginx -t >>"$LOGFILE" 2>&1; then
-            nginx -s reload >>"$LOGFILE" 2>&1 && log "  nginx reloaded"
+    chown lava:lava "${HOME_DIR}/printer_data/logs/multiace_web.log" 2>/dev/null || true
+    if [ "$IS_ROOT" = "1" ]; then
+        if [ -d /etc/nginx/fluidd.d ]; then
+            cp "$WEB_SRC/deploy/multiace-web.nginx.conf" "$NGINX_DROPIN"
+            log "  Installed nginx drop-in: $NGINX_DROPIN"
+            if nginx -t >>"$LOGFILE" 2>&1; then
+                nginx -s reload >>"$LOGFILE" 2>&1 && log "  nginx reloaded"
+            else
+                log "  WARN: nginx -t failed - drop-in installed but not active"
+            fi
         else
-            log "  WARN: nginx -t failed — drop-in installiert aber nicht aktiv"
+            log "  WARN: /etc/nginx/fluidd.d not present - nginx drop-in skipped"
         fi
     else
-        log "  WARN: /etc/nginx/fluidd.d nicht vorhanden — nginx-Config nicht installiert"
+        log "  Skipped nginx drop-in update (non-root context - already in place from first install)"
     fi
-    cp "$WEB_SRC/deploy/S98multiace-web" "$INITD_SCRIPT"
-    sed -i 's/\r$//' "$INITD_SCRIPT"
-    chmod +x "$INITD_SCRIPT"
-    log "  Installed init script: $INITD_SCRIPT"
-    "$INITD_SCRIPT" stop  >>"$LOGFILE" 2>&1 || true
-    "$INITD_SCRIPT" start >>"$LOGFILE" 2>&1 || log "  WARN: start fehlgeschlagen — see $LOGFILE"
-    sleep 1
-    if "$INITD_SCRIPT" status | grep -q "running"; then
-        log "  multiACE Web running"
-        log "  -> http://<printer-ip>/multiace/"
+    if [ "$IS_ROOT" = "1" ]; then
+        cp "$WEB_SRC/deploy/S98multiace-web" "$INITD_SCRIPT"
+        sed -i 's/\r$//' "$INITD_SCRIPT"
+        chmod +x "$INITD_SCRIPT"
+        log "  Installed init script: $INITD_SCRIPT"
     else
-        log "  WARN: multiACE Web not running — check $LOGFILE and $WEB_DEST/backend/"
+        log "  Skipped init script update (non-root context)"
+    fi
+    if [ "$IS_ROOT" = "1" ]; then
+        SUDOERS_SRC="$WEB_SRC/deploy/multiace-debug.sudoers"
+        SUDOERS_DST="/etc/sudoers.d/multiace-debug"
+        if [ -f "$SUDOERS_SRC" ] && [ -d "/etc/sudoers.d" ]; then
+            TMP_SUDO="$(mktemp)"
+            cp "$SUDOERS_SRC" "$TMP_SUDO"
+            sed -i 's/\r$//' "$TMP_SUDO"
+            if command -v visudo >/dev/null 2>&1 && ! visudo -cf "$TMP_SUDO" >>"$LOGFILE" 2>&1; then
+                log "  WARN: visudo refused multiace-debug sudoers drop-in - skipping install"
+                rm -f "$TMP_SUDO"
+            else
+                install -m 0440 -o root -g root "$TMP_SUDO" "$SUDOERS_DST" 2>>"$LOGFILE" \
+                    || cp "$TMP_SUDO" "$SUDOERS_DST"
+                chmod 0440 "$SUDOERS_DST" 2>/dev/null || true
+                rm -f "$TMP_SUDO"
+                log "  Installed sudoers drop-in: $SUDOERS_DST"
+            fi
+        else
+            log "  WARN: sudoers.d not present or template missing - Web debug-mode toggle won't work"
+        fi
+    else
+        log "  Skipped sudoers drop-in update (non-root context)"
+    fi
+    if [ "$IS_ROOT" = "1" ] && [ -x "$INITD_SCRIPT" ]; then
+        "$INITD_SCRIPT" stop  >>"$LOGFILE" 2>&1 || true
+        "$INITD_SCRIPT" start >>"$LOGFILE" 2>&1 || log "  WARN: start failed - see $LOGFILE"
+        sleep 1
+        if "$INITD_SCRIPT" status 2>/dev/null | grep -q "running"; then
+            log "  multiACE Web running"
+            log "  -> http://<printer-ip>/multiace/"
+        else
+            log "  WARN: multiACE Web not running - check $LOGFILE and $WEB_DEST/backend/"
+        fi
+    else
+        if pgrep -u lava -f 'uvicorn.*main:app' >/dev/null 2>&1; then
+            pkill -TERM -u lava -f 'uvicorn.*main:app' 2>/dev/null || true
+            log "  Sent SIGTERM to running uvicorn (restart needed for new code)"
+        fi
+        log "  Skipped service restart (non-root context) - reboot or use Web Restart"
+    fi
+fi
+DATA_DIR="${HOME_DIR}/printer_data"
+if [ -d "$DATA_DIR" ]; then
+    DATA_OWNER="$(stat -c '%U:%G' "$DATA_DIR" 2>/dev/null)"
+    if [ -n "$DATA_OWNER" ] && [ "$DATA_OWNER" != "root:root" ]; then
+        log "Restoring ownership ($DATA_OWNER) on $CONFIG_DIR ..."
+        chown -R "$DATA_OWNER" "$CONFIG_DIR" 2>>"$LOGFILE" || true
+        if [ -d "$EXTRAS_DIR" ]; then
+            chown "$DATA_OWNER" "$EXTRAS_DIR" 2>>"$LOGFILE" || true
+            chown "$DATA_OWNER" "$EXTRAS_DIR"/ace*.py \
+                "$EXTRAS_DIR"/filament_feed_ace.py \
+                "$EXTRAS_DIR"/filament_switch_sensor_ace.py \
+                2>>"$LOGFILE" || true
+        fi
+        if [ -d "$KINEMATICS_DIR" ]; then
+            chown "$DATA_OWNER" "$KINEMATICS_DIR" 2>>"$LOGFILE" || true
+            chown "$DATA_OWNER" "$KINEMATICS_DIR"/extruder_ace.py \
+                2>>"$LOGFILE" || true
+        fi
+        if [ -f "${HOME_DIR}/multiace_update.sh" ]; then
+            chown "$DATA_OWNER" "${HOME_DIR}/multiace_update.sh" \
+                2>>"$LOGFILE" || true
+        fi
+        if [ -f /tmp/multiace_web.pid ]; then
+            chown "$DATA_OWNER" /tmp/multiace_web.pid 2>>"$LOGFILE" || true
+        fi
     fi
 fi
 log ""

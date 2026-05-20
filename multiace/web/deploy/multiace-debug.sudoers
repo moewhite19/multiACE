@@ -1,0 +1,9 @@
+# multiACE Web - allow the lava user to toggle /oem/.debug from the
+# Update card. The flag controls whether S01aoverlayfs wipes
+# /oem/overlay/upper at boot; without persistence the online updater
+# can't actually keep installs.
+#
+# Surface is exactly two commands on exactly one path. No wildcards.
+# Install path: /etc/sudoers.d/multiace-debug, mode 0440, owned by root.
+
+lava ALL=(root) NOPASSWD: /usr/bin/touch /oem/.debug, /bin/rm -f /oem/.debug

@@ -8,7 +8,7 @@ USB-level misbehaviour related to the ACE Pro's internal reset cycle could cause
 
 **Bonus:** cross-ACE toolchanges no longer pay the ~5–10 second USB disconnect/reconnect cost.
 
-**Logging:** dedicated state, USB, and FA debug logs are available for post-mortem analysis (`state_debug` / `usb_debug` / `fa_debug` in `[ace]`). All default OFF — please enable before reporting bugs so logs capture the issue.
+**Logging:** dedicated state, USB, and FA debug logs are available for post-mortem analysis (`state_debug` / `usb_debug` / `fa_debug` in `[ace]`). All default OFF - please enable before reporting bugs so logs capture the issue.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
@@ -289,7 +289,7 @@ All settings are in `config/extended/ace.cfg` under the `[ace]` section:
 # cycle never causes index drift.
 # ace_device_count: 3
 
-# Logging — default OFF for normal operation. ENABLE before reporting
+# Logging - default OFF for normal operation. ENABLE before reporting
 # a bug: without these traces, nondeterministic issues cannot be
 # diagnosed. See the `Debug logging` section below.
 # log_dir: /home/lava/printer_data/logs   # default - usually fine
@@ -345,9 +345,9 @@ dryer_duration: 240     # Default drying duration (minutes)
 
 **ace_device_count** - Default `1`. **Required for multi-ACE setups**: uncomment and set to your physical ACE count (2..8). The 20s startup wait ensures all devices are detected even if some happen to be mid USB reset cycle when Klipper boots. Without an explicit count, multi-ACE setups risk locking the canonical mapping with one device missing.
 
-**state_debug / usb_debug / fa_debug** - Default `false`. Keep off for normal operation — log files stay small and `klippy.log` stays readable.
+**state_debug / usb_debug / fa_debug** - Default `false`. Keep off for normal operation - log files stay small and `klippy.log` stays readable.
 
-> 🐞 **Reporting a bug?** Please enable all three flags **before** reproducing the issue, then attach the freshly generated logs (`klippy.log`, `multiace_state.log`, `multiace_usb.log`) to your report. Nondeterministic multiACE issues (stuck swaps, FA misbehavior, Errno 5 cascades) are near-impossible to diagnose without these traces — a bug report without them often cannot be actioned.
+> 🐞 **Reporting a bug?** Please enable all three flags **before** reproducing the issue, then attach the freshly generated logs (`klippy.log`, `multiace_state.log`, `multiace_usb.log`) to your report. Nondeterministic multiACE issues (stuck swaps, FA misbehavior, Errno 5 cascades) are near-impossible to diagnose without these traces - a bug report without them often cannot be actioned.
 
 - `state_debug` → writes `multiace_state.log` with per-toolchange / per-load / per-swap audit entries
 - `usb_debug` → writes `multiace_usb.log` with per-scan / per-connect serial-layer events
@@ -407,7 +407,7 @@ If things get out of sync (wrong filament displayed, unexpected behavior), reset
 
 ## License
 
-Copyright (c) postapocalyptic-diy/decay71 — [github.com/decay71/multiACE](https://github.com/decay71/multiACE)
+Copyright (c) postapocalyptic-diy/decay71 - [github.com/decay71/multiACE](https://github.com/decay71/multiACE)
 
 This project is based on [SnapACE](https://github.com/BlackFrogKok/SnapACE) and [Klipper](https://github.com/Klipper3d/klipper), both licensed under GPL-3.0. multiACE is therefore also GPL-3.0.
 

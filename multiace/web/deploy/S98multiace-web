@@ -1,4 +1,14 @@
 #!/bin/sh
+#
+# multiACE Web init script (busybox init / Snapmaker U1).
+#
+# Caveat: the U1 rcS expands /etc/init.d/S??* BEFORE overlayfs mounts.
+# A post-install-time copy of this file lands in the overlay and is
+# therefore invisible at next boot. Two ways around that:
+#   1) bake the file into the firmware image (paxx-style overlay)
+#   2) start it manually after install - install_multiace.sh does that.
+# Either way the same script controls the lifecycle.
+
 NAME="multiace-web"
 DAEMON_DIR="/home/lava/multiace_web/backend"
 DAEMON="/usr/bin/python3"
@@ -6,9 +16,11 @@ ARGS="-m uvicorn main:app --host 127.0.0.1 --port 7126 --log-level warning"
 PIDFILE="/tmp/multiace_web.pid"
 LOGFILE="/home/lava/printer_data/logs/multiace_web.log"
 USER="lava"
+
 export MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
 export MULTIACE_CFG_PATH="${MULTIACE_CFG_PATH:-/home/lava/printer_data/config/extended/ace.cfg}"
 export MULTIACE_FRONTEND_DIR="${MULTIACE_FRONTEND_DIR:-/home/lava/multiace_web/frontend}"
+
 start() {
     printf "Starting %s: " "$NAME"
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -19,6 +31,23 @@ start() {
         echo "FAIL ($DAEMON_DIR missing)"
         return 1
     fi
+    # Wait for Moonraker to be reachable before launching uvicorn.
+    # Without this the backend starts on a fresh boot before Klipper /
+    # Moonraker have come up, the initial WS handshake fails, and the
+    # FastAPI app sometimes settles into a half-broken state where the
+    # frontend renders empty until a manual restart. Up to ~30s.
+    n=0
+    while [ "$n" -lt 30 ]; do
+        if wget -q --spider --timeout=2 \
+                "${MOONRAKER_URL%/}/server/info" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+        n=$((n + 1))
+    done
+    # busybox start-stop-daemon -c USER does setuid only, not a login -
+    # HOME stays as root's, so Python can't find lava's --user site
+    # (where uvicorn/fastapi/httpx live). Set HOME/USER/PATH explicitly.
     HOME_LAVA="/home/lava"
     PATH_LAVA="${HOME_LAVA}/.local/bin:/usr/bin:/bin"
     start-stop-daemon -S -b -m -p "$PIDFILE" -c "$USER" \
@@ -27,8 +56,9 @@ start() {
             cd '$DAEMON_DIR' || exit 1;
             exec $DAEMON $ARGS >>'$LOGFILE' 2>&1
         "
-    echo "OK"
+    echo "OK (waited ${n}s for Moonraker)"
 }
+
 stop() {
     printf "Stopping %s: " "$NAME"
     if [ -f "$PIDFILE" ]; then
@@ -39,7 +69,9 @@ stop() {
         echo "not running"
     fi
 }
+
 restart() { stop; sleep 1; start; }
+
 case "$1" in
     start)        start;;
     stop)         stop;;
@@ -53,4 +85,5 @@ case "$1" in
         ;;
     *) echo "Usage: $0 {start|stop|restart|status}"; exit 1;;
 esac
+
 exit $?

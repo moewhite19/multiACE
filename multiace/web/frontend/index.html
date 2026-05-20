@@ -12,11 +12,18 @@
 <body>
 <div id="app">
   <header>
-    <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE <small>{{ version }}</small></h1>
+    <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE
+      <small>{{ version }}</small>
+      <small v-if="printerName" class="printer-tag"
+             :title="'Firmware ' + printerFw">· {{ printerName }}</small>
+    </h1>
     <nav>
       <button v-if="state.mode !== 'normal'"
               :class="{active: tab==='dashboard'}" @click="tab='dashboard'">{{ t('ui.tabs.dashboard') }}</button>
       <button :class="{active: tab==='config'}" @click="tab='config'">{{ t('ui.tabs.config') }}</button>
+      <button v-for="p in plugins.items" :key="p.name"
+              :class="{active: tab===('plugin:'+p.name)}"
+              @click="tab='plugin:'+p.name">{{ p.label }}</button>
     </nav>
     <input ref="uploadInput" type="file" accept=".gcode,.gco,.g"
            class="upload-input" @change="onUploadGcode($event.target.files)">
@@ -31,12 +38,9 @@
     </select>
     <span class="conn" :class="connClass">{{ connText }}</span>
   </header>
-
   <main>
-    
     <section v-show="tab==='dashboard' && state.mode !== 'normal'">
       <p v-if="loadError" class="error">{{ loadError }}</p>
-
       <div class="status-row">
         <span class="pill" :class="'state-' + (state.printer_state || 'idle')">
           {{ t('ui.dashboard.status_pill') }}: <strong>{{ state.printer_state || '–' }}</strong>
@@ -50,7 +54,6 @@
           {{ screenPopout ? t('ui.dashboard.hide_display') : t('ui.dashboard.show_display') }}
         </button>
       </div>
-
       <div ref="wiringContainerEl" class="ace-th-wrap">
         <svg v-if="wiringPaths.length"
              class="wiring-overlay"
@@ -64,7 +67,6 @@
                 fill="none"
                 stroke-linecap="round"></path>
         </svg>
-
         <h3>{{ t('ui.dashboard.aces') }}</h3>
         <p v-if="state.aces.length === 0 && !loadError" class="muted">
           {{ t('ui.dashboard.no_aces') }}
@@ -80,6 +82,9 @@
               </span>
               <span class="ace-status">
                 <span v-if="ace.temp != null">{{ ace.temp }} °C</span>
+                <span v-if="typeof ace.humidity === 'number'" class="ace-humidity">
+                  · {{ Math.round(ace.humidity) }} %rH
+                </span>
                 <span v-if="ace.status" class="ace-state-text"> · {{ ace.status }}</span>
               </span>
               <span class="ace-card-actions" @click.stop>
@@ -90,7 +95,6 @@
                 <button class="ace-load-all" @click.stop="loadAll(ace.idx)">{{ t('ui.dashboard.load_all') }}</button>
               </span>
             </h2>
-
             <div class="slot-row" @click.stop>
               <div v-for="slot in ace.slots"
                    :key="slot.idx"
@@ -114,7 +118,6 @@
                 </button>
               </div>
             </div>
-
             <transition name="dry-fade">
               <div v-if="dryOpenAce === ace.idx" class="dry-panel" @click.stop>
                 <div class="dry-row">
@@ -139,7 +142,6 @@
             </transition>
           </article>
         </div>
-
         <h3 class="th-section-head">
           <span>{{ t('ui.dashboard.toolheads') }}</span>
           <button class="unload-all-btn" @click="run('ACE_UNLOAD_ALL_HEADS')">{{ t('ui.dashboard.unload_all') }}</button>
@@ -178,11 +180,10 @@
           </article>
         </div>
       </div>
-
       <h3>{{ t('ui.dashboard.snapshots') }}</h3>
       <div class="snapshot-row">
         <select v-model="selectedSnapshot">
-          <option value="">— {{ t('ui.dashboard.snapshot_select_or_new') }} —</option>
+          <option value="">- {{ t('ui.dashboard.snapshot_select_or_new') }} -</option>
           <option v-for="s in snapshots" :key="s.name" :value="s.name">
             {{ s.name }}{{ s.saved ? ' · ' + s.saved.slice(0,16) : '' }}
           </option>
@@ -201,15 +202,12 @@
           </span>
         </div>
       </div>
-
       <transition name="macrolog-fade">
         <pre v-if="macroLog" class="macro-log">{{ macroLog }}</pre>
       </transition>
     </section>
-
     <section v-show="tab==='config'">
       <p v-if="configLoadError" class="error">{{ configLoadError }}</p>
-
       <h3>{{ t('ui.config.mode') }}</h3>
       <div class="mode-row">
         <button v-for="m in ['normal','multi']"
@@ -220,7 +218,6 @@
           {{ t('ui.config.mode_change_pending') }}
         </span>
       </div>
-
       <h3>{{ t('ui.config.parameters') }}</h3>
       <div class="config-form">
         <div class="config-row">
@@ -246,12 +243,18 @@
           <input type="number" v-model.number="configForm.retract_length" min="0" max="5000">
         </div>
         <div class="config-row">
+          <label>{{ t('ui.config.swap_retract_length') }}</label>
+          <input type="number" v-model.number="configForm.swap_retract_length"
+                 min="0" max="2000" step="1" placeholder="900">
+          <span class="muted small">{{ t('ui.config.swap_retract_length_hint') }}</span>
+        </div>
+        <div class="config-row">
           <label>{{ t('ui.config.dryer_temp') }}</label>
-          <input type="number" v-model.number="configForm.dryer_temp" min="0" max="80" step="1" placeholder="—">
+          <input type="number" v-model.number="configForm.dryer_temp" min="0" max="80" step="1" placeholder="-">
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.dryer_duration') }}</label>
-          <input type="number" v-model.number="configForm.dryer_duration" min="0" max="600" step="5" placeholder="—">
+          <input type="number" v-model.number="configForm.dryer_duration" min="0" max="600" step="5" placeholder="-">
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.display_index_base') }}</label>
@@ -262,15 +265,15 @@
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.load_retry') }}</label>
-          <input type="number" v-model.number="configForm.load_retry" min="0" max="20" step="1" placeholder="—">
+          <input type="number" v-model.number="configForm.load_retry" min="0" max="20" step="1" placeholder="-">
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.extrusion_retry') }}</label>
-          <input type="number" v-model.number="configForm.extrusion_retry" min="0" max="20" step="1" placeholder="—">
+          <input type="number" v-model.number="configForm.extrusion_retry" min="0" max="20" step="1" placeholder="-">
         </div>
         <div class="config-row">
           <label>{{ t('ui.config.unload_retry') }}</label>
-          <input type="number" v-model.number="configForm.unload_retry" min="0" max="20" step="1" placeholder="—">
+          <input type="number" v-model.number="configForm.unload_retry" min="0" max="20" step="1" placeholder="-">
         </div>
         <fieldset>
           <legend>{{ t('ui.config.debug_logs') }}</legend>
@@ -279,7 +282,6 @@
           <label><input type="checkbox" v-model="configForm.fa_debug"> fa_debug</label>
         </fieldset>
       </div>
-
       <h3>{{ t('ui.config.per_ace') }}</h3>
       <div class="per-ace-grid">
         <div class="per-ace-card" v-for="i in configForm.ace_device_count" :key="i-1">
@@ -287,35 +289,37 @@
           <div class="per-ace-row">
             <label>{{ t('ui.config.dryer_temp_override') }}
               <input type="number" v-model.number="configForm.perAce[i-1].dryer_temp"
-                     min="0" max="80" step="1" placeholder="—"> °C
+                     min="0" max="80" step="1" placeholder="-"> °C
             </label>
           </div>
           <div class="per-ace-row">
             <label>{{ t('ui.config.dryer_duration_override') }}
               <input type="number" v-model.number="configForm.perAce[i-1].dryer_duration"
-                     min="0" max="600" step="5" placeholder="—"> min
+                     min="0" max="600" step="5" placeholder="-"> min
             </label>
           </div>
           <div class="per-ace-row">
-            <label><input type="checkbox" v-model="configForm.perAce[i-1].fa_print_disable">
-              {{ t('ui.config.fa_print_disable') }}
+            <label>{{ t('ui.config.feed_speed') }}
+              <input type="number" v-model.number="configForm.perAce[i-1].feed_speed"
+                     min="1" max="500" step="1" placeholder="-"> mm/s
             </label>
           </div>
           <div class="per-ace-row">
-            <label><input type="checkbox" v-model="configForm.perAce[i-1].fa_load_disable">
-              {{ t('ui.config.fa_load_disable') }}
+            <label>{{ t('ui.config.retract_speed') }}
+              <input type="number" v-model.number="configForm.perAce[i-1].retract_speed"
+                     min="1" max="500" step="1" placeholder="-"> mm/s
             </label>
           </div>
           <div class="per-ace-row">
             <label>{{ t('ui.config.load_length') }}
               <input type="number" v-model.number="configForm.perAce[i-1].load_length"
-                     min="0" max="5000" step="10" placeholder="—"> mm
+                     min="0" max="5000" step="10" placeholder="-"> mm
             </label>
           </div>
           <div class="per-ace-row">
             <label>{{ t('ui.config.retract_length') }}
               <input type="number" v-model.number="configForm.perAce[i-1].retract_length"
-                     min="0" max="5000" step="10" placeholder="—"> mm
+                     min="0" max="5000" step="10" placeholder="-"> mm
             </label>
           </div>
           <details class="per-slot-block">
@@ -332,22 +336,20 @@
                 <tr v-for="s in 4" :key="s-1">
                   <td>{{ dispIdx(s-1) }}</td>
                   <td><input type="number" v-model.number="configForm.perAce[i-1].perSlot[s-1].load_length"
-                             min="0" max="5000" step="10" placeholder="—"></td>
+                             min="0" max="5000" step="10" placeholder="-"></td>
                   <td><input type="number" v-model.number="configForm.perAce[i-1].perSlot[s-1].retract_length"
-                             min="0" max="5000" step="10" placeholder="—"></td>
+                             min="0" max="5000" step="10" placeholder="-"></td>
                 </tr>
               </tbody>
             </table>
           </details>
         </div>
       </div>
-
       <div class="row">
         <button @click="loadConfig">{{ t('ui.common.reload') }}</button>
         <button @click="saveConfigForm" class="primary">{{ t('ui.config.save_restart') }}</button>
         <button @click="showRawConfig = !showRawConfig">{{ showRawConfig ? t('ui.config.form_view') : t('ui.config.raw_view') }}</button>
       </div>
-
       <details v-if="showRawConfig">
         <summary>{{ t('ui.config.raw_editor') }}</summary>
         <textarea v-model="config.content" rows="30" spellcheck="false"></textarea>
@@ -356,12 +358,65 @@
           <button @click="saveConfigRaw" class="primary">{{ t('ui.config.raw_save') }}</button>
         </div>
       </details>
-
+      <h3>{{ t('ui.config.update_title') }}</h3>
+      <p class="muted small">{{ t('ui.config.update_intro') }}</p>
+      <div class="update-card">
+        <div class="update-row debug-row"
+             :class="debugState.enabled ? 'debug-on' : 'debug-off'">
+          <span>
+            <strong>{{ t('ui.config.debug_mode') }}:</strong>
+            {{ debugState.enabled
+               ? t('ui.config.debug_on')
+               : t('ui.config.debug_off') }}
+          </span>
+        </div>
+        <div v-if="!debugState.enabled" class="debug-instruction">
+          <p class="muted small">{{ t('ui.config.debug_explain') }}</p>
+          <pre class="debug-cmd">ssh root@&lt;printer-ip&gt;
+touch /oem/.debug
+reboot</pre>
+        </div>
+        <div class="update-row">
+          <span class="muted">{{ t('ui.config.update_current') }}:</span>
+          <strong>{{ updateState.current || '?' }}</strong>
+        </div>
+        <div class="update-row">
+          <span class="muted">{{ t('ui.config.update_latest') }}:</span>
+          <strong v-if="updateState.latest">{{ updateState.latest }}</strong>
+          <em v-else class="muted">{{ t('ui.config.update_not_checked') }}</em>
+        </div>
+        <div class="update-row" v-if="updateState.statusText">
+          <em class="muted small">{{ updateState.statusText }}</em>
+        </div>
+        <div class="update-actions">
+          <button @click="updateCheck()" :disabled="updateState.busy">
+            {{ updateState.busy && updateState.busy === 'check'
+               ? t('ui.config.update_checking')
+               : t('ui.config.update_check_btn') }}
+          </button>
+          <button @click="updateApply()"
+                  :disabled="updateState.busy || !debugState.enabled"
+                  :title="!debugState.enabled
+                          ? t('ui.config.debug_apply_locked_tip')
+                          : ''"
+                  class="primary" v-if="updateState.canApply">
+            {{ updateState.busy === 'apply'
+               ? t('ui.config.update_applying')
+               : t('ui.config.update_apply_btn') }}
+          </button>
+        </div>
+        <pre v-if="updateState.log" class="update-log">{{ updateState.log }}</pre>
+      </div>
       <pre v-if="configLog">{{ configLog }}</pre>
     </section>
-
+    <section v-for="p in plugins.items" :key="'sec-'+p.name"
+             v-show="tab===('plugin:'+p.name)"
+             class="plugin-section">
+      <iframe :src="pluginIframeSrc(p)"
+              :title="p.label"
+              class="plugin-iframe"></iframe>
+    </section>
   </main>
-
   <div v-if="screenPopout && screenAvailable" class="screen-popout" :style="popoutStyle">
     <div class="screen-popout-head"
          @pointerdown="popoutDragStart"
@@ -380,7 +435,6 @@
             @pointercancel.prevent="screenUp"
             @contextmenu.prevent></canvas>
   </div>
-
   <div v-if="notifications.length" class="notif-strip"
        :class="{shifted: visibleQueue.length}">
     <div class="notif-head">
@@ -396,7 +450,6 @@
       </div>
     </transition-group>
   </div>
-
   <div class="cmd-queue-bar" v-if="visibleQueue.length">
     <div class="queue-controls">
       <button class="queue-toggle" @click="cmdPaused ? resumeQueue() : pauseQueue()"
@@ -404,6 +457,14 @@
               :title="cmdPaused ? 'Resume queue' : 'Pause queue'">
         <span v-if="cmdPaused">▶</span>
         <span v-else>⏸</span>
+      </button>
+      <button class="queue-send-all"
+              v-if="cmdQueue.some(it => it.status === 'queued')"
+              @click="sendAllToPrinter()"
+              :disabled="sendingAll"
+              :title="t('ui.queue.send_all_tooltip')">
+        <span v-if="!sendingAll">⇨</span>
+        <span v-else>…</span>
       </button>
       <button class="queue-clear-err"
               v-if="cmdQueue.some(it => it.status === 'error')"
@@ -425,7 +486,6 @@
       </transition-group>
     </div>
   </div>
-
   <div v-if="picker.show" class="overlay" @click.self="closePicker">
     <div class="dialog">
       <h3>
@@ -463,7 +523,6 @@
       </div>
     </div>
   </div>
-
   <div v-if="confirmDialog.show" class="overlay" @click.self="cancelConfirm">
     <div class="dialog">
       <h3>{{ confirmDialog.title }}</h3>
@@ -479,8 +538,133 @@
       </div>
     </div>
   </div>
+  <div v-if="preflight.open" class="overlay" @click.self="closePreflight">
+    <div class="dialog preflight-dialog">
+      <h3>
+        {{ t('ui.preflight.title') }}
+        <span v-if="preflight.report" class="muted small">- {{ preflight.report.filename }}</span>
+      </h3>
+      <p v-if="preflight.busy" class="muted">{{ t('ui.preflight.loading') }}</p>
+      <p v-if="preflight.error" class="error">{{ preflight.error }}</p>
+      <div v-if="preflight.progress && preflight.progress.running"
+           class="preflight-progress preflight-progress-sticky">
+        <div class="preflight-progress-label">
+          {{ stageLabel(preflight.progress.stage) }} -
+          {{ Math.round(preflight.progress.percent) }}%
+        </div>
+        <div class="preflight-progress-bar">
+          <div class="preflight-progress-fill"
+               :style="{width: preflight.progress.percent + '%'}"></div>
+        </div>
+      </div>
+      <template v-if="preflight.report">
+        <h4>{{ t('ui.preflight.printer_loadout') }}</h4>
+        <div class="preflight-grid">
+          <div v-for="s in preflight.report.live_slots"
+               :key="'ls-' + s.ace + '-' + s.slot"
+               class="preflight-card">
+            <div class="preflight-swatch"
+                 :style="{background: s.color || '#444'}"></div>
+            <div class="preflight-meta">
+              <div><strong>ACE {{ dispIdx(s.ace) }} · Slot {{ dispIdx(s.slot) }}</strong></div>
+              <div class="muted small">{{ s.material || '?' }}</div>
+              <div class="small">{{ s.name }}</div>
+              <div class="muted small">{{ s.color || '?' }}<br>RGB({{ rgbDec(s.color) }})</div>
+            </div>
+          </div>
+        </div>
+        <h4>{{ t('ui.preflight.slicer_colors') }}</h4>
+        <div class="preflight-grid">
+          <div v-for="c in preflight.report.slicer_colors"
+               :key="'sc-' + c.t"
+               class="preflight-card">
+            <div class="preflight-swatch"
+                 :style="{background: c.hex || '#444'}"></div>
+            <div class="preflight-meta">
+              <div><strong>T{{ dispIdx(c.t) }}</strong></div>
+              <div class="muted small">{{ c.material || '?' }}</div>
+              <div class="small">{{ c.name }}</div>
+              <div class="muted small">{{ c.hex }}<br>RGB({{ rgbDec(c.hex) }})</div>
+            </div>
+          </div>
+        </div>
+        <div v-if="preflight.report.missing_materials.length"
+             class="preflight-warn">
+          <strong>{{ t('ui.preflight.missing_mat_title') }}</strong>
+          <p>{{ t('ui.preflight.missing_mat_msg') }}</p>
+          <ul>
+            <li v-for="m in preflight.report.missing_materials" :key="m">
+              {{ m.toUpperCase() }}
+            </li>
+          </ul>
+        </div>
+        <template v-for="mode in ['slicer', 'optimize', 'layer']"
+                  :key="'plan-' + mode">
+          <div v-if="preflight.report.plans[mode]" class="preflight-plan">
+            <div class="preflight-plan-head">
+              <h4>{{ t('ui.preflight.plan_' + mode) }}</h4>
+              <span v-if="preflight.report.plans[mode].feasible"
+                    class="muted small">
+                {{ preflight.report.plans[mode].swaps }}
+                {{ t('ui.preflight.swaps_label') }}
+              </span>
+              <span v-else class="preflight-infeasible">
+                {{ t('ui.preflight.not_feasible') }}
+                <span v-if="preflight.report.plans[mode].reason"
+                      class="muted small">- {{ preflight.report.plans[mode].reason }}</span>
+              </span>
+            </div>
+            <table class="preflight-mapping" v-if="preflight.report.plans[mode].mapping.length">
+              <thead>
+                <tr>
+                  <th>{{ t('ui.preflight.printer') }}</th>
+                  <th>T</th>
+                  <th>←</th>
+                  <th>{{ t('ui.preflight.slicer') }}</th>
+                  <th>{{ t('ui.preflight.match_tier') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="m in sortedMapping(preflight.report.plans[mode])" :key="'r-'+mode+'-'+m.t"
+                    :class="{warn: tierWarn(m.tier)}">
+                  <td v-if="m.slot">
+                    <span class="preflight-dot"
+                          :style="{background: m.slot.color || '#444'}"></span>
+                    ACE {{ dispIdx(m.slot.ace) }} Slot {{ dispIdx(m.slot.slot) }}
+                    <span class="muted small">· {{ m.slot.material || '?' }}</span>
+                  </td>
+                  <td v-else class="muted">-</td>
+                  <td>T{{ dispIdx(m.t) }}</td>
+                  <td>←</td>
+                  <td>
+                    <span class="preflight-dot"
+                          :style="{background: preflight.report.slicer_colors.find(c => c.t === m.t)?.hex || '#444'}"></span>
+                    <span class="muted small">{{ preflight.report.slicer_colors.find(c => c.t === m.t)?.material || '?' }}</span>
+                  </td>
+                  <td class="small">{{ tierLabel(m.tier) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="row" v-if="!preflight.report.missing_materials.length
+                                   && preflight.report.plans[mode].feasible">
+              <button class="primary"
+                      :disabled="preflight.sending !== ''"
+                      @click="startPreflightPrint(mode)">
+                {{ preflight.sending === mode
+                     ? t('ui.preflight.sending')
+                     : t('ui.preflight.go_' + mode) }}
+              </button>
+            </div>
+          </div>
+        </template>
+      </template>
+      <div class="row">
+        <button @click="closePreflight"
+                :disabled="preflight.sending !== ''">{{ t('ui.common.cancel') }}</button>
+      </div>
+    </div>
+  </div>
 </div>
-
 <script src="https://unpkg.com/vue@3.4.21/dist/vue.global.prod.js"></script>
 <script src="app.js"></script>
 </body>

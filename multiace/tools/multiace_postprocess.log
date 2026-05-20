@@ -1,30 +1,33 @@
+=== 2026-05-19 18:02:55  C:\Users\DIRKKL~1\AppData\Local\Temp\snapmaker_orca_model\Tue_May_19\11_13_19#38388#52\Metadata\.38388.0.gcode.pp ===
 ============================================================
 multiACE plan
 ============================================================
-Colors: 6   Toolchanges: 253   Mid-print swaps: 67 (~254.6 min)
+Colors: 7   Toolchanges: 425   Mid-print swaps: 7 (~26.6 min)
 
 Slicer Loadout:
-  ACE 0 Slot 0  T0   Cyan (#00C1C1)  (63x)
-  ACE 0 Slot 1  T1   Red (#FF0000)  (28x)
-  ACE 0 Slot 2  T2   Green (#00D500)  (82x)
-  ACE 0 Slot 3  T3   Pink (#FF80C0)  (26x)
-  ACE 1 Slot 0  T4   White (#FFFFFF)  (35x)
-  ACE 1 Slot 1  T5   Black (#000000)  (19x)
+  ACE 0 Slot 0  T0   Brown (#804040 RGB(128,64,64))  (13x)
+  ACE 0 Slot 1  T1   White (#ffffff RGB(255,255,255))  (144x)
+  ACE 0 Slot 3  T3   DarkGreen (#008000 RGB(0,128,0))  (32x)
+  ACE 1 Slot 0  T4   Blue (#0080ff RGB(0,128,255))  (97x)
+  ACE 1 Slot 2  T6   DarkBlue (#000080 RGB(0,0,128))  (15x)
+  ACE 1 Slot 3  T7   Red (#ff0000 RGB(255,0,0))  (50x)
+  ACE 2 Slot 2  T10  Gold (#ff8040 RGB(255,128,64))  (74x)
 
---- OPTIMIZER: 34 swaps possible (33 fewer, 49% less) ---
-Optimized Print Loadout:
-  ACE 0 Slot 0  T0   Cyan (#00C1C1)  (primary, 63x)
-  ACE 0 Slot 1  T1   Red (#FF0000)  (primary, 28x)
-  ACE 0 Slot 2  T2   Green (#00D500)  (primary, 82x)
-  ACE 0 Slot 3  T4   White (#FFFFFF)  (primary, 35x)
-  ACE 1 Slot 0  T3   Pink (#FF80C0)  (swap, 26x)
-  ACE 1 Slot 1  T5   Black (#000000)  (swap, 19x)
+--- OPTIMIZER: current assignment is already optimal ---
 
 Layer-only swap analysis:
-  Layers: 234   Max colors/layer: 5
-  Feasible: NO  (>4 distinct colors in some layer — needs mid-layer swaps)
+  Layers: 375   Max colors/layer: 4
+  Feasible: YES  Minimum layer-only swaps: 5 (~19.0 min)
+  ACEs needed: 2 (you have 3 — fits)
+  Pre-load these colors before print:
+    ACE 1 Slot 0  T4   Blue (#0080ff RGB(0,128,255))
+    ACE 0 Slot 1  T1   White (#ffffff RGB(255,255,255))
+    ACE 2 Slot 2  T10  Gold (#ff8040 RGB(255,128,64))
+    ACE 0 Slot 3  T3   DarkGreen (#008000 RGB(0,128,0))
+  Additional swap cartridges:
+    ACE 1 Slot 3  T7   Red (#ff0000 RGB(255,0,0))
+    ACE 0 Slot 0  T0   Brown (#804040 RGB(128,64,64))
+    ACE 1 Slot 2  T6   DarkBlue (#000080 RGB(0,0,128))
 ============================================================
---- AUTO-REMAP applied: 67 swaps -> 34 (33 saved) ---
-T remap (old -> new): T0->T0, T1->T1, T2->T2, T3->T4, T4->T3, T5->T5
-Rewrite: 34 active ACE_SWAP_HEAD, 27 skipped, 16 swap-backs inserted
+Rewrite: 7 active ACE_SWAP_HEAD, 231 skipped, 2 swap-backs inserted
 Auto-load: injected ACE_SWAP_HEAD for 4 head(s) before first T command

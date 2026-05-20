@@ -1,7 +1,7 @@
 {
   "name": "mUlt1ACE",
   "short_name": "mUlt1ACE",
-  "description": "mUlt1ACE — multiple Anycubic ACE Pro filament changers for Snapmaker U1",
+  "description": "mUlt1ACE - multiple Anycubic ACE Pro filament changers for Snapmaker U1",
   "start_url": "/multiace/",
   "scope": "/multiace/",
   "display": "standalone",

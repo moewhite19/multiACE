@@ -5,10 +5,19 @@ HOME_DIR="/home/lava"
 EXTRAS_DIR="${HOME_DIR}/klipper/klippy/extras"
 KINEMATICS_DIR="${HOME_DIR}/klipper/klippy/kinematics"
 VARS_FILE="${SCRIPT_DIR}/ace_vars.cfg"
-LOGFILE="/tmp/ace_mode_switch.log"
+LOGDIR="${HOME_DIR}/printer_data/logs"
+LOGFILE="${LOGDIR}/ace_mode_switch.log"
+mkdir -p "$LOGDIR" 2>/dev/null || true
+if [ -e "$LOGFILE" ] && [ ! -w "$LOGFILE" ]; then
+    rm -f "$LOGFILE" 2>/dev/null || true
+fi
+touch "$LOGFILE" 2>/dev/null || true
+chmod 0666 "$LOGFILE" 2>/dev/null || true
 MODE="$1"
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [mUlt1ACE] $1" | tee -a "$LOGFILE"
+    msg="$(date '+%Y-%m-%d %H:%M:%S') [mUlt1ACE] $1"
+    printf '%s\n' "$msg"
+    printf '%s\n' "$msg" >> "$LOGFILE" 2>/dev/null || true
 }
 if [ "$MODE" != "ace" ] && [ "$MODE" != "normal" ]; then
     echo "Usage: $0 [ace|normal]"
@@ -44,10 +53,9 @@ fi
 copy_or_die() {
     local src="$1"
     local dst="$2"
-    if ! cp "$src" "$dst" 2>/tmp/ace_cp_err.log; then
-        local err
-        err=$(cat /tmp/ace_cp_err.log 2>/dev/null || echo 'cp failed')
-        log "ERROR: cp '$src' -> '$dst' failed: $err"
+    local err
+    if ! err=$(cp "$src" "$dst" 2>&1); then
+        log "ERROR: cp '$src' -> '$dst' failed: ${err:-cp failed}"
         exit 1
     fi
 }

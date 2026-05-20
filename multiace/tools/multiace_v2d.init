@@ -3,7 +3,7 @@
 #
 # Owns the cdc-acm tty for the V2 ACE 2 Pro and bridges it to a Unix
 # socket that Klipper connects to. Klipper holding the cdc-acm fd
-# directly makes the device silent on the U1 kernel — daemon avoids that.
+# directly makes the device silent on the U1 kernel - daemon avoids that.
 #
 # Installed by install_multiace.sh as /etc/init.d/S55multiace_v2d so
 # busybox-init runs it before S60klipper.
@@ -31,7 +31,7 @@ start() {
         echo "multiace_v2d started (pid $(cat $PIDFILE))"
         return 0
     fi
-    echo "multiace_v2d failed to start — check $LOGFILE"
+    echo "multiace_v2d failed to start - check $LOGFILE"
     return 1
 }
 
