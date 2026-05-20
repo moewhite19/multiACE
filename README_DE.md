@@ -28,6 +28,8 @@ https://drive.google.com/file/d/1SUnXyiJ28iv01P94k4XbRpL4bjl3HbdU/view?usp=shari
 
 **Auf 1.3-Firmware-Routinen abgestimmt**
 
+**Swap Zeit reduziert**
+
 **Priming gefixt**
 
 
