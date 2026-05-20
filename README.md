@@ -8,7 +8,7 @@
 
 **PAXX Firmware with integrated mUlt1ACE** 
 
-Bin Files & Manuals @ 
+Bin Files & Manuals (soon) @ 
 
 https://postapocalyptic-diy.com/multiace
 
