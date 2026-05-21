@@ -27,6 +27,8 @@ https://drive.google.com/file/d/1SUnXyiJ28iv01P94k4XbRpL4bjl3HbdU/view?usp=shari
 
 **Online Updates (touch /oem/.debug needed)**
 
+Loads from postapocalyptic-diy-com. Used for minor Updates, delete in config to use github for releases
+
 **Post processing replaced by Web Preflight, just upload unprocessed GCode via Multiace-Web**
 
 **Matched to 1.3 Firmware routines**
