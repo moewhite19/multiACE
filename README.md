@@ -197,7 +197,7 @@ The ACE Pro connects to the Snapmaker U1 via USB using a Molex Micro-Fit 3.0 con
 - 1x Molex Micro-Fit 3.0 Male 2x3 connector with pre-crimped wires - [AliExpress](https://de.aliexpress.com/item/1005010370245711.html)
 - 1x USB Type-A screw terminal adapter - [Amazon](https://www.amazon.com/dp/B0825TWRW7)
 
-**For ACE Pro 2** 1 Cable per ACE PRO 2, not daisy chain atm
+**For ACE Pro 2** 1 Cable per ACE PRO 2, not daisy chain atm, use Kobra S1 cable and this one.
 - 1x Molex Micro-Fit 3.0 Female 2x2 connector with pre-crimped wires - [AliExpress](https://de.aliexpress.com/item/1005010370245711.html)
 - 1x USB Type-A screw terminal adapter - [Amazon](https://www.amazon.com/dp/B0825TWRW7)
 
