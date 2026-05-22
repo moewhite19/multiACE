@@ -6,29 +6,21 @@
 
 **- Hotfix 1 fixes the update feature, some USB Noise and adds web logging**
 
+
 **ACE Pro 2 Support - up to 4 or mixed mode with ACE 1 Units / 4 Max no matter what type**
+ACE Pro 2 Unit has to be on Firmware: 1.1.31 - please make sure you are able to update it.
+There is a update script available, but use at you own risk.
+https://gist.github.com/hakimio/39c71fa7174e699c6470b7c79323b189 Thanks to hakimio for making this possible.
+https://drive.google.com/file/d/1SUnXyiJ28iv01P94k4XbRpL4bjl3HbdU/view?usp=sharing
+Instructions for building a cable in hardware section of this readme.
 
 **PAXX Firmware with integrated mUlt1ACE** 
-
 Bin Files & Manuals (soon) @ 
-
 https://postapocalyptic-diy.com/multiace
-
 Source: https://github.com/decay71/SnapmakerU1-Extended-Firmware  
 
 
-ACE Pro 2 Unit has to be on Firmware: 1.1.31 - please make sure you are able to update it.
-
-There is a update script available, but use at you own risk.
-
-https://gist.github.com/hakimio/39c71fa7174e699c6470b7c79323b189 Thanks to hakimio for making this possible.
-
-https://drive.google.com/file/d/1SUnXyiJ28iv01P94k4XbRpL4bjl3HbdU/view?usp=sharing
-
-Instructions for building a cable in hardware section of this readme.
-
 **Online Updates (touch /oem/.debug needed)**
-
 Loads from postapocalyptic-diy-com. Used for minor Updates, delete in config to use github for releases
 
 **Post processing replaced by Web Preflight, just upload unprocessed GCode via Multiace-Web**
