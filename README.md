@@ -1,5 +1,6 @@
 # mUlt1ACE 
 
+
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
 ## What's new in multiACE 0.97b "Kindred Allies" Hotfix 1 (prerelease)
@@ -147,7 +148,7 @@ Use the Fluidd macros **ACEA__Switch_0..3** to switch between ACE units.
 ## Requirements
 
 - Snapmaker U1 printer
-- Snapmaker firmware or PAXX firmware (tested with Snapmaker  1.3 and PAXX 12-16, 12-17)
+- Snapmaker firmware or PAXX firmware (tested with Snapmaker  1.3 and PAXX 12-16)
 - 1-4 Anycubic ACE Pro units connected via USB (tested with 3 and 2/2)
 - SSH access to the printer
 - Fluidd web interface
