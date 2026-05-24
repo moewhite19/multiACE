@@ -19,6 +19,8 @@ https://gist.github.com/hakimio/39c71fa7174e699c6470b7c79323b189 Danke nochmal a
 
 https://drive.google.com/file/d/1SUnXyiJ28iv01P94k4XbRpL4bjl3HbdU/view?usp=sharing
 
+Volles Passwort hier: https://github.com/BlackFrogKok/SnapAce/issues/7
+
 Anleitung für das Kabel in der Hardware Sektion dieser readme.
 
 ## PAXX-Firmware mit integriertem mUlt1ACE
