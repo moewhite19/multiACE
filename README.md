@@ -6,7 +6,7 @@
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
 
-## Post releaase issues
+## Post release issues
 
 **- Underextrusion on some files printed with the ACE 2, will be adressed in Hotfix 2**
 
