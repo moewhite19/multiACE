@@ -192,7 +192,7 @@ Yes. With a single ACE, multiACE still manages loads, unloads, and auto-feed cle
 Yes. Anycubic-RFID (or self written) spools work fine - or set filament type and color manually via the Snapmaker display. RFID and non-RFID spools can be mixed across slots and ACEs.
 
 **Can I still use TPU / TPE?**
-Yes, two ways: switch to **Normal Mode** (stock feeders, no ACE) for a full TPU session, or use **Load Off** on a per-toolhead basis while the rest of the heads keep using the ACE. Both keep swap/unload state consistent.
+Yes, switch to **Normal Mode** (stock feeders, no ACE) 
 
 **Do I need PAXX firmware?**
 No. Stock Snapmaker firmware 1.2+ works. PAXX adds display mirroring so load/unload is fully controllable from the computer - convenient, not required.
