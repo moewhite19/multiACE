@@ -6,6 +6,8 @@
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
 ## Post-release notes
+- RESUME Bug: just notices a change in code destroyed a few Resume paths during print. If you can't Resume with "can't resume while machine main state idle" Error, type SET_MAIN_STATE MAIN_STATE=PRINTING and RESUME in fluidd console, will be fixed in next release.
+
 - Filament runout does not reenable Feed assist, air prints with new spool,  will be fixed in next version
 
 - Bin image Web-Preflight not working, ssh install or re-download Paxx 12-17 version, corrected it there.
