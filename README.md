@@ -6,7 +6,7 @@
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
 ## Post-release notes
-- RESUME Bug: just notices a change in code destroyed a few Resume paths during print. If you can't Resume with "can't resume while machine main state idle" Error, type SET_MAIN_STATE MAIN_STATE=PRINTING and RESUME in fluidd console, will be fixed in next release.
+- RESUME Bug: just noticed a change in code destroyed a few Resume paths during swap. If you can't Resume with "can't resume while machine main state idle" Error, type SET_MAIN_STATE MAIN_STATE=PRINTING and RESUME in fluidd console, will be fixed in next release.
 
 - Filament runout does not reenable Feed assist, air prints with new spool,  will be fixed in next version
 
