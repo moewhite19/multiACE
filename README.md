@@ -8,7 +8,7 @@ What happens: if the USB connection to the ACE units drops out (a hardware-level
 
 Background: I had tested the ACE 2 units for many (100+) hours, including prints over 6 hours, without seeing this. It surfaced only now through a user report, and today I was able to reproduce it in a 12-hour print, starting around hour 7.
 
-Status: Until a fix ships, I unfortunately have to withdraw support for running multiple ACE 2 units. Because the dropouts originate in USB hardware disconnects, I cannot give a timeline yet. Root cause looks like a hardware reconnect issue, hopefully not a firmware problem. I am working on it.
+Status: Until a fix ships, I unfortunately have to withdraw support for running multiple ACE 2 units. Because the dropouts originate in USB hardware disconnects, I cannot give a timeline yet. On top of that, testing itself takes a long time, since every verification run needs a multi-hour print to even trigger the problem. Root cause looks like a hardware reconnect issue, hopefully not a firmware problem. I am working on it.
 
 If you bought a cable kit or supported and would like to return it because of this, please message me directly on  ko-fi.
 
