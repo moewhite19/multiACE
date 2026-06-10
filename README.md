@@ -1,5 +1,14 @@
 # mUlt1ACE 
 
+⚠️ Known issue: multiple ACE 2 Pro (V2) units, support temporarily withdrawn
+
+Affected: setups running multiple ACE 2 Pro (V2) units on long prints.
+
+What happens: if the USB connection to the ACE units drops out (a hardware-level disconnect, which can hit several units at once), the active slot light goes from flashing to solid and the printer keeps moving without filament. The result is under-extrusion / "air printing", with no error and no pause. A long print can be silently ruined.
+
+Background: I had tested the ACE 2 units for many (100+) hours, including prints over 6 hours, without seeing this. It surfaced only now through a user report, and today I was able to reproduce it in a 12-hour print, starting around hour 7.
+
+Status: Until a fix ships, I unfortunately have to withdraw support for running multiple ACE 2 units. Because the dropouts originate in USB hardware disconnects, I cannot give a timeline yet. Root cause looks like a hardware reconnect issue, hopefully not a firmware problem. I am working on it.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
