@@ -10,6 +10,8 @@ Background: I had tested the ACE 2 units for many (100+) hours, including prints
 
 Status: Until a fix ships, I unfortunately have to withdraw support for running multiple ACE 2 units. Because the dropouts originate in USB hardware disconnects, I cannot give a timeline yet. Root cause looks like a hardware reconnect issue, hopefully not a firmware problem. I am working on it.
 
+If you bought a cable kit or supported and would like to return it because of this, please message me directly on  ko-fi.
+
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
