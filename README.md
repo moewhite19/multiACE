@@ -4,7 +4,7 @@ Regarding ACE 2 Pro support
 
 My investigation so far shows that the hardware dropout I found has only occurred on my own setup, and only once. Based on a user report I had assumed it was happening there as well, but I never received any logs to confirm that.
 
-Since then my printer has been running continuously for 30 hours without the issue, and I have developed a patch that re-arms the ACE 2 on a disconnect and pauses the print in the case of a longer dropout. Given that, I consider the issue resolved until something proves otherwise. Anyone who would like to test the patch can find it in the issue here: https://github.com/decay71/multiACE/issues/39.
+Since then my printer has been printing continuously for 30 hours without the issue, and I have developed a patch that re-arms the ACE 2 on a disconnect and pauses the print in the case of a longer dropout. Given that, I consider the issue resolved until something proves otherwise. Anyone who would like to test the patch can find it in the issue here: https://github.com/decay71/multiACE/issues/39.
 Or wait for the next version.
 
 It should be understood that, in a reverse engineered system, errors can occur in theory, and I cannot test every possible case. At the same time I do not want to pull the emergency brake every time a potentially serious issue appears. I am therefore restoring ACE 2 Pro support, with the renewed reminder that this software is used at your own risk.
