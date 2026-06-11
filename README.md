@@ -1,16 +1,12 @@
 # mUlt1ACE 
 
-⚠️ Known issue: multiple ACE 2 Pro (V2) units, support temporarily withdrawn
+Regarding ACE 2 Pro support
 
-Affected: setups running multiple ACE 2 Pro (V2) units on long prints.
+My investigation so far shows that the hardware dropout I found has only occurred on my own setup, and only once. Based on a user report I had assumed it was happening there as well, but I never received any logs to confirm that.
 
-What happens: if the USB connection to the ACE units drops out (a hardware-level disconnect, which can hit several units at once), the active slot light goes from flashing to solid and the printer keeps moving without filament. The result is under-extrusion / "air printing", with no error and no pause. A long print can be silently ruined.
+Since then my printer has been running continuously for 30 hours without the issue, and I have developed a patch that re-arms the ACE 2 on a disconnect and pauses the print in the case of a longer dropout. Given that, I consider the issue resolved until something proves otherwise. Anyone who would like to test the patch can find it in the issue here: https://github.com/decay71/multiACE/issues/39
 
-Background: I had tested the ACE 2 units for many (100+) hours, including prints over 6 hours, without seeing this. It surfaced only now through a user report, and today I was able to reproduce it in a 12-hour print, starting around hour 7.
-
-Status: Until a fix ships, I unfortunately have to withdraw support for running multiple ACE 2 units. Because the dropouts originate in USB hardware disconnects, I cannot give a timeline yet. On top of that, testing itself takes a long time, since every verification run needs a multi-hour print to even trigger the problem. Root cause looks like a hardware reconnect issue, hopefully not a firmware problem. I am working on it.
-
-If you bought a cable kit or supported and would like to return it because of this, please message me directly on  ko-fi.
+It should be understood that, in a reverse engineered system, errors can occur in theory, and I cannot test every possible case. At the same time I do not want to pull the emergency brake every time a potentially serious issue appears. I am therefore restoring ACE 2 Pro support, with the renewed reminder that this software is used at your own risk.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
