@@ -5,7 +5,7 @@
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 ## Post-release notes
 
-## Another FA bug showed up on hotfix3 — fix re-uploaded.
+Another FA bug showed up on hotfix3 — fix re-uploaded.
 If you still hit errors, please revert to hotfix2. I'll take more time for the next version and thoroughly test all releases from now on.
 
 - Paxx 12-19 prerelease version available - not fully tested against this firmare, next version is fully tested, but may take a while, so i decided to build this. 
