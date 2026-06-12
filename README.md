@@ -4,13 +4,17 @@
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 ## Post-release notes
-- Paxx 12-19 prerelease version available - not fully tested against this firmare, next version is fully tested, but may take a while, so i decided to build this.
+
+## Another FA bug showed up on hotfix3 — fix re-uploaded.
+If you still hit errors, please revert to hotfix2. I'll take more time for the next version and thoroughly test all releases from now on.
+
+- Paxx 12-19 prerelease version available - not fully tested against this firmare, next version is fully tested, but may take a while, so i decided to build this. 
 
 - RESUME Bug: just noticed a change in code destroyed a few Resume paths during swap. If you can't Resume with "can't resume while machine main state idle" Error, type SET_MAIN_STATE MAIN_STATE=PRINTING and RESUME in fluidd console, will be fixed in next release.
 
 - Filament runout does not reenable Feed assist, air prints with new spool,  will be fixed in next version
 
-## What's new in multiACE 0.97b "Kindred Allies" Hotfix 3 (prerelease)
+## What's new in multiACE 0.97b "Kindred Allies" Hotfix 3 (prerelease -unsupported)
 
 **- V2 USB comms-loss recovery - on a USB dropout the ACE 2 reader/writer now reconnect and re-arm feed-assist automatically; a longer dropout pauses the print (resumable) instead of silently under-extruding.**
 
