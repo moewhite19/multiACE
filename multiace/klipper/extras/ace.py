@@ -19,7 +19,7 @@ KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 MULTIACE_VERSION = "0.97.3b"
 MULTIACE_CODENAME = "Kindred Allies"
 
-MULTIACE_BUILD_TAG = "11543e7"
+MULTIACE_BUILD_TAG = "e2d2beb"
 MULTIACE_BUNDLE_SHA1 = "0e6ee1d"
 
 def _load_i18n_catalog(i18n_dir, lang):
@@ -2933,17 +2933,18 @@ class MultiAce:
                         if s.get('index') == last_idx:
                             new_state = s.get('slot_status', 'unknown')
                             break
-                    self._fa_log.info(
-                        '[v2-vel] ace=%d disarmed (was slot=%s, now=%s)' % (
-                            idx, last_idx, new_state))
+                    if new_state not in V2_FA_RUNNING_STATES:
+                        self._fa_log.info(
+                            '[v2-vel] ace=%d disarmed (was slot=%s, now=%s)' % (
+                                idx, last_idx, new_state))
 
-                    if self._feed_assist_per_ace.get(idx, -1) == last_idx:
-                        self._fa_log.info('[v2-recover] clearing stale FA cache ACE %d slot %d after disarm status=%s' % (idx, last_idx, new_state))
-                        self._clear_fa_cache_for(idx, last_idx)
-                        if (target_slot == last_idx and self._auto_feed_enabled
-                                and self._fa_context in ('print', 'load')
-                                and not getattr(self, '_v2_active_rev_assist', False)):
-                            self._v2_schedule_fa_rearm(idx, last_idx, 'slot-disarmed:%s' % new_state)
+                        if self._feed_assist_per_ace.get(idx, -1) == last_idx:
+                            self._fa_log.info('[v2-recover] clearing stale FA cache ACE %d slot %d after disarm status=%s' % (idx, last_idx, new_state))
+                            self._clear_fa_cache_for(idx, last_idx)
+                            if (target_slot == last_idx and self._auto_feed_enabled
+                                    and self._fa_context in ('print', 'load')
+                                    and not getattr(self, '_v2_active_rev_assist', False)):
+                                self._v2_schedule_fa_rearm(idx, last_idx, 'slot-disarmed:%s' % new_state)
 
                     state['last_armed_slot'] = None
                     state['last_quantum'] = None
