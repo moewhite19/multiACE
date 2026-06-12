@@ -1,28 +1,22 @@
 # mUlt1ACE 
 
-Regarding ACE 2 Pro support
-
-My investigation so far shows that the hardware dropout I found has only occurred on my own setup, and only once. Based on a user report I had assumed it was happening there as well, but I never received any logs to confirm that.
-
-Since then my printer has been printing continuously for 30 hours without the issue, and I have developed a patch that re-arms the ACE 2 on a disconnect and pauses the print in the case of a longer dropout. Given that, I consider the issue resolved until something proves otherwise. Anyone who would like to test the patch can find it in the issue here: https://github.com/decay71/multiACE/issues/39.
-Or wait for the next version.
-
-It should be understood that, in a reverse engineered system, errors can occur in theory, and I cannot test every possible case. At the same time I do not want to pull the emergency brake every time a potentially serious issue appears. I am therefore restoring ACE 2 Pro support, with the renewed reminder that this software is used at your own risk.
-
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
-
 ## Post-release notes
-- Paxx 12-18 prerelease version available - not fully tested against this firmare, next version is fully tested, but may take a while, so i decided to build this.
+- Paxx 12-19 prerelease version available - not fully tested against this firmare, next version is fully tested, but may take a while, so i decided to build this.
 
 - RESUME Bug: just noticed a change in code destroyed a few Resume paths during swap. If you can't Resume with "can't resume while machine main state idle" Error, type SET_MAIN_STATE MAIN_STATE=PRINTING and RESUME in fluidd console, will be fixed in next release.
 
 - Filament runout does not reenable Feed assist, air prints with new spool,  will be fixed in next version
 
-- Bin image Web-Preflight not working, ssh install or re-download Paxx 12-17 version, corrected it there.
+## What's new in multiACE 0.97b "Kindred Allies" Hotfix 3 (prerelease)
 
-- Paxx 12-17 version available
+**- V2 USB comms-loss recovery - on a USB dropout the ACE 2 reader/writer now reconnect and re-arm feed-assist automatically; a longer dropout pauses the print (resumable) instead of silently under-extruding.**
+
+**- Feed-assist stale-cache recovery - now verifies the device's real slot status instead of trusting the host cache, so feed-assist reliably re-arms after swaps/reconnects. Based on a patch kindly contributed by @hfoi589 - thanks!**
+
+
 
 ## What's new in multiACE 0.97b "Kindred Allies" Hotfix 2 (prerelease)
 
