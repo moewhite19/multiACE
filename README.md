@@ -27,6 +27,8 @@
 
 multiACE supports **multiple ACE Pro / ACE Pro 2 units** on a single Snapmaker U1 printer. Switch between ACE units to use different filament sets - for example, PLA on ACE 0 and PETG on ACE 1 - without physically swapping spools.
 
+Started as a SnapACE fork, it has grown to over 5 times the original size, with around 85% of the code now its own.
+
 ## ACE Pro 2 Support 
 
 **- up to 4 or mixed mode with ACE 1 Units / 4 Max no matter what type**
