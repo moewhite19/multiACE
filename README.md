@@ -65,30 +65,7 @@ Color swaps during an active print can be triggered two ways:
 
 Both paths use the same hardened load/unload logic as normal toolchanges. See [How to Do Toolswaps](#how-to-do-toolswaps) below for the exact command format and post-processing setup.
 
-### Single Material (e.g. PLA on ACE 0)
 
-1. Insert spools into ACE 0
-2. Press **ACEB__Load_0** → loads all filled slots
-3. Print normally
-
-### Multiple Materials (e.g. PLA on ACE 0, PETG on ACE 1)
-
-1. Insert PLA spools into ACE 0, PETG spools into ACE 1
-2. Load PLA toolheads (T0-T2) via display
-3. Press **ACEA__Switch_1** → switch to ACE 1
-4. Load PETG into desired toolhead (e.g. T3) via display or **ACEC__Load_T3**
-5. Toolchanges during print automatically switch between ACEs
-
-### Switching Complete Filament Sets
-
-1. Press **ACEC__Unload_All** → unloads everything
-2. Press **ACEB__Load_1** → switch to ACE 1 and load all
-
-### Switching ACE Units
-
-Use the Fluidd macros **ACEA__Switch_0..3** to switch between ACE units.
-
-> **Note on macro names:** The macro names use letter prefixes (ACEA, ACEB, ACEC...) to ensure they appear in a logical order in Fluidd's alphabetical macro list. If you prefer different names, you can rename them anytime in `config/extended/ace.cfg`.
 
 ## Features
 
@@ -346,6 +323,31 @@ All operations are available as macro buttons in Fluidd, sorted alphabetically:
 | **ACEF__Mode_Multi** | Switch to multi-ACE mode |
 | **ACEG__Status** | Show active ACE, detected devices, head mapping, build tag |
 | **ACEG__List** | List all detected ACE devices |
+
+### Single Material (e.g. PLA on ACE 0)
+
+1. Insert spools into ACE 0
+2. Press **ACEB__Load_0** → loads all filled slots
+3. Print normally
+
+### Multiple Materials (e.g. PLA on ACE 0, PETG on ACE 1)
+
+1. Insert PLA spools into ACE 0, PETG spools into ACE 1
+2. Load PLA toolheads (T0-T2) via display
+3. Press **ACEA__Switch_1** → switch to ACE 1
+4. Load PETG into desired toolhead (e.g. T3) via display or **ACEC__Load_T3**
+5. Toolchanges during print automatically switch between ACEs
+
+### Switching Complete Filament Sets
+
+1. Press **ACEC__Unload_All** → unloads everything
+2. Press **ACEB__Load_1** → switch to ACE 1 and load all
+
+### Switching ACE Units
+
+Use the Fluidd macros **ACEA__Switch_0..3** to switch between ACE units.
+
+> **Note on macro names:** The macro names use letter prefixes (ACEA, ACEB, ACEC...) to ensure they appear in a logical order in Fluidd's alphabetical macro list. If you prefer different names, you can rename them anytime in `config/extended/ace.cfg`.
 
 ## How to Do Toolswaps
 
