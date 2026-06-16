@@ -12,8 +12,9 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 - Manual Heads (for TPU usage) Preflight not supported atm.
 - Paxx 12-19  version available.
 - Matched to 1.4.1 Firmware routines.
-- Filaments synced from printer
-- Error Corrections: Resume Bug, Filament runout an other problems solved
+- Filament types synced from printer.
+- RFID Subtype is now displayed and set.
+- Error Corrections: Resume Bug, Filament runout an other problems solved.
 
 ## multiACE 
 
