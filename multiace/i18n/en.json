@@ -34,7 +34,10 @@
       "status": "Status",
       "saving": "Saving…",
       "error": "Error",
-      "unknown_source": "Unknown source"
+      "unknown_source": "Unknown source",
+      "source_rfid": "RFID",
+      "source_override": "Set",
+      "source_derived": "Job"
     },
     "dashboard": {
       "no_aces": "No ACEs detected.",
@@ -49,7 +52,12 @@
       "list_btn": "List",
       "load_all": "Load All",
       "load": "Load",
+      "reload": "Reload",
+      "reload_hint": "Mid-print runout on this head — insert filament, click Reload, then Resume on the printer.",
       "unload": "Unload",
+      "manual": "Manual",
+      "manual_hint": "Manual feed: no ACE feed, retract, assist or RFID for this head. Load by hand.",
+      "manual_unload_first": "Unload this head first to change manual mode.",
       "swap_in_progress": "An ACE swap is in progress — please wait until it completes.",
       "dryer": "Dryer",
       "duration": "Duration",
@@ -153,7 +161,9 @@
       "picker_save_switch_hint": "ACE {ace} is not active - will switch first.",
       "picker_load_after": "Save and load this slot",
       "picker_read_rfid": "Read RFID",
-      "picker_read_rfid_hint": "Pull material, vendor and color from the slot's RFID tag"
+      "picker_read_rfid_hint": "Pull material, vendor and color from the slot's RFID tag",
+      "picker_clear": "Clear",
+      "picker_clear_hint": "Remove the manual filament override for this slot"
     },
     "notifications": {
       "title": "multiACE alerts",
@@ -180,6 +190,7 @@
     },
     "preflight": {
       "title": "G-code preflight",
+      "manual_disabled": "Preflight is disabled while a head is set to manual. Switch the head back to auto, or upload the file directly via Fluidd.",
       "loading": "Analyzing G-code...",
       "printer_loadout": "Printer loadout (live)",
       "slicer_colors": "Slicer colors",
@@ -216,6 +227,18 @@
     }
   },
   "msg": {
+    "pause_swap_slot_empty": "[multiACE] Slot empty for Head {head} (ACE {ace} / Slot {slot}) - load filament, then RESUME",
+    "pause_swap_slot_empty_post": "[multiACE] Slot empty for Head {head} (ACE {ace} / Slot {slot}) after unload - load filament, then RESUME",
+    "pause_swap_unload_jam": "[multiACE] Unload jam on Head {head} - unload ACE{ua}/Slot{us}, load ACE{la}/Slot{ls}, then RESUME",
+    "pause_swap_load_slip": "[multiACE] Load slip on Head {head} (ACE {ace} / Slot {slot}) - unload, reload, then RESUME",
+    "pause_feed_load_jam": "[multiACE] Load jam on Head {head}{loc} - reload via display/web, then RESUME",
+    "pause_feed_error": "[multiACE] Feed error on Head {head}{loc} - check filament, then RESUME",
+    "pause_manual_feed_error": "[multiACE] Manual feed error on Head {head}{loc} - check filament, then retry",
+    "pause_runout": "[multiACE] Runout on Head {head}{loc} - reload filament, then RESUME",
+    "pause_ace_comms_lost": "[multiACE] ACE {ace} comms lost (Head {head}) - check USB/power, then RESUME",
+    "head_manual_loaded": "[multiACE] Head {head} still has filament loaded - unload it first to change manual mode",
+    "feed_manual_skip": "[multiACE] Head {head} is manual - load/unload by hand, ACE feed skipped",
+    "unload_head_already_empty": "[multiACE] Head {head} is already empty - nothing to unload",
     "web_running": "[multiACE] Web running at http://<printer>/multiace/",
     "version_line": "[multiACE] v{version} \"{codename}\" build={build} (file: {ts})",
     "normal_mode_skip": "Normal mode - skipping ACE detection",

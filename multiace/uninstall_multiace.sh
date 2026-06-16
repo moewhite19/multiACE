@@ -8,7 +8,9 @@ CONFIG_DIR="${HOME_DIR}/printer_data/config/extended"
 MULTIACE_DIR="${CONFIG_DIR}/multiace"
 ACE_VARS="${MULTIACE_DIR}/ace_vars.cfg"
 PRINTER_CFG="${HOME_DIR}/printer_data/config/printer.cfg"
-LOGFILE="/tmp/multiace_uninstall.log"
+LOG_DIR="${HOME_DIR}/printer_data/logs"
+mkdir -p "$LOG_DIR" 2>/dev/null
+LOGFILE="${LOG_DIR}/multiace_uninstall.log"
 FORCE=0
 for arg in "$@"; do
     case "$arg" in

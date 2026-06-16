@@ -55,6 +55,22 @@ createApp({
       if (n == null) return "–";
       return Number(n) + indexBase.value;
     }
+    // Subtype label for display: hide the implicit defaults (empty / Basic /
+    // generic) so only a meaningful subtype (Matte, Silk, HF, ...) shows.
+    function subText(sku) {
+      const s = (sku || "").trim();
+      if (!s || ["basic", "generic"].includes(s.toLowerCase())) return "";
+      return s;
+    }
+    // Provenance badge label for an identity source (spec §4 / D3):
+    // rfid = read from tag, override = user-set, derived = from print job.
+    // Empty/raw slots have no badge.
+    function sourceLabel(src) {
+      if (src === "rfid") return t("ui.common.source_rfid");
+      if (src === "override") return t("ui.common.source_override");
+      if (src === "derived") return t("ui.common.source_derived");
+      return "";
+    }
     async function loadCatalog(lang) {
       try {
         const r = await fetch(`${API}/i18n/${lang}`);
@@ -90,6 +106,16 @@ createApp({
       language.value = lang;
       localStorage.setItem("multiace.lang", lang);
       await loadCatalog(lang);
+      // Drive the Klipper-side _t() catalog too (pause/error messages) and
+      // persist as ace__language, so display popup + Fluidd follow the UI
+      // language. Live reload - no Klipper restart needed.
+      try {
+        await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "MULTIACE_SET_LANGUAGE", args: {LANG: lang}}),
+        });
+      } catch (_) {}
     }
     const version = ref("");
     const printerName = ref("");
@@ -472,8 +498,29 @@ createApp({
       if (th.head_source_known) return th.ace === aceIdx;
       return !!th.filament_at_extruder;
     }
+    // Mid-print runout: print paused, the head still owns its ACE source
+    // (head_source NOT cleared - that would break FA-rearm on resume), but the
+    // toolhead motion sensor reads empty. ACE_LOAD_HEAD's "already loaded" guard
+    // is gated on that same toolhead sensor, so a reload goes through during a
+    // runout even though head_source is set. We just re-enable the load button.
+    function needsReload(aceIdx, slotIdx) {
+      if (state.printer_state !== 'paused') return false;
+      const th = state.toolheads.find(tt => tt.idx === slotIdx);
+      if (!th || !th.head_source_known) return false;
+      return th.ace === aceIdx && th.filament_at_extruder === false;
+    }
     function unloadHead(idx) {
       run("ACE_UNLOAD_HEAD", {HEAD: idx});
+    }
+    async function setHeadManual(idx, enable) {
+      try {
+        await fetch(`${API}/head-manual`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({head: idx, enable: !!enable}),
+        });
+      } catch (_) {}
+      reloadState();
     }
     function loadSlot(aceIdx, slotIdx) {
       const th = state.toolheads.find(tt => tt.idx === slotIdx);
@@ -484,10 +531,11 @@ createApp({
       }
       enqueue("ACE_LOAD_HEAD", {HEAD: slotIdx, ACE: aceIdx});
     }
-    // Default/fallback list; the live list is loaded from /api/materials
-    // (a user-editable materials.json) so users can extend it themselves.
+    // Default/fallback list; the live list + per-type subtypes are loaded
+    // from /api/materials, which sources them from the firmware filament DB
+    // (filament_parameters.py) - same materials the printer's display offers.
     const pickerMaterials = ref([
-      "PLA", "PLA+", "PLA-CF",
+      "PLA", "PLA-CF",
       "PETG", "PETG-CF", "PETG-HF",
       "ABS", "ASA",
       "TPU",
@@ -495,6 +543,8 @@ createApp({
       "PC", "PC-ABS",
       "PVA",
     ]);
+    // Full { type: { vendor: [subtype, ...] } } hierarchy from the firmware DB.
+    const pickerDb = ref({});
     async function loadMaterials() {
       try {
         const r = await fetch(`${API}/materials`);
@@ -503,9 +553,23 @@ createApp({
           if (Array.isArray(j.materials) && j.materials.length) {
             pickerMaterials.value = j.materials;
           }
+          if (j.db && typeof j.db === "object") {
+            pickerDb.value = j.db;
+          }
         }
       } catch (_) {}
     }
+    // Vendors available for the chosen material (Generic always first).
+    const pickerVendors = computed(() => {
+      const v = Object.keys(pickerDb.value[picker.material] || { Generic: [] });
+      return v.includes("Generic") ? ["Generic", ...v.filter(x => x !== "Generic")] : v;
+    });
+    // Subtypes for the chosen material + vendor; "Basic" = firmware 'generic'.
+    const currentSubtypes = computed(() => {
+      const byVendor = pickerDb.value[picker.material] || {};
+      const extra = byVendor[picker.vendor] || [];
+      return ["Basic", ...extra];
+    });
     const picker = reactive({
       show: false,
       ace: 0,
@@ -515,11 +579,26 @@ createApp({
       vendor: "Generic",
       color: "#ffffff",
     });
+    // Keep the cascade consistent: when material changes, snap vendor to a
+    // valid one; when material or vendor changes, snap subtype to a valid one.
+    watch(() => picker.material, () => {
+      if (!pickerVendors.value.includes(picker.vendor)) {
+        picker.vendor = pickerVendors.value[0] || "Generic";
+      }
+      if (!currentSubtypes.value.includes(picker.subtype)) {
+        picker.subtype = "Basic";
+      }
+    });
+    watch(() => picker.vendor, () => {
+      if (!currentSubtypes.value.includes(picker.subtype)) {
+        picker.subtype = "Basic";
+      }
+    });
     function openPicker(ace, slot) {
       picker.ace = ace.idx;
       picker.slot = slot.idx;
       picker.material = (slot.material || "PLA");
-      picker.subtype = slot.sku || "Basic";
+      picker.subtype = slot.subtype || "Basic";
       picker.vendor = slot.brand || "Generic";
       picker.color = slot.color || "#ffffff";
       picker.show = true;
@@ -549,12 +628,21 @@ createApp({
         color: lum > 0.55 ? "#001619" : "#ffffff",
       };
     });
+    // Slots without an RFID tag get a "Clear" button instead of "Read
+    // RFID"; shown only when the slot's identity actually comes from a
+    // manual override (source === "override"), so RFID/derived/empty
+    // slots offer nothing to clear.
+    const pickerHasOverride = computed(() => {
+      if (!picker.show) return false;
+      const s = _pickerSlot();
+      return !!(s && s.source === "override");
+    });
     function readPickerRfid() {
       const s = _pickerSlot();
       const r = s && s.rfid_data;
       if (!r) return;
       if (r.material) picker.material = r.material;
-      if (r.sku)      picker.subtype  = r.sku;
+      if (r.subtype)  picker.subtype  = r.subtype;
       if (r.brand)    picker.vendor   = r.brand;
       if (r.color)    picker.color    = r.color;
     }
@@ -570,9 +658,42 @@ createApp({
         FILAMENT_SUBTYPE: dq(sub || ""),
       };
     }
+    // Bug 1: saving an RFID slot unchanged must not create an override
+    // that masks the tag. openPicker prefills Generic/Basic placeholders
+    // for empty vendor/subtype, so normalise those to "" when comparing
+    // the form against the tag's rfid_data.
+    function _ovNorm(s) { return String(s || "").trim().toLowerCase(); }
+    function _ovVendor(s) { const v = _ovNorm(s); return v === "generic" ? "" : v; }
+    function _ovSub(s) { const v = _ovNorm(s); return (v === "basic" || v === "generic") ? "" : v; }
+    function _ovColor(s) { return _ovNorm(s).replace(/^#/, ""); }
+    function _pickerMatchesRfid() {
+      const s = _pickerSlot();
+      const r = (s && s.rfid === 2) ? s.rfid_data : null;
+      if (!r) return false;
+      return _ovNorm(picker.material) === _ovNorm(r.material)
+          && _ovVendor(picker.vendor) === _ovVendor(r.brand)
+          && _ovSub(picker.subtype) === _ovSub(r.subtype)
+          && _ovColor(picker.color) === _ovColor(r.color);
+    }
     async function savePicker(loadAfter) {
       const aceIdx = picker.ace;
       const slotIdx = picker.slot;
+      if (_pickerMatchesRfid()) {
+        // Values equal the RFID tag -> drop any existing override so the
+        // RFID identity stays the source of truth (no shadow override).
+        try {
+          await fetch(`${API}/slot-override/${aceIdx}/${slotIdx}`, {method: "DELETE"});
+        } catch (e) {
+          setMacroLog(`${t("ui.common.error")}: ${e}`);
+        }
+        closePicker();
+        enqueue("MULTIACE_REFRESH_OVERRIDES", {}, {silent: true});
+        if (loadAfter) {
+          loadSlot(aceIdx, slotIdx);
+        }
+        reloadState();
+        return;
+      }
       try {
         await fetch(`${API}/slot-override`, {
           method: "POST",
@@ -594,6 +715,18 @@ createApp({
       if (loadAfter) {
         loadSlot(aceIdx, slotIdx);
       }
+      reloadState();
+    }
+    async function clearPickerOverride() {
+      const aceIdx = picker.ace;
+      const slotIdx = picker.slot;
+      try {
+        await fetch(`${API}/slot-override/${aceIdx}/${slotIdx}`, {method: "DELETE"});
+      } catch (e) {
+        setMacroLog(`${t("ui.common.error")}: ${e}`);
+      }
+      closePicker();
+      enqueue("MULTIACE_REFRESH_OVERRIDES", {}, {silent: true});
       reloadState();
     }
     let _lastActive = null;
@@ -976,6 +1109,10 @@ createApp({
       for (let i = 0; i < configForm.perAce.length; i++) {
         insertMissing(`[ace ${i}]`, perAceRepl[i], seenSet(i));
       }
+      // Drop any [ace N] section header that ends up with no content.
+      // When the user clears all per-ACE overrides, the keyed lines get
+      // filtered out by the value=='' rule above, leaving a bare header.
+      // Klipper refuses to load an empty section, so strip it here.
       const cleaned = [];
       for (let i = 0; i < out.length; i++) {
         const m = out[i].match(/^\s*\[ace\s+\d+\]\s*$/);
@@ -993,6 +1130,8 @@ createApp({
           cleaned.push(out[i]);
           continue;
         }
+        // Drop header + intervening lines; also strip one trailing blank
+        // line from cleaned so we don't pile up separators.
         if (cleaned.length && cleaned[cleaned.length - 1].trim() === '') {
           cleaned.pop();
         }
@@ -1377,6 +1516,17 @@ createApp({
         });
         return;
       }
+      // Preflight can't handle a manual/TPU head (hand-fed, no ACE slot) - it
+      // would be ignored/mis-assigned. Disable preflight while one is active;
+      // the user uploads directly via Fluidd instead. (Full support is Pro.)
+      if (state.toolheads.some(th => th.manual)) {
+        confirm({
+          title: t("ui.upload.title"),
+          message: t("ui.preflight.manual_disabled"),
+          dismissOnly: true, okLabel: "OK", onOk: () => {},
+        });
+        return;
+      }
       _runPreflight(f);
     }
     async function _runPreflight(f) {
@@ -1488,6 +1638,18 @@ createApp({
     let resizeObserver = null;
     onMounted(async () => {
       await loadLanguageList();
+      // No explicit browser choice yet -> follow the printer's persisted
+      // language (ace__language), so a fresh browser opens in the same
+      // language as the printer instead of defaulting to English.
+      if (!localStorage.getItem("multiace.lang")) {
+        try {
+          const r = await fetch(`${API}/state`);
+          if (r.ok) {
+            const s = await r.json();
+            if (s && s.language) language.value = s.language;
+          }
+        } catch (_) {}
+      }
       await loadCatalog(language.value);
       try {
         const r = await fetch(`${API}/version`);
@@ -1535,9 +1697,11 @@ createApp({
       window.removeEventListener("beforeunload", _onBeforeUnload);
     });
     return {
+      subText,
+      sourceLabel,
       tab, version, printerName, printerFw, connClass, connText, screenAvailable,
       state, loadError, run, macroLog,
-      slotTitle, switchAce, loadSlot, loadAll, unloadHead, isToolheadOccupied, toolheadOps,
+      slotTitle, switchAce, loadSlot, loadAll, unloadHead, setHeadManual, isToolheadOccupied, needsReload, toolheadOps,
       dryerCfg, dryStart, dryStop, dryOpenAce, toggleDryPanel, aceDrying,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
       config, configLog, configLoadError, showRawConfig, configForm, modeChangePending,
@@ -1555,8 +1719,9 @@ createApp({
       screenDown, screenMove, screenUp,
       wiringContainerEl, setSlotEl, setThEl, wiringPaths, wiringViewBox,
       t, dispIdx, language, languages, setLanguage,
-      picker, openPicker, closePicker, savePicker, pickerMaterials,
-      pickerHasRfid, pickerRfidStyle, readPickerRfid,
+      picker, openPicker, closePicker, savePicker, clearPickerOverride, pickerMaterials,
+      pickerDb, pickerVendors, currentSubtypes,
+      pickerHasRfid, pickerHasOverride, pickerRfidStyle, readPickerRfid,
       cmdQueue, visibleQueue, cmdPaused, removeFromQueue, pauseQueue, resumeQueue, clearAllErrors,
       sendingAll, sendAllToPrinter,
       fmtArgs, cmdLabel,

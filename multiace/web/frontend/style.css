@@ -127,6 +127,8 @@ h3 { margin: 1.2rem 0 .5rem 0; color: var(--muted); font-size: .85rem; font-weig
 .ace-th-wrap .ace-grid, .ace-th-wrap .toolhead-grid, .ace-th-wrap h3,
 .ace-th-wrap p { position: relative; z-index: 1; }
 .ace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1rem; }
+/* Solo ACE: don't stretch the only card across the full row width. */
+.ace-grid > .ace-card:only-child { max-width: 500px; }
 .ace-card { background: var(--card); padding: 1rem; border-radius: 6px;
             border: 1px solid var(--border); transition: border-color .15s; }
 .ace-card.primary   { border-color: var(--accent); }
@@ -215,26 +217,51 @@ header h1 .hl { color: var(--accent); }
 }
 .slot-load-btn:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 .slot-load-btn:disabled { opacity: .35; cursor: not-allowed; }
+.slot-load-btn.reload {
+  background: #b9770e; color: #fff; border-color: #b9770e; font-weight: 600;
+  animation: reload-pulse 1.4s ease-in-out infinite;
+}
+.slot-load-btn.reload:hover:not(:disabled) { background: #d4880f; border-color: #d4880f; }
+@keyframes reload-pulse { 0%,100% { opacity: 1; } 50% { opacity: .6; } }
 button.slot {
   flex: 1; aspect-ratio: 1 / 1.5;
   border-radius: 4px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
   font-weight: 700; font-size: .9rem;
   border: 2px solid transparent;
   background: #444; color: #fff;
-  text-shadow: 0 0 3px rgba(0,0,0,0.8);
-  cursor: pointer; font-family: inherit; padding: .25rem .1rem;
+  /* Crisp dark outline (4-direction shadow) instead of a soft blur so
+     white text stays readable on white/light filament tiles. */
+  text-shadow:
+    -1px -1px 0 rgba(0,0,0,.9),
+     1px -1px 0 rgba(0,0,0,.9),
+    -1px  1px 0 rgba(0,0,0,.9),
+     1px  1px 0 rgba(0,0,0,.9);
+  cursor: pointer; font-family: inherit; padding: .4rem .15rem .3rem;
   transition: transform .08s ease, box-shadow .15s;
 }
 button.slot:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(21,189,198,0.25); }
-button.slot .slot-num { font-size: 1.1rem; line-height: 1; }
+/* One number-line gap below the slot number so the label block starts a
+   consistent line lower instead of hugging the number. */
+button.slot .slot-num { font-size: 1.1rem; line-height: 1; margin-bottom: 1.1rem; }
 button.slot em { font-style: normal; font-size: .85rem; font-weight: 500; opacity: .95; margin-top: .25rem;
                  text-overflow: ellipsis; white-space: nowrap; overflow: hidden; max-width: 100%; }
-button.slot.state-empty   { background: #2a2a2a; color: #555; box-shadow: none; }
+/* Subtype line: smaller and white-on-shadow so it stays readable on
+   light filament tiles where the default muted grey vanishes. */
+button.slot em.muted { color: rgba(255,255,255,.82); font-size: .7rem; opacity: 1;
+                       font-weight: 400; margin-top: .1rem; }
+/* Empty-slot placeholder: same size/weight as the material line (not the
+   smaller, lighter muted subtype) and dimmed via the inherited state-empty
+   colour so it reads like the slot number on empty tiles. */
+button.slot em.empty-label { font-weight: 500; opacity: .9; }
+/* Provenance badge (RFID/Set/Job): anchor at the tile bottom instead of
+   crowding the filament lines; margin-left is for inline use elsewhere. */
+button.slot em.src-badge { margin-top: auto; margin-left: 0; }
+button.slot.state-empty   { background: #2a2a2a; color: #555; box-shadow: none; text-shadow: none; }
 button.slot.state-empty:hover { background: #303030; }
 button.slot.state-error   { background: #5a2d2d; }
 button.slot.state-loading { background: #5a4d2d; }
-button.slot.state-unknown { background: #333; color: #555; }
+button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .dryer-block { background: #1a1a1a; border-radius: 4px; padding: .6rem; margin-top: .6rem; border: 1px solid var(--border); }
 .dryer-status { font-size: .85rem; color: var(--muted); margin-bottom: .4rem; }
 .dryer-status strong { color: var(--fg); }
@@ -246,12 +273,25 @@ button.slot.state-unknown { background: #333; color: #555; }
                      border: 1px solid var(--border); border-radius: 3px; cursor: pointer; font-size: .8rem; }
 .dryer-form button:hover { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 .dryer-form button.warn:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
-.toolhead-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .8rem; }
-.toolhead-card { background: var(--card); border: 1px solid var(--border); padding: .8rem; border-radius: 6px; }
+.toolhead-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .8rem;
+                  grid-auto-rows: 1fr; }
+.toolhead-card { background: var(--card); border: 1px solid var(--border); padding: .8rem; border-radius: 6px;
+                  display: flex; flex-direction: column; }
+/* Push actions + manual toggle to the bottom so cards with/without
+   the subtype line still line up flush. When channel_state is present
+   it owns the auto-margin and actions sit flush against it; otherwise
+   actions absorbs the free space. Avoids the double-auto pitfall
+   where flex splits the free space between two consecutive children
+   and channel_state ends up mid-card. */
+.toolhead-card .toolhead-actions { margin-top: auto; }
+.toolhead-card:has(.meta-channel) .meta-channel { margin-top: auto; }
+.toolhead-card:has(.meta-channel) .toolhead-actions { margin-top: .25rem; }
 .toolhead-card.empty   { opacity: .5; }
 .toolhead-card.present { border-color: #3a6a3a; }
 .toolhead-card.unknown { border-color: #b59a2a; }
 .toolhead-card.unknown .meta .muted { color: #d6b842; }
+.toolhead-card.manual { border-color: #3a6a8a; }
+.toolhead-card.manual .meta .muted { color: #6aa6c8; }
 @keyframes th-blink-load {
   0%, 100% { background: #3a3a3a; }
   50%      { background: #1f4d2a; }
@@ -266,6 +306,10 @@ button.slot.state-unknown { background: #333; color: #555; }
 .toolhead-card h2 small { color: #888; font-weight: 400; font-size: .7rem; }
 .toolhead-card .th-color { width: 14px; height: 14px; border-radius: 50%; margin-left: auto; border: 1px solid #444; }
 .toolhead-card code { font-size: .75rem; color: #6cc; }
+.th-manual { display: flex; align-items: center; gap: .35rem; margin-top: .5rem; font-size: .78rem; color: #aaa; cursor: pointer; user-select: none; }
+.th-manual input { cursor: pointer; }
+.th-manual.disabled { opacity: .4; cursor: not-allowed; }
+.th-manual.disabled input { cursor: not-allowed; }
 .toolhead-actions { display: flex; gap: .4rem; margin-top: .6rem; }
 .toolhead-actions button { flex: 1; padding: .35rem .9rem; border-radius: 4px; cursor: pointer; font-size: .8rem;
                             background: var(--card); color: var(--fg); border: 1px solid var(--border);
@@ -582,3 +626,25 @@ body { padding-bottom: 64px; }
   .upload-btn { margin-left: auto; }
   .config-row { grid-template-columns: 1fr; }
 }
+
+/* Identity provenance badge (spec §4 / D3): where the shown filament
+   identity comes from — RFID tag, user override, or derived from the
+   print job. */
+.src-badge {
+  display: inline-block;
+  font-size: .6rem;
+  line-height: 1;
+  font-style: normal;
+  padding: .15em .4em;
+  margin-left: .3em;
+  border-radius: .5em;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+  /* Badge has its own fixed background — never inherit the slot tile's
+     dark text outline. */
+  text-shadow: none;
+}
+.src-rfid     { background: var(--accent); color: var(--accent-fg); }
+.src-override { background: #1f3a6b; color: #cfe0ff; }
+.src-derived  { background: var(--border); color: var(--muted); }

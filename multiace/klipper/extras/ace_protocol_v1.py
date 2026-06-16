@@ -45,16 +45,11 @@ class AceProtocolV1(AceProtocol):
         for entry in sorted(os.listdir(by_path_dir)):
             full_path = os.path.join(by_path_dir, entry)
             real_dev = os.path.basename(os.path.realpath(full_path))
-            try:
-                sysfs_base = '/sys/class/tty/%s/device/../' % real_dev
-                with open(os.path.join(sysfs_base, 'idVendor'), 'r') as f:
-                    vendor = f.read().strip()
-                with open(os.path.join(sysfs_base, 'idProduct'), 'r') as f:
-                    product = f.read().strip()
-                if vendor == V1_VENDOR_ID and product == V1_PRODUCT_ID:
-                    ace_devices.append(full_path)
-            except (IOError, OSError):
+            vendor, product = cls._read_usb_ids(real_dev)
+            if vendor is None:
                 continue
+            if vendor == V1_VENDOR_ID and product == V1_PRODUCT_ID:
+                ace_devices.append(full_path)
         return ace_devices
 
     def encode_request(self, request, next_id=None):

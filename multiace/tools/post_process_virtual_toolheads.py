@@ -1,4 +1,3 @@
-
 import sys, re, os, json
 import urllib.request, urllib.error
 from collections import defaultdict
@@ -146,6 +145,9 @@ def lookup_live_slots(host, port=80, path='/multiace/api/state', timeout=5.0):
         for slot in ace.get('slots', []) or []:
             if slot.get('state') == 'empty':
                 continue
+
+            if 'source' in slot and slot['source'] not in ('rfid', 'override'):
+                continue
             color = (slot.get('color') or '').strip().lower()
             material = (slot.get('material') or '').strip()
             if color or material:
@@ -156,6 +158,26 @@ def lookup_live_slots(host, port=80, path='/multiace/api/state', timeout=5.0):
                     'color': color,
                 })
     return out
+
+def host_has_manual_head(host, port=80, path='/multiace/api/state', timeout=5.0):
+    """True if the printer reports any toolhead set to manual/TPU. Kept
+    SEPARATE from lookup_live_slots (which stays a pure slot fetch, reusable by
+    the future Pro matcher that DOES place manual heads) so this guard is a
+    one-line removal once manual heads are supported. Returns False on any
+    HTTP/parse error (fail open - don't block on connectivity issues)."""
+    if ':' in host:
+        host, _, port_str = host.partition(':')
+        try:
+            port = int(port_str)
+        except ValueError:
+            pass
+    url = 'http://%s:%d%s' % (host, port, path)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8', errors='replace'))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return any(th.get('manual') for th in (data.get('toolheads', []) or []))
 
 def check_material_availability(filament_types, live_slots):
     """Pre-check before matching. Returns sorted list of materials that
@@ -383,7 +405,6 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
             continue
         _match_pass(tier_name, True, pred)
 
-
     for t in list(pending):
         tm = t_meta[t]
         t_mat = (tm.get('mat') or '').strip().lower()
@@ -413,6 +434,7 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
         for t in list(pending):
             tm = t_meta[t]
             t_mat = (tm.get('mat') or '').strip().lower()
+
             candidates = [sm for sm in already
                           if not t_mat or not sm['mat']
                           or sm['mat'] == t_mat]
@@ -831,7 +853,6 @@ def compute_swap_aware_layout(events, num_aces, num_heads=4,
     if best_assignment is None:
         return None, None
     return best_assignment, best_swaps
-
 
 def compute_layer_swap_plan(body_gcode, num_aces=4):
     """Analyze whether the print can be served with layer-boundary-only
@@ -2203,6 +2224,13 @@ def main():
               '(override with --aces N if needed)' % num_aces)
 
     if live_lookup_host is not None:
+
+        if host_has_manual_head(live_lookup_host):
+            print('ERROR: a toolhead is set to manual - live-lookup '
+                  'colour matching is disabled (cannot place a hand-fed manual '
+                  'head). Switch the head back to auto, or run without '
+                  '--live-lookup.', file=sys.stderr)
+            sys.exit(2)
         live_slots = lookup_live_slots(live_lookup_host)
         if live_slots is None:
             print('ERROR: live-lookup failed (printer unreachable). '

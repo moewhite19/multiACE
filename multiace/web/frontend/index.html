@@ -107,14 +107,20 @@
                         :title="slotTitle(ace, slot)">
                   <span class="slot-num">{{ dispIdx(slot.idx) }}</span>
                   <em v-if="slot.material">{{ slot.material }}</em>
-                  <em v-else-if="slot.state === 'empty'" class="muted">{{ t('ui.common.empty') }}</em>
+                  <em v-else-if="slot.state === 'empty'" class="empty-label">{{ t('ui.common.empty') }}</em>
                   <em v-else-if="slot.state !== 'unknown'">{{ slot.state }}</em>
+                  <!-- Subtype row always renders (nbsp placeholder) so every
+                       tile keeps the same line layout, loaded or empty. -->
+                  <em class="muted">{{ (slot.material && subText(slot.subtype)) || ' ' }}</em>
+                  <em v-if="slot.material && sourceLabel(slot.source)"
+                      class="src-badge" :class="'src-' + slot.source">{{ sourceLabel(slot.source) }}</em>
                 </button>
                 <button class="slot-load-btn"
+                        :class="{reload: needsReload(ace.idx, slot.idx)}"
                         @click.stop="loadSlot(ace.idx, slot.idx)"
-                        :disabled="isToolheadOccupied(ace.idx, slot.idx)"
-                        :title="t('ui.dashboard.load')">
-                  {{ t('ui.dashboard.load') }}
+                        :disabled="!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx)"
+                        :title="needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload_hint') : t('ui.dashboard.load')">
+                  {{ needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload') : t('ui.dashboard.load') }}
                 </button>
               </div>
             </div>
@@ -150,10 +156,10 @@
           <article v-for="t_ in state.toolheads" :key="t_.idx"
                    :ref="el => setThEl(t_.idx, el)"
                    class="toolhead-card"
-                   :class="{empty: !t_.module_exist, present: t_.head_source_known, unknown: !t_.head_source_known && t_.filament_at_extruder, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
+                   :class="{empty: !t_.module_exist, present: t_.head_source_known, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual, manual: t_.manual, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
             <h2>T{{ dispIdx(t_.idx) }}
               <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
-              <span class="th-color" v-if="t_.color && t_.head_source_known && !toolheadOps[t_.idx]" :style="{background: t_.color}"></span>
+              <span class="th-color" v-if="t_.color && (t_.head_source_known || t_.manual) && !toolheadOps[t_.idx]" :style="{background: t_.color}"></span>
             </h2>
             <p class="meta" v-if="toolheadOps[t_.idx]">
               <span class="muted">{{ toolheadOps[t_.idx] === 'loading' ? t('ui.dashboard.load') : t('ui.dashboard.unload') }}…</span>
@@ -161,6 +167,14 @@
             <p class="meta" v-else-if="t_.head_source_known">
               <span v-if="t_.ace != null && t_.slot != null">ACE {{ dispIdx(t_.ace) }} / Slot {{ dispIdx(t_.slot) }}</span>
               <span v-if="t_.material"> · {{ t_.material }}</span>
+              <br v-if="t_.material && subText(t_.subtype)">
+              <span v-if="t_.material && subText(t_.subtype)" class="muted">{{ subText(t_.subtype) }}</span>
+            </p>
+            <p class="meta" v-else-if="t_.manual">
+              <span class="muted">{{ t('ui.dashboard.manual') }}</span>
+              <span v-if="t_.material"> · {{ t_.material }}</span>
+              <br v-if="t_.material && subText(t_.subtype)">
+              <span v-if="t_.material && subText(t_.subtype)" class="muted">{{ subText(t_.subtype) }}</span>
             </p>
             <p class="meta" v-else-if="t_.filament_at_extruder">
               <span class="muted">{{ t('ui.common.unknown_source') }}</span>
@@ -168,7 +182,7 @@
             <p class="meta" v-else>
               <span class="muted">{{ t('ui.common.empty') }}</span>
             </p>
-            <p class="meta" v-if="t_.channel_state">
+            <p class="meta meta-channel" v-if="t_.channel_state">
               <code>{{ t_.channel_state }}</code>
               <span v-if="t_.channel_error && t_.channel_error !== 'ok'" class="error-inline">
                 · {{ t_.channel_error }}
@@ -177,6 +191,16 @@
             <div class="toolhead-actions" v-if="t_.module_exist">
               <button class="warn" @click="unloadHead(t_.idx)" :disabled="!t_.head_source_known && !t_.filament_at_extruder">{{ t('ui.dashboard.unload') }}</button>
             </div>
+            <label class="th-manual" v-if="t_.module_exist"
+                   :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
+                   :title="(t_.head_source_known || t_.filament_at_extruder)
+                     ? t('ui.dashboard.manual_unload_first')
+                     : t('ui.dashboard.manual_hint')">
+              <input type="checkbox" :checked="t_.manual"
+                     :disabled="t_.head_source_known || t_.filament_at_extruder"
+                     @change="setHeadManual(t_.idx, $event.target.checked)">
+              <span>{{ t('ui.dashboard.manual') }}</span>
+            </label>
           </article>
         </div>
       </div>
@@ -515,6 +539,10 @@ reboot</pre>
                 :title="t('ui.dialog.picker_read_rfid_hint')">
           {{ t('ui.dialog.picker_read_rfid') }}
         </button>
+        <button v-else-if="pickerHasOverride" class="rfid-btn" @click="clearPickerOverride"
+                :title="t('ui.dialog.picker_clear_hint')">
+          {{ t('ui.dialog.picker_clear') }}
+        </button>
       </h3>
       <div class="config-form">
         <div class="config-row">
@@ -524,12 +552,16 @@ reboot</pre>
           </select>
         </div>
         <div class="config-row">
-          <label>{{ t('ui.dialog.picker_subtype') }}</label>
-          <input type="text" v-model="picker.subtype" placeholder="Basic">
+          <label>{{ t('ui.dialog.picker_vendor') }}</label>
+          <select v-model="picker.vendor">
+            <option v-for="vn in pickerVendors" :key="vn" :value="vn">{{ vn }}</option>
+          </select>
         </div>
         <div class="config-row">
-          <label>{{ t('ui.dialog.picker_vendor') }}</label>
-          <input type="text" v-model="picker.vendor" placeholder="Generic">
+          <label>{{ t('ui.dialog.picker_subtype') }}</label>
+          <select v-model="picker.subtype">
+            <option v-for="s in currentSubtypes" :key="s" :value="s">{{ s }}</option>
+          </select>
         </div>
         <div class="config-row">
           <label>{{ t('ui.dialog.picker_color') }}</label>

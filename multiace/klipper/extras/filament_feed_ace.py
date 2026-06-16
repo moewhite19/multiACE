@@ -132,6 +132,10 @@ FEED_DEFAULT_CONFIG = {
 
 FEED_FILAMENT_TEMP_DEFAULT                          = 250
 
+SWAP_PROBE_COOL_DELTA                               = 45
+
+FEED_SWAP_PRECOOL_TEMP                              = 0
+
 FEED_UNLOAD_TRIGGER_SETTLE                          = 0.5
 
 class FeedLight:
@@ -563,6 +567,11 @@ class FilamentFeed:
 
         for ch in range(FEED_CHANNEL_NUMS):
             if extruder == self.filament_ch[ch]:
+
+                if self.channel_state[ch] in (FEED_STA_LOAD_FEEDING,
+                                              FEED_STA_LOAD_EXTRUDING,
+                                              FEED_STA_LOAD_FLUSHING):
+                    return
                 self.reactor.register_async_callback(
                     (lambda et, c=self._do_feed, ch=ch, action=FEED_ACT_FILAMENT_RUNOUT: c(ch, action)))
                 break
@@ -698,6 +707,14 @@ class FilamentFeed:
                 status['filament_type'][self.filament_ch[channel]],
                 status['filament_sub_type'][self.filament_ch[channel]])
 
+    def _ms_after_feed_op(self):
+
+        if self.ace is not None:
+            self.ace._machine_state_after_feed_op()
+        else:
+            self.gcode.run_script_from_command(
+                "SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE")
+
     def _hang_neutral(self, channel):
         self.reactor.pause(self.reactor.monotonic() + 0.105)
         motor_cnt_1 = self.motor_tachometer.get_counts()
@@ -769,6 +786,16 @@ class FilamentFeed:
                          extruder_index, cur_temp, temps)
         except Exception as e:
             logging.error("[feed] snapshot INNER_RESUME failed: %s", str(e))
+
+    def _swap_probe_temp(self, cool_probe, filament_feed_temp):
+
+        if not cool_probe:
+            return filament_feed_temp
+        floor = getattr(self.ace, 'swap_probe_temp', 175)
+        ref = getattr(self.ace, '_swap_probe_ref_temp', 0) or 0
+        if ref >= 170:
+            return max(floor, int(ref) - SWAP_PROBE_COOL_DELTA)
+        return floor
 
     def _do_feed(self, ch, action=None, stage=None, auto_mode=None):
         if ch < 0 or ch >= FEED_CHANNEL_NUMS or action == None:
@@ -1050,9 +1077,14 @@ class FilamentFeed:
                             self.ace._fa_trace('feed phase enter: ace=%d ch=%d head=%d'
                                                % (ace_idx, ch, self.filament_ch[ch]))
 
-                            if ace_idx in self.ace._fa_load_disable:
-                                logging.info(
-                                    '[multiACE] FEED_AUTO LOAD: ACE %d in fa_load_disable, skipping feed+FA' % ace_idx)
+                            _manual_head = self.ace.head_is_manual(self.filament_ch[ch])
+                            if ace_idx in self.ace._fa_load_disable or _manual_head:
+                                if _manual_head:
+                                    logging.info(
+                                        '[multiACE] FEED_AUTO LOAD: head %d manual, skipping ACE feed+FA' % self.filament_ch[ch])
+                                else:
+                                    logging.info(
+                                        '[multiACE] FEED_AUTO LOAD: ACE %d in fa_load_disable, skipping feed+FA' % ace_idx)
                                 self.channel_error[ch] = FEED_OK
                             else:
 
@@ -1487,6 +1519,7 @@ class FilamentFeed:
                     self._set_channel_state(ch, FEED_STA_LOAD_FLUSHING)
                     try:
                         self.toolhead.wait_moves()
+
                         _purge_len = self.ace.get_purge_length() if self.ace else 0
                         _flush_cmd = ("INNER_FLUSH_FILAMENT TEMP=%d SOFT=%d NOZZLE_DIAMETER=%f" %
                                       (filament_feed_temp, int(filament_soft),
@@ -1549,7 +1582,8 @@ class FilamentFeed:
 
             elif action == FEED_ACT_UNLOAD:
 
-                if self.ace is not None:
+                if self.ace is not None \
+                        and not self.ace.head_is_manual(self.filament_ch[ch]):
                     try:
                         self.ace._v2_arm_fa_for_unload(self.filament_ch[ch])
                     except Exception as fa_e:
@@ -1574,6 +1608,16 @@ class FilamentFeed:
                     try:
 
                         self._set_channel_state(ch, FEED_STA_UNLOAD_PREPARE, True)
+
+                        _precool = (FEED_SWAP_PRECOOL_TEMP
+                                    if (self.ace is not None and
+                                        getattr(self.ace, '_swap_in_progress', False))
+                                    else 0)
+                        if _precool > 0:
+                            self.gcode.run_script_from_command("M104 S%d\r\n" % _precool)
+                            logging.info(
+                                "[feed][unload] pre-cool start: M104 S%d "
+                                "(cools during homing/move)", _precool)
 
                         try:
                             self._set_channel_state(ch, FEED_STA_UNLOAD_HOMING)
@@ -1600,6 +1644,14 @@ class FilamentFeed:
 
                         try:
                             self._set_channel_state(ch, FEED_STA_UNLOAD_HEATING)
+                            if _precool > 0:
+
+                                self.gcode.run_script_from_command(
+                                    'TEMPERATURE_WAIT SENSOR="%s" MAXIMUM=%d\r\n'
+                                    % (self.toolhead.get_extruder().get_name(), _precool))
+                                logging.info(
+                                    "[feed][unload] pre-cool reached <=%d C, re-heating "
+                                    "for tip-form", _precool)
                             self.gcode.run_script_from_command("M109 S%d\r\n" % (filament_feed_temp))
                             self.toolhead.wait_moves()
                         except:
@@ -1653,10 +1705,32 @@ class FilamentFeed:
                             self.channel_error[ch] = FEED_ERR_CUSTOM_GCODE
                             raise ValueError('custom gcode error!')
 
-                        if self.ace is not None:
+                        if self.ace is not None \
+                                and not self.ace.head_is_manual(self.filament_ch[ch]):
+
+                            cool_probe = (getattr(self.ace, 'swap_cool_probe', False)
+                                          and getattr(self.ace, '_swap_in_progress', False))
+                            probe_temp = self._swap_probe_temp(
+                                cool_probe, filament_feed_temp)
+                            probe_push = getattr(self.ace, 'swap_probe_push', 5)
+                            probe_pull = (probe_push * 3) // 2
+
+                            precool_temp = (FEED_SWAP_PRECOOL_TEMP
+                                            if getattr(self.ace, '_swap_in_progress', False) else 0)
                             if getattr(self.ace, '_swap_in_progress', False):
                                 self.gcode.run_script_from_command(
+                                    "M104 S%d\r\n" % probe_temp)
+                                logging.info(
+                                    "[feed][unload] swap forward-probe at %d C "
+                                    "(cool_probe=%s, feed_temp=%d)",
+                                    probe_temp, cool_probe, filament_feed_temp)
+                            else:
+
+                                self.gcode.run_script_from_command(
                                     "M104 S%d\r\n" % filament_feed_temp)
+                                logging.info(
+                                    "[feed][unload] forward-probe pre-warm to %d C "
+                                    "(non-swap)", filament_feed_temp)
                             head_idx = self.filament_ch[ch]
                             source = self.ace._head_source.get(head_idx)
                             if source and source['ace_index'] != self.ace._active_device_index:
@@ -1669,28 +1743,60 @@ class FilamentFeed:
                                 self.ace.retract_fil(self.filament_ch[ch])
                                 self.ace.wait_ace_ready()
 
+                                pushed = False
                                 try:
+                                    if not getattr(self.ace, '_swap_in_progress', False):
+
+                                        self.gcode.run_script_from_command(
+                                            'TEMPERATURE_WAIT SENSOR="%s" MINIMUM=%d\r\n'
+                                            % (self.toolhead.get_extruder().get_name(),
+                                               filament_feed_temp))
                                     self.gcode.run_script_from_command("M83\r\n")
-                                    self.gcode.run_script_from_command("G1 E10 F400\r\n")
+                                    self.gcode.run_script_from_command("G1 E%d F400\r\n" % probe_push)
                                     self.toolhead.wait_moves()
+                                    pushed = True
                                 except:
                                     logging.info("[feed][unload] forward probe failed")
-
                                 self.reactor.pause(self.reactor.monotonic() + FEED_UNLOAD_TRIGGER_SETTLE)
+
                                 if not self.runout_sensor[ch].get_status(0)['filament_detected']:
                                     logging.info("[feed][unload] sensor cleared (attempt %d/%d)",
                                                  unload_attempt + 1, unload_max)
                                     unload_ok = True
                                     break
+
+                                if unload_attempt + 1 >= unload_max:
+                                    break
                                 logging.info("[feed][unload] sensor still detected, "
-                                             "retry %d/%d - re-heat + re-unload",
+                                             "retry %d/%d - pull-back + hot re-unload",
                                              unload_attempt + 1, unload_max)
+
+                                if pushed:
+                                    try:
+                                        self.gcode.run_script_from_command("M83\r\n")
+                                        self.gcode.run_script_from_command("G1 E-%d F400\r\n" % probe_pull)
+                                        self.toolhead.wait_moves()
+                                        logging.info("[feed][unload] probe push %dmm pulled back %dmm (attempt %d/%d)",
+                                                     probe_push, probe_pull, unload_attempt + 1, unload_max)
+                                    except:
+                                        logging.info("[feed][unload] probe pull-back failed")
                                 try:
+
+                                    if precool_temp > 0:
+                                        self.gcode.run_script_from_command("M104 S%d\r\n" % precool_temp)
+                                        self.gcode.run_script_from_command(
+                                            'TEMPERATURE_WAIT SENSOR="%s" MAXIMUM=%d\r\n'
+                                            % (self.toolhead.get_extruder().get_name(), precool_temp))
+                                        logging.info("[feed][unload] retry %d/%d: pre-cool to <=%d C (heat-soak reset)",
+                                                     unload_attempt + 1, unload_max, precool_temp)
+
                                     self.gcode.run_script_from_command("M109 S%d\r\n" % (filament_feed_temp))
                                     self.toolhead.wait_moves()
                                     self.gcode.run_script_from_command("INNER_FILAMENT_UNLOAD TEMP=%d SOFT=%d NOZZLE_DIAMETER=%f\r\n"
                                                                     % (filament_feed_temp, int(filament_soft), self.toolhead.get_extruder().nozzle_diameter))
                                     self.toolhead.wait_moves()
+
+                                    self.gcode.run_script_from_command("M104 S%d\r\n" % probe_temp)
                                 except:
                                     logging.info("[feed][unload] toolhead unload retry failed")
                             if not unload_ok:
@@ -1698,6 +1804,7 @@ class FilamentFeed:
 
                             if self.ace is not None:
                                 self.ace._last_unload_ok = unload_ok
+
                                 self.ace._v2_active_rev_assist = False
                         self.gcode.run_script_from_command("M104 S0\r\n")
                         self.channel_error[ch] = FEED_OK
@@ -1785,10 +1892,32 @@ class FilamentFeed:
                             self.channel_error[ch] = FEED_ERR_CUSTOM_GCODE
                             raise ValueError('custom gcode error!')
 
-                        if self.ace is not None:
+                        if self.ace is not None \
+                                and not self.ace.head_is_manual(self.filament_ch[ch]):
+
+                            cool_probe = (getattr(self.ace, 'swap_cool_probe', False)
+                                          and getattr(self.ace, '_swap_in_progress', False))
+                            probe_temp = self._swap_probe_temp(
+                                cool_probe, filament_feed_temp)
+                            probe_push = getattr(self.ace, 'swap_probe_push', 5)
+                            probe_pull = (probe_push * 3) // 2
+
+                            precool_temp = (FEED_SWAP_PRECOOL_TEMP
+                                            if getattr(self.ace, '_swap_in_progress', False) else 0)
                             if getattr(self.ace, '_swap_in_progress', False):
                                 self.gcode.run_script_from_command(
+                                    "M104 S%d\r\n" % probe_temp)
+                                logging.info(
+                                    "[feed][unload] swap forward-probe at %d C "
+                                    "(cool_probe=%s, feed_temp=%d)",
+                                    probe_temp, cool_probe, filament_feed_temp)
+                            else:
+
+                                self.gcode.run_script_from_command(
                                     "M104 S%d\r\n" % filament_feed_temp)
+                                logging.info(
+                                    "[feed][unload] forward-probe pre-warm to %d C "
+                                    "(non-swap)", filament_feed_temp)
                             head_idx = self.filament_ch[ch]
                             source = self.ace._head_source.get(head_idx)
                             if source and source['ace_index'] != self.ace._active_device_index:
@@ -1801,34 +1930,67 @@ class FilamentFeed:
                                 self.ace.retract_fil(self.filament_ch[ch])
                                 self.ace.wait_ace_ready()
 
+                                pushed = False
                                 try:
+                                    if not getattr(self.ace, '_swap_in_progress', False):
+
+                                        self.gcode.run_script_from_command(
+                                            'TEMPERATURE_WAIT SENSOR="%s" MINIMUM=%d\r\n'
+                                            % (self.toolhead.get_extruder().get_name(),
+                                               filament_feed_temp))
                                     self.gcode.run_script_from_command("M83\r\n")
-                                    self.gcode.run_script_from_command("G1 E10 F400\r\n")
+                                    self.gcode.run_script_from_command("G1 E%d F400\r\n" % probe_push)
                                     self.toolhead.wait_moves()
+                                    pushed = True
                                 except:
                                     logging.info("[feed][unload] forward probe failed")
-
                                 self.reactor.pause(self.reactor.monotonic() + FEED_UNLOAD_TRIGGER_SETTLE)
+
                                 if not self.runout_sensor[ch].get_status(0)['filament_detected']:
                                     logging.info("[feed][unload] sensor cleared (attempt %d/%d)",
                                                  unload_attempt + 1, unload_max)
                                     unload_ok = True
                                     break
+
+                                if unload_attempt + 1 >= unload_max:
+                                    break
                                 logging.info("[feed][unload] sensor still detected, "
-                                             "retry %d/%d - re-heat + re-unload",
+                                             "retry %d/%d - pull-back + hot re-unload",
                                              unload_attempt + 1, unload_max)
+
+                                if pushed:
+                                    try:
+                                        self.gcode.run_script_from_command("M83\r\n")
+                                        self.gcode.run_script_from_command("G1 E-%d F400\r\n" % probe_pull)
+                                        self.toolhead.wait_moves()
+                                        logging.info("[feed][unload] probe push %dmm pulled back %dmm (attempt %d/%d)",
+                                                     probe_push, probe_pull, unload_attempt + 1, unload_max)
+                                    except:
+                                        logging.info("[feed][unload] probe pull-back failed")
                                 try:
+
+                                    if precool_temp > 0:
+                                        self.gcode.run_script_from_command("M104 S%d\r\n" % precool_temp)
+                                        self.gcode.run_script_from_command(
+                                            'TEMPERATURE_WAIT SENSOR="%s" MAXIMUM=%d\r\n'
+                                            % (self.toolhead.get_extruder().get_name(), precool_temp))
+                                        logging.info("[feed][unload] retry %d/%d: pre-cool to <=%d C (heat-soak reset)",
+                                                     unload_attempt + 1, unload_max, precool_temp)
+
                                     self.gcode.run_script_from_command("M109 S%d\r\n" % (filament_feed_temp))
                                     self.toolhead.wait_moves()
                                     self.gcode.run_script_from_command("INNER_FILAMENT_UNLOAD TEMP=%d SOFT=%d NOZZLE_DIAMETER=%f\r\n"
                                                                     % (filament_feed_temp, int(filament_soft), self.toolhead.get_extruder().nozzle_diameter))
                                     self.toolhead.wait_moves()
+
+                                    self.gcode.run_script_from_command("M104 S%d\r\n" % probe_temp)
                                 except:
                                     logging.info("[feed][unload] toolhead unload retry failed")
                             if not unload_ok:
                                 logging.info("[feed][unload] filament genuinely stuck after %d unload attempts (sensor never cleared)", unload_max)
                             if self.ace is not None:
                                 self.ace._last_unload_ok = unload_ok
+
                                 self.ace._v2_active_rev_assist = False
                         self.gcode.run_script_from_command("M104 S0\r\n")
                         self.channel_error[ch] = FEED_OK
@@ -2018,6 +2180,18 @@ class FilamentFeed:
 
         finally:
             self.channel_active = None
+
+    def _emit_feed_pause(self, channel, key):
+
+        if self.ace is None or getattr(self.ace, '_ace_mode', '') != 'multi':
+            return None
+        head = self.filament_ch[channel]
+        hd = self.ace._disp(head)
+        src = (getattr(self.ace, '_head_source', None) or {}).get(head) or {}
+        a, s = src.get('ace_index'), src.get('slot')
+        loc = ' (ACE %d / Slot %d)' % (self.ace._disp(a), self.ace._disp(s)) \
+            if a is not None and s is not None else ''
+        return self.ace._t(key, head=hd, loc=loc)
 
     def get_status(self, eventtime=None):
         filament_detected = []
@@ -2257,7 +2431,7 @@ class FilamentFeed:
                         if str(machine_sta["action_code"]) != "PRINT_RESUMING" and str(machine_sta["action_code"]) != "PRINT_REPLENISHING":
                             self.gcode.run_script_from_command("SET_ACTION_CODE ACTION=IDLE")
                     else:
-                        self.gcode.run_script_from_command("SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE")
+                        self._ms_after_feed_op()
                     self.toolhead.wait_moves()
                 logging.info(
                     "[feed][load] channel[%d] post-finally: state=%s error=%s error_state=%s sensor=%s",
@@ -2275,23 +2449,13 @@ class FilamentFeed:
                 if raw_msg is not None:
                     tech_msg = tech_msg + "raw msg:" + raw_msg
 
-                if self.ace is not None and getattr(self.ace, '_ace_mode', '') == 'multi':
+                feed_msg = self._emit_feed_pause(channel, 'msg.pause_feed_load_jam')
+                if feed_msg is not None:
                     head_idx = self.filament_ch[channel]
-                    short = 'T%d load failed' % head_idx
-                    hint = ('Filament jam on T%d - reload via display, '
-                            'then RESUME (see fluidd log)') % head_idx
-                    try:
-                        self.gcode.run_script_from_command('M117 %s' % short)
-                    except Exception:
-                        pass
-                    try:
-                        self.gcode.run_script_from_command(
-                            'RESPOND TYPE=error MSG="[multiACE] PAUSE T%d: %s"' % (
-                                head_idx, hint.replace('"', "'")))
-                    except Exception:
-                        pass
+                    head_disp = self.ace._disp(head_idx)
+
                     for step in (
-                        'Open display load menu, reload T%d filament' % head_idx,
+                        'Reload Head %s filament (display load menu or web "Reload")' % head_disp,
                         'Verify filament is in the toolhead',
                         'Press RESUME on display or in fluidd to continue',
                     ):
@@ -2308,7 +2472,7 @@ class FilamentFeed:
                         })
                     except Exception:
                         pass
-                    msg = '%s (%s)' % (hint, tech_msg)
+                    msg = feed_msg
                 else:
                     msg = tech_msg
 
@@ -2346,7 +2510,7 @@ class FilamentFeed:
                     if str(machine_sta["main_state"]) == "PRINTING":
                         self.gcode.run_script_from_command("SET_ACTION_CODE ACTION=IDLE")
                     else:
-                        self.gcode.run_script_from_command("SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE")
+                        self._ms_after_feed_op()
                 raw_msg =  self.printer.extract_coded_message_field(str(e))
                 logging.error("[feed][unload] channel[%d]: auto unload error: %s", channel, raw_msg)
                 if self._is_keep_raw_error_info(self.channel_error[channel]):
@@ -2359,14 +2523,15 @@ class FilamentFeed:
                         if str(machine_sta["main_state"]) == "PRINTING":
                             self.gcode.run_script_from_command("SET_ACTION_CODE ACTION=IDLE")
                         else:
-                            self.gcode.run_script_from_command("SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE")
+                            self._ms_after_feed_op()
             if self.channel_error[channel] != FEED_OK:
-                msg = 'extruder[%d]: state: %s, error: %s!' % (
+                tech = 'extruder[%d]: state: %s, error: %s!' % (
                         self.filament_ch[channel],
                         self.channel_error_state[channel],
                         self.channel_error[channel])
                 if raw_msg is not None:
-                    msg = msg + "raw msg:" + raw_msg
+                    tech = tech + "raw msg:" + raw_msg
+                msg = self._emit_feed_pause(channel, 'msg.pause_feed_error') or tech
 
                 raise gcmd.error(
                         message = msg,
@@ -2411,7 +2576,7 @@ class FilamentFeed:
             if machine_state_manager is not None:
                 machine_sta = machine_state_manager.get_status()
                 if str(machine_sta["main_state"]) != "PRINTING":
-                    self.gcode.run_script_from_command("SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE")
+                    self._ms_after_feed_op()
             raw_msg =  self.printer.extract_coded_message_field(str(e))
             logging.error("[feed][manual] channel[%d]: manual load error: %s", channel, raw_msg)
             if self._is_keep_raw_error_info(self.channel_error[channel]):
@@ -2422,15 +2587,16 @@ class FilamentFeed:
                 if machine_state_manager is not None:
                     machine_sta = machine_state_manager.get_status()
                     if str(machine_sta["main_state"]) != "PRINTING":
-                        self.gcode.run_script_from_command("SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE")
+                        self._ms_after_feed_op()
 
         if self.channel_error[channel] != FEED_OK:
-            msg = 'extruder[%d]: state: %s, error: %s!' % (
+            tech = 'extruder[%d]: state: %s, error: %s!' % (
                     self.filament_ch[channel],
                     self.channel_error_state[channel],
                     self.channel_error[channel])
             if raw_msg is not None:
-                msg = msg + "raw msg:" + raw_msg
+                tech = tech + "raw msg:" + raw_msg
+            msg = self._emit_feed_pause(channel, 'msg.pause_manual_feed_error') or tech
 
             raise gcmd.error(
                     message = msg,

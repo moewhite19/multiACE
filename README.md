@@ -3,43 +3,29 @@
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K610R4F9)
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
-## Post-release notes
-
-Another FA bug showed up on hotfix3 — fix re-uploaded.
-If you still hit errors, please revert to hotfix2. I'll take more time for the next version and thoroughly test all releases from now on.
-
-- Paxx 12-19 prerelease version available - not fully tested against this firmare, next version is fully tested, but may take a while, so i decided to build this. 
-
-- RESUME Bug: just noticed a change in code destroyed a few Resume paths during swap. If you can't Resume with "can't resume while machine main state idle" Error, type SET_MAIN_STATE MAIN_STATE=PRINTING and RESUME in fluidd console, will be fixed in next release.
-
-- Filament runout does not reenable Feed assist, air prints with new spool,  will be fixed in next version
-
-## What's new in multiACE 0.97b "Kindred Allies" Hotfix 3 (prerelease -unsupported)
-
-**- V2 USB comms-loss recovery - on a USB dropout the ACE 2 reader/writer now reconnect and re-arm feed-assist automatically; a longer dropout pauses the print (resumable) instead of silently under-extruding.**
-
-**- Feed-assist stale-cache recovery - now verifies the device's real slot status instead of trusting the host cache, so feed-assist reliably re-arms after swaps/reconnects. Based on a patch kindly contributed by @hfoi589 - thanks!**
 
 
+## What's new in multiACE 0.98b "Kindred Allies" 
 
-## What's new in multiACE 0.97b "Kindred Allies" Hotfix 2 (prerelease)
+- Manual Heads (for TPU usage) Preflight not supported atm.
+- Paxx 12-19  version available.
+- Matched to 1.4.1 Firmware routines.
+- Filaments synced from printer
+- Error Corrections: Resume Bug, Filament runout an other problems sovled
 
-**- Material sensitive Web-Preflight**
+## multiACE 
 
-**- Under-extrusion on some files printed with the ACE 2 - solved**
+**Multi-ACE Pro support for Snapmaker U1 with Klipper**
 
-**-  SSH-install version throws 0003 errors during homing when flow calibration and bed mesh are active. Use the baked (bin) version; masked via TRSYNC on the SSH install; still under investigation.**
+> ⚠️ **Beta Software** - This is a community-driven development project for enabling multiple Anycubic ACE Pro filament changers on Snapmaker printers. While carefully tested, it relies on community feedback and testing to mature. Use at your own risk. Please report issues and share your experience to help improve multiACE for everyone.
 
-**- Slow retract speeds could stall color swaps - solved**
+> **Important Note:** Both the Snapmaker U1 and the Anycubic ACE Pro have their own quirks with filament loading/unloading, RFID detection (possibly related to tag sticker positioning), and occasional mechanical issues. Not every problem encountered is a multiACE issue - many are inherent to the underlying hardware. This is a beta release, not a production-ready solution. Whether these U1 and ACE Pro limitations can be resolved in the future remains to be seen.
 
-**- Turning on a heater during a print could trigger 0003 errors - set it before starting the print; solved.**
+**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be - but it recovers to a pause if it fails, so you can solve the problem and continue.**
 
-**- One recovery path could lead to head ramming - fixed.**
+## What is multiACE?
 
-## What's new in multiACE 0.97b "Kindred Allies" Hotfix 1 (prerelease)
-
-**- Hotfix 1 fixes the update feature, some USB Noise and adds web logging**
-
+multiACE supports **multiple ACE Pro / ACE Pro 2 units** on a single Snapmaker U1 printer. Switch between ACE units to use different filament sets - for example, PLA on ACE 0 and PETG on ACE 1 - without physically swapping spools.
 
 ## ACE Pro 2 Support 
 
@@ -51,36 +37,9 @@ There is a update script available, but use at you own risk.
 
 https://gist.github.com/hakimio/39c71fa7174e699c6470b7c79323b189 Thanks to hakimio for making this possible.
 https://drive.google.com/file/d/1SUnXyiJ28iv01P94k4XbRpL4bjl3HbdU/view?usp=sharing
+Read more: https://github.com/BlackFrogKok/SnapAce/issues/7
 
-Find the full password here: https://github.com/BlackFrogKok/SnapAce/issues/7
-
-Instructions for building a cable in hardware setup section of this readme.
-
-## PAXX Firmware with integrated mUlt1ACE
-
-Bin Files & Manuals (soon) @ 
-
-https://postapocalyptic-diy.com/multiace
-Source: https://github.com/decay71/SnapmakerU1-Extended-Firmware  
-
-## Post processing replaced by Web Preflight
-
-Just upload unprocessed GCode via Multiace-Web, print in actual loaded order or organize spools according to optimized layout to save swaps.
-Autoloads needed spools, no need to preload.
-
-
-**Online Updates (touch /oem/.debug needed)**
-
-Loads from postapocalyptic-diy-com. Used for minor Updates, delete in config to use github for releases
-
-**Matched to 1.3 Firmware routines**
-
-**Swap time reduced**
-
-**Priming fixed**
-
-
-## 🌐 Brand-new Reactive Web UI
+## 🌐 Reactive Web UI
 
 A full real-time control panel for your multi-ACE setup. https://printer-ip/multiace/
 
@@ -91,43 +50,9 @@ A full real-time control panel for your multi-ACE setup. https://printer-ip/mult
 
 See it in action: https://youtu.be/9uLE1uydWmo
 
-## What's new in multiACE 0.92b "Vibrant Fungi"
 
-**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be - but it recovers to a pause if it fails, so you can solve the problem and continue.**
-
-**In-print color swaps up to 16 colors** - layer-boundary and mid-layer swaps during an active print are now stable enough for real prints rather than tests. The USB rewrite, the hardened load/unload path, and the FA/Load toggles together close the failure modes that previously made mid-print swaps fragile. 
-
-**Swaptimizer** - `--optimize` on the post-process script reassigns T indices to minimize mid-print swaps and prints an ACE/Slot-sorted loadout to follow when you load cartridges. Typical savings on a 5+ color print: 20–30 %.
-
-The real star is **`--layer`**: it detects whether every layer of the print stays within ≤4 colors, and if so, rewrites the gcode so swaps only ever happen at layer boundaries (Belady-optimal). That typically means an order of magnitude fewer swaps than naive assignment, and no mid-layer toolchange interruptions at all. Example: a 7-color Toad print from MakerWorld drops from 120 mid-print swaps to 3 layer-boundary swaps - at ~3:48 per swap, that's ~7.4 hours of print time back.
-
-**Auto-Load Spools** - the post-processing script loads spools across all ACEs and unloads where needed. Fully automatic.
-
-**Rewritten USB engine** - cross-ACE toolchanges now run at stock speed *with* feed_assist on every head. The start-ACE-only restriction from 0.81b is gone: every connected ACE stays fully available for the duration of a print, and the reset-cycle edge cases that forced the 0.81b workaround are handled at the engine level.
-
-**Hardened load / unload** - several failure modes that previously stalled prints are now handled instead of just reported. Additional extrude retries retract, so the extruder gears release and re-grip. Failures snapshot the pause state (active extruder, per-head target temps) before raising, and resume was overridden with a multiACE safety layer.
-
-Many color changes possible without U1 load / unload errors - all caught by the sensor / retry logic. If it isn't caught, solve it and resume.
-
-**FA / Load handling on / off** - feed_assist is now togglable per-ACE and separately for print-time and load-time (`fa_print_disable` / `fa_load_disable`). Useful for ACEs where FA interferes with the load mechanics of a specific material.
-
-
-
-
-
-## multiACE 
-
-**Multi-ACE Pro support for Snapmaker U1 with Klipper**
-
-> ⚠️ **Beta Software** - This is a community-driven development project for enabling multiple Anycubic ACE Pro filament changers on Snapmaker printers. While carefully tested, it relies on community feedback and testing to mature. Use at your own risk. Please report issues and share your experience to help improve multiACE for everyone.
-
-> **Important Note:** Both the Snapmaker U1 and the Anycubic ACE Pro have their own quirks with filament loading/unloading, RFID detection (possibly related to tag sticker positioning), and occasional mechanical issues. Not every problem encountered is a multiACE issue - many are inherent to the underlying hardware. This is a beta release, not a production-ready solution. Whether these U1 and ACE Pro limitations can be resolved in the future remains to be seen.
-
-## What is multiACE?
-
-multiACE supports **multiple ACE Pro / ACE Pro 2 units** on a single Snapmaker U1 printer. Switch between ACE units to use different filament sets - for example, PLA on ACE 0 and PETG on ACE 1 - without physically swapping spools.
-
-## Typical Workflow
+## 🌐 Web-Preflight
+- **Just upload unprocessed GCode via Multiace-Web**, print in actual loaded order or organize spools according to optimized layout to save swaps. Autoloads needed spools, no need to preload.
 
 ### In-Print Color Swaps (layer / mid-layer)
 
@@ -169,7 +94,7 @@ Use the Fluidd macros **ACEA__Switch_0..3** to switch between ACE units.
 - **Full Cross-ACE Feed_Assist** - All connected ACEs stay fully available during a print, feed_assist on every head, at stock toolchange speed (rewritten USB engine)
 - **Hardened Load / Unload** - Retract-recovery between extrude retries, pause-state snapshot before failure, safer resume path (pre-heat before travel, Z-hop before XY)
 - **FA / Load Toggle per ACE** - Disable feed_assist per-ACE and separately for print-time / load-time (`fa_print_disable` / `fa_load_disable`)
-- **Multi-ACE Support** - Connect up to 4 ACE Pro / ACE Pro 2 units simultaneously
+- **Online Updates ** 
 - **ACE Switching** - Switch between ACE units via Fluidd macros or console
 - **Auto-Load** - Load all filled slots from selected ACE with one command
 - **Unload All** - Unload all toolheads, automatically switching to correct ACE for retract
@@ -211,13 +136,10 @@ Yes. With a single ACE, multiACE still manages loads, unloads, and auto-feed cle
 Yes. Anycubic-RFID (or self written) spools work fine - or set filament type and color manually via the Snapmaker display. RFID and non-RFID spools can be mixed across slots and ACEs.
 
 **Can I still use TPU / TPE?**
-Yes, switch to **Normal Mode** (stock feeders, no ACE) 
+Yes, switch to **Normal Mode** (stock feeders, no ACE) or use the new manual heads
 
 **Do I need PAXX firmware?**
-No. Stock Snapmaker firmware 1.2+ works. PAXX adds display mirroring so load/unload is fully controllable from the computer - convenient, not required.
-
-**What happens if an ACE is powered off or disconnected at startup?**
-multiACE waits up to 20s for all expected devices (per `ace_device_count`) before locking the path-to-index mapping. A device missing at that point will be flagged, and a pre-print safety check warns if a needed ACE is offline.
+No. Stock Snapmaker firmware 1.4+ works. PAXX adds display mirroring so load/unload is fully controllable from the computer - convenient, not required.
 
 **Will a failed load during print ruin the whole print?**
 Not automatically. Load failures trigger a pause (not a full abort), snapshot the pause state (active extruder, target temps), and route through a hardened resume path. In many cases - loose filament, gear slip - the retract-between-retries recovery clears the problem before the pause is even raised.
@@ -389,39 +311,7 @@ Before installing multiACE, ensure the following:
 5. Reboot the printer
 6. multiACE starts in **Multi mode** - all connected ACE units are detected automatically
 
-### Manual Install
 
-If you prefer manual installation:
-
-1. Copy Klipper extras to the printer:
-   ```
-   cp klipper/extras/ace.py /home/lava/klipper/klippy/extras/
-   cp klipper/extras/filament_feed_ace.py /home/lava/klipper/klippy/extras/
-   cp klipper/extras/filament_switch_sensor_ace.py /home/lava/klipper/klippy/extras/
-   cp klipper/kinematics/extruder_ace.py /home/lava/klipper/klippy/kinematics/
-   ```
-
-2. Copy config files:
-   ```
-   cp config/extended/ace.cfg /home/lava/printer_data/config/extended/
-   mkdir -p /home/lava/printer_data/config/extended/multiace
-   cp config/extended/multiace/ace_vars.cfg /home/lava/printer_data/config/extended/multiace/
-   cp config/extended/multiace/ace_mode_switch.sh /home/lava/printer_data/config/extended/multiace/
-   chmod +x /home/lava/printer_data/config/extended/multiace/ace_mode_switch.sh
-   ```
-
-3. Activate ACE file swap:
-   ```
-   bash /home/lava/printer_data/config/extended/multiace/ace_mode_switch.sh ace
-   ```
-
-4. Delete Python cache:
-   ```
-   rm -rf /home/lava/klipper/klippy/extras/__pycache__/
-   rm -rf /home/lava/klipper/klippy/kinematics/__pycache__/
-   ```
-
-5. Reboot the printer
 
 ### Uninstall
 
@@ -478,23 +368,11 @@ ACE_SWAP_HEAD HEAD=0 ACE=1
 
 Use this when you want full manual control over where and how often swaps happen. Good for color accents, signatures, or single-layer labels.
 
-### Option 2 - Automatic Post-Processing (`post_process_virtual_toolheads.py`)
+### Option 2 - Web Preflight 
 
-For a real multi-color print where the slicer already thinks in tool changes, let the included post-processing script do the conversion. The script maps slicer-emitted **virtual toolheads T4..T15** to the correct `ACE_SWAP_HEAD` commands and cleans up the heater/pre-extrude commands so nothing collides with multiACE's own swap flow.
+For a real multi-color print where the slicer already thinks in tool changes, let the Web Preflight do the conversion. The function maps slicer-emitted **virtual toolheads T4..T15** to the correct `ACE_SWAP_HEAD` commands and cleans up the heater/pre-extrude commands so nothing collides with multiACE's own swap flow.
 
-**Filament order in the slicer** - set up your project with up to 16 filaments: **T0..T3** are the four "primary" filaments physically loaded on your active ACE (head 0..3), and **T4..T15** are the swap-in filaments on the other ACE slots. The mapping is position-based: `T4` = ACE 1 / head 0, `T5` = ACE 1 / head 1, … `T7` = ACE 1 / head 3, `T8..T11` = ACE 2 heads 0..3, `T12..T15` = ACE 3 heads 0..3. Assign your slicer's colors/materials in that order so the post-processing script can translate every toolchange into the right `ACE_SWAP_HEAD HEAD=X ACE=Y`.
-
-**Setup** - in your slicer's post-processing field, point it at:
-
-```
-python3 /path/to/multiace/tools/post_process_virtual_toolheads.py 
-```
-
-**Flags:**
-
-- `--optimize` - Swaptimizer: reassign T indices to minimize mid-print swaps, print an ACE/Slot-sorted loading order.
-- `--layer` - upgrade of `--optimize`: if every layer stays within ≤4 colors, rewrite the gcode so swaps only happen at layer boundaries. Silently falls back to `--optimize` when infeasible.
-- `--no-auto-load` - turn off auto-load feature
+**Upload the processed gcode via Fluidd** - after the slicer exports, upload the resulting `.gcode` through multiACE Web UI) and start the print from there. Fluidd sends the rewritten commands to Klipper directly, so the ACE-aware gcode reaches multiACE exactly as the script produced it.
 
 **What it does:**
 
@@ -502,9 +380,6 @@ python3 /path/to/multiace/tools/post_process_virtual_toolheads.py
 - Skips redundant swaps when a head already holds the requested color
 - Runs an **optimizer**: prints a recommended ACE loadout (which 4 colors should live on the "primary" slots so fewer swaps are needed) to both the slicer's post-process dialog and `multiace_postprocess.log`
 
-**Upload the processed gcode via Fluidd** - after the slicer exports, upload the resulting `.gcode` through Fluidd (Jobs → Upload) and start the print from there. Fluidd sends the rewritten commands to Klipper directly, so the ACE-aware gcode reaches multiACE exactly as the script produced it.
-
-This is the path used for full multi-material prints. The optimizer output is useful even if you edit the loadout by hand afterwards - it tells you which color changes cost you the most swaps.
 
 ## Configuration
 
@@ -565,16 +440,6 @@ max_dryer_temperature: 70    # safety cap
 # dryer_duration_0: 240
 ```
 
-### Feed-Assist (FA) Gate
-
-```ini
-# Per-ACE FA exclusion (comma-separated 0-based ACE indices).
-# fa_print_disable: no FA during print - extruder pulls filament alone
-# fa_load_disable:  no FA during load - manual insert (e.g. TPU)
-# fa_print_disable: 0,2
-# fa_load_disable: 1
-```
-
 ### Toolchange / Swap
 
 ```ini
@@ -603,7 +468,6 @@ Lookup priority: `[ace N] load_length_Y` → `[ace N] load_length` → `[ace] lo
 ## Known Limitations
 - **Air Print Detection has to be off** - Looking into that for next hotfix.
 - **Don't turn off automatic load in display** - Throws errors.
-- **Some prime-finetuning is needed**, have to look into that.
 - **Unload before first use** - After a fresh install or when upgrading from a previous version, unload all toolheads before starting multiACE. Filament loaded from a previous installation can cause unexpected behavior since multiACE has no knowledge of the previous state. Use **ACEC__Unload_All** or unload via the display first.
 - **Unload All clears display info** - After **ACEC__Unload_All**, manually set filament types and colors are cleared. By design - reload and set filament info again after unloading.
 

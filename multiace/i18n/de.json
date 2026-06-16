@@ -34,7 +34,10 @@
       "status": "Status",
       "saving": "Speichere…",
       "error": "Fehler",
-      "unknown_source": "Unbekannte Quelle"
+      "unknown_source": "Unbekannte Quelle",
+      "source_rfid": "RFID",
+      "source_override": "MAN",
+      "source_derived": "Job"
     },
     "dashboard": {
       "no_aces": "Keine ACEs erkannt.",
@@ -49,12 +52,17 @@
       "list_btn": "Auflisten",
       "load_all": "Alle laden",
       "load": "Laden",
+      "reload": "Nachladen",
+      "reload_hint": "Runout mitten im Druck an diesem Kopf — Filament einlegen, Nachladen klicken, dann am Drucker fortsetzen.",
       "unload": "Entladen",
+      "manual": "Manuell",
+      "manual_hint": "Manueller Vorschub: kein ACE-Vorschub, kein Retract, keine Assist/RFID für diesen Kopf. Von Hand laden.",
+      "manual_unload_first": "Diesen Kopf erst entladen, um den Manuell-Modus zu ändern.",
       "swap_in_progress": "ACE-Wechsel läuft — bitte warten bis abgeschlossen.",
       "dryer": "Trockner",
       "duration": "Dauer",
       "aces": "ACEs",
-      "toolheads": "Toolheads",
+      "toolheads": "Druckköpfe",
       "snapshots": "Filament-Snapshots",
       "save_current": "Aktuellen speichern…",
       "snapshot_name_prompt": "Snapshot-Name (A-Z, 0-9, _-):",
@@ -153,7 +161,9 @@
       "picker_save_switch_hint": "ACE {ace} ist nicht aktiv - wird zuerst umgeschaltet.",
       "picker_load_after": "Speichern und diesen Slot laden",
       "picker_read_rfid": "RFID einlesen",
-      "picker_read_rfid_hint": "Material, Hersteller und Farbe vom RFID-Tag des Slots übernehmen"
+      "picker_read_rfid_hint": "Material, Hersteller und Farbe vom RFID-Tag des Slots übernehmen",
+      "picker_clear": "Löschen",
+      "picker_clear_hint": "Manuelle Filament-Angabe für diesen Slot entfernen"
     },
     "notifications": {
       "title": "multiACE-Hinweise",
@@ -180,6 +190,7 @@
     },
     "preflight": {
       "title": "G-Code Preflight",
+      "manual_disabled": "Preflight ist deaktiviert, solange ein Kopf auf manuell steht. Stelle den Kopf zurück auf auto, oder lade die Datei direkt über Fluidd hoch.",
       "loading": "Analysiere G-Code...",
       "printer_loadout": "Drucker-Belegung (live)",
       "slicer_colors": "Slicer-Farben",
@@ -207,7 +218,7 @@
       "not_feasible": "nicht möglich",
       "slicer":     "Slicer",
       "printer":    "Drucker",
-      "match_tier": "Match"
+      "match_tier": "Treffer"
     },
     "queue": {
       "send_all_tooltip": "Alle Queue-Befehle an den Drucker senden (UI darf danach geschlossen werden)",
@@ -216,6 +227,18 @@
     }
   },
   "msg": {
+    "pause_swap_slot_empty": "[multiACE] Slot leer für Kopf {head} (ACE {ace} / Slot {slot}) - Filament einlegen, dann RESUME",
+    "pause_swap_slot_empty_post": "[multiACE] Slot leer für Kopf {head} (ACE {ace} / Slot {slot}) nach Entladen - Filament einlegen, dann RESUME",
+    "pause_swap_unload_jam": "[multiACE] Entlade-Stau an Kopf {head} - ACE{ua}/Slot{us} entladen, ACE{la}/Slot{ls} laden, dann RESUME",
+    "pause_swap_load_slip": "[multiACE] Ladeschlupf an Kopf {head} (ACE {ace} / Slot {slot}) - entladen, neu laden, dann RESUME",
+    "pause_feed_load_jam": "[multiACE] Ladestau an Kopf {head}{loc} - über Display/Web neu laden, dann RESUME",
+    "pause_feed_error": "[multiACE] Feed-Fehler an Kopf {head}{loc} - Filament prüfen, dann RESUME",
+    "pause_manual_feed_error": "[multiACE] Manueller Feed-Fehler an Kopf {head}{loc} - Filament prüfen, dann erneut versuchen",
+    "pause_runout": "[multiACE] Filament leer an Kopf {head}{loc} - Filament neu laden, dann RESUME",
+    "pause_ace_comms_lost": "[multiACE] ACE {ace} Verbindung verloren (Kopf {head}) - USB/Strom prüfen, dann RESUME",
+    "head_manual_loaded": "[multiACE] Kopf {head} ist noch geladen - erst entladen, um den Manuell-Modus zu ändern",
+    "feed_manual_skip": "[multiACE] Kopf {head} ist manuell - von Hand laden/entladen, ACE-Vorschub übersprungen",
+    "unload_head_already_empty": "[multiACE] Kopf {head} ist bereits leer - nichts zu entladen",
     "web_running": "[multiACE] Web läuft auf http://<printer>/multiace/",
     "version_line": "[multiACE] v{version} \"{codename}\" build={build} (Datei: {ts})",
     "normal_mode_skip": "Normal-Modus - überspringe ACE-Erkennung",

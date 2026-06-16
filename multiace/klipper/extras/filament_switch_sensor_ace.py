@@ -62,6 +62,20 @@ class RunoutHelper:
             return int(num_str) if num_str.isdigit() else 0
         return 0
 
+    def _runout_disp(self):
+
+        ace = self.printer.lookup_object('ace', None)
+        head = self.extruder_index
+        if ace is not None and hasattr(ace, '_t'):
+            hd = ace._disp(head)
+            src = (getattr(ace, '_head_source', None) or {}).get(head) or {}
+            a, s = src.get('ace_index'), src.get('slot')
+            loc = ' (ACE %d / Slot %d)' % (ace._disp(a), ace._disp(s)) \
+                if a is not None and s is not None else ''
+            return ace._t('msg.pause_runout', head=hd, loc=loc)
+        return ('[multiACE] %s runout - reload filament '
+                '(display or web "Reload"), then RESUME' % self.name)
+
     def _runout_event_handler(self, eventtime):
 
         ace = self.printer.lookup_object('ace', None)
@@ -69,6 +83,7 @@ class RunoutHelper:
             logging.info("[multiACE] filament_switch_sensor: blocking runout during swap")
             return
 
+        full_msg = self._runout_disp()
         pause_prefix = ""
         if self.runout_pause:
             if self.exception_manager is not None:
@@ -76,7 +91,7 @@ class RunoutHelper:
                                         self.exception_manager.list.MODULE_ID_TOOLHEAD,
                                         self.extruder_index,
                                         self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT,
-                                        '%s runout' % (self.name),
+                                        full_msg,
                                         2)
             pause_resume = self.printer.lookup_object('pause_resume')
             pause_resume.send_pause_command()
@@ -94,7 +109,7 @@ class RunoutHelper:
                         id = self.exception_manager.list.MODULE_ID_TOOLHEAD,
                         index = self.extruder_index,
                         code = self.exception_manager.list.CODE_TOOLHEAD_FILAMENT_RUNOUT,
-                        message = '%s runout' % (self.name),
+                        message = full_msg,
                         oneshot = 0,
                         level = 2)
 
@@ -108,6 +123,7 @@ class RunoutHelper:
             logging.exception("Script running error")
         self.min_event_systime = self.reactor.monotonic() + self.event_delay
     def note_filament_present(self, is_filament_present, force=False):
+
         if is_filament_present == self.filament_present and force == False:
             return
         self.filament_present = is_filament_present
@@ -148,6 +164,10 @@ class RunoutHelper:
                 logging.info("[multiACE] note_filament_present: blocking runout callback during swap")
                 return
 
+            if self.print_task_config is not None and \
+                    getattr(self.print_task_config, 'is_exec_print_end_action', False):
+                return
+
             self.min_event_systime = self.reactor.NEVER
             logging.info(
                 "Filament Sensor %s: runout event detected, Time %.2f" %
@@ -171,6 +191,10 @@ class RunoutHelper:
         self.config['enable'] = bool(self.sensor_enabled)
         logging.info("Filament Sensor: set enable/disable -- %d", self.sensor_enabled)
 
+        if self.print_task_config is not None and \
+                hasattr(self.print_task_config, 'update_filament_flags'):
+            self.print_task_config.update_filament_flags()
+
         need_save = gcmd.get_int('SAVE', 1, minval=0, maxval=1)
         if (need_save):
             load_config = self.printer.load_snapmaker_config_file(self.config_path, DEFAULT_CONFIG)
@@ -184,7 +208,7 @@ class RunoutHelper:
         if print_stats is not None and print_stats.state in ["printing", "paused"]:
             if bool(self.sensor_enabled) and not bool(self.filament_present):
                 raise gcmd.error(
-                        message = f'{self.name} runout',
+                        message = self._runout_disp(),
                         action = 'pause',
                         id = 523,
                         index = self.extruder_index,

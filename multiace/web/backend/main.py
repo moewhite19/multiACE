@@ -14,6 +14,7 @@ Environment variables:
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -54,12 +55,22 @@ OVERRIDE_FILE = os.environ.get(
     "MULTIACE_OVERRIDE_FILE",
     "/home/lava/printer_data/config/extended/multiace/slot_overrides.json",
 )
-MATERIALS_FILE = os.environ.get(
-    "MULTIACE_MATERIALS_FILE",
-    "/home/lava/printer_data/config/extended/multiace/materials.json",
+
+FILAMENT_PARAMS_PATHS = tuple(
+    os.environ.get(
+        "MULTIACE_FILAMENT_PARAMS",
+        "/home/lava/klipper/klippy/extras/filament_parameters.py:"
+        "/home/printer_data/klipper/klippy/extras/filament_parameters.py:"
+        "/usr/share/klipper/klippy/extras/filament_parameters.py",
+    ).split(":")
 )
+
+_FIL_DB_META_KEYS = {
+    "version", "hard_filaments_max_flow_k", "soft_filaments_max_flow_k",
+}
+
 DEFAULT_MATERIALS = [
-    "PLA", "PLA+", "PLA-CF",
+    "PLA", "PLA-CF",
     "PETG", "PETG-CF", "PETG-HF",
     "ABS", "ASA",
     "TPU",
@@ -86,6 +97,29 @@ def _homing_active() -> bool:
         return False
     return 0.0 <= age < HOMING_GATE_TTL
 
+_LAST_STATUS: dict = {}
+_LAST_STATUS_TS: float = 0.0
+_STATUS_CACHE_TTL = float(os.environ.get("MULTIACE_STATUS_CACHE_TTL", "5.0"))
+_GATE_WAIT_MAX = float(os.environ.get("MULTIACE_GATE_WAIT_MAX", "0.5"))
+
+async def _query_state_gated() -> dict:
+    """Homing-gated wrapper around _query_state. Serves the last cached
+    status during a homing window so on-demand HTTP routes don't add
+    Moonraker poll load while the multi-MCU homing-probe is running."""
+    global _LAST_STATUS, _LAST_STATUS_TS
+    now = time.time()
+    if _homing_active():
+        if _LAST_STATUS and (now - _LAST_STATUS_TS) <= _STATUS_CACHE_TTL:
+            return _LAST_STATUS
+
+        deadline = now + _GATE_WAIT_MAX
+        while _homing_active() and time.time() < deadline:
+            await asyncio.sleep(0.05)
+    status = await _query_state()
+    _LAST_STATUS = status
+    _LAST_STATUS_TS = time.time()
+    return status
+
 PLUGIN_PORT_RANGE = os.environ.get("MULTIACE_PLUGIN_PORTS", "8089-8098")
 PLUGIN_DISCOVERY_TTL = float(os.environ.get("MULTIACE_PLUGIN_TTL", "30"))
 DEFAULT_FRONTEND = str((Path(__file__).resolve().parent.parent / "frontend"))
@@ -110,7 +144,6 @@ def _resolve_version() -> str:
             return ('%s+%s' % (m_ver.group(1), m_tag.group(1))
                     if m_tag else m_ver.group(1))
     return "0.2.0"
-
 
 VERSION = _resolve_version()
 
@@ -177,6 +210,7 @@ def _parse_state(status: dict) -> dict:
     device_count = int(ace.get("device_count", 1))
     active_device = int(ace.get("active_device", 0))
     head_source = ace.get("head_source", {}) or {}
+    head_manual = ace.get("head_manual", {}) or {}
     raw_aces = ace.get("aces", []) or []
 
     ptc = status.get("print_task_config", {}) or {}
@@ -259,8 +293,7 @@ def _parse_state(status: dict) -> dict:
             is_empty = (
                 gate == 0
                 or raw_status.startswith("empty")
-                or raw_status == ""
-                and gate is None
+                or (raw_status == "" and gate is None)
             )
 
             if gate == 0:
@@ -274,20 +307,6 @@ def _parse_state(status: dict) -> dict:
                     _eject_pending_since.pop((i, s), None)
             else:
                 _eject_pending_since.pop((i, s), None)
-            override = _override_for(i, s)
-            loaded_t = loaded_by_source.get((i, s))
-            if override is not None:
-                ptc_overlay = {
-                    "material": override.get("material", ""),
-                    "sku":      override.get("subtype", ""),
-                    "brand":    override.get("brand", ""),
-                    "color":    override.get("color") or None,
-                }
-            elif loaded_t is not None:
-                ptc_overlay = _ptc_at(loaded_t)
-            else:
-                ptc_overlay = None
-
             rfid_status = sd.get("rfid", 0)
             rfid_data = None
             if rfid_status == 2:
@@ -295,8 +314,45 @@ def _parse_state(status: dict) -> dict:
                     "material": sd.get("material", "") or sd.get("type", ""),
                     "brand":    sd.get("brand", ""),
                     "sku":      sd.get("sku", ""),
+                    "subtype":  sd.get("subtype", ""),
                     "color":    _color_to_hex(sd.get("color")),
                 }
+
+            override = _override_for(i, s)
+            loaded_t = loaded_by_source.get((i, s))
+
+            if override is not None:
+                ptc_overlay = {
+                    "material": override.get("material", ""),
+
+                    "sku":      "",
+                    "brand":    override.get("brand", ""),
+                    "color":    override.get("color") or None,
+                }
+                source = "override"
+            elif rfid_data is not None and not is_empty:
+                ptc_overlay = {
+                    "material": rfid_data["material"],
+                    "sku":      rfid_data["sku"],
+                    "brand":    rfid_data["brand"],
+                    "color":    rfid_data["color"],
+                }
+                source = "rfid"
+            elif loaded_t is not None:
+                ptc_overlay = _ptc_at(loaded_t)
+                source = "derived" if ptc_overlay is not None else None
+            else:
+                ptc_overlay = None
+                source = None
+
+            if override is not None:
+                disp_subtype = (override.get("subtype") or "").strip()
+            elif rfid_data is not None and not is_empty:
+                disp_subtype = (sd.get("subtype") or "").strip()
+            elif loaded_t is not None and loaded_t < len(ptc_subs):
+                disp_subtype = (ptc_subs[loaded_t] or "").strip()
+            else:
+                disp_subtype = ""
 
             if is_empty and ptc_overlay is None:
                 slots_out.append({
@@ -308,9 +364,11 @@ def _parse_state(status: dict) -> dict:
                     "material":  "",
                     "brand":     "",
                     "sku":       "",
+                    "subtype":   "",
                     "color":     None,
                     "color_rgb": None,
                     "rfid_data": rfid_data,
+                    "source":    "empty",
                 })
             else:
 
@@ -324,9 +382,11 @@ def _parse_state(status: dict) -> dict:
                         "material":  ptc_overlay["material"],
                         "brand":     ptc_overlay["brand"],
                         "sku":       ptc_overlay["sku"],
+                        "subtype":   disp_subtype,
                         "color":     ptc_overlay["color"],
                         "color_rgb": None,
                         "rfid_data": rfid_data,
+                        "source":    source,
                     })
                 else:
                     slots_out.append({
@@ -338,9 +398,11 @@ def _parse_state(status: dict) -> dict:
                         "material":  sd.get("material", "") or sd.get("type", ""),
                         "brand":     sd.get("brand", ""),
                         "sku":       sd.get("sku", ""),
+                        "subtype":   disp_subtype,
                         "color":     _color_to_hex(sd.get("color")),
                         "color_rgb": sd.get("color"),
                         "rfid_data": rfid_data,
+                        "source":    source,
                     })
         aces_out.append({
             "idx":          i,
@@ -369,6 +431,9 @@ def _parse_state(status: dict) -> dict:
         loaded = bool(feed.get("filament_detected"))
         color = None
         material = ""
+        subtype = ""
+        sku = ""
+        source = None
         ace_field = None
         slot_field = None
         if d_explicit is not None and sl_explicit is not None:
@@ -380,6 +445,23 @@ def _parse_state(status: dict) -> dict:
                     slot_obj = slots_arr[sl_explicit]
                     color = slot_obj.get("color")
                     material = slot_obj.get("material", "")
+
+                    subtype = slot_obj.get("subtype", "")
+                    sku = slot_obj.get("sku", "")
+                    source = slot_obj.get("source")
+        is_manual = bool(head_manual.get(str(t), head_manual.get(t, False)))
+        if is_manual:
+
+            d_explicit = sl_explicit = None
+            ace_field = slot_field = None
+            color = None
+            material = subtype = sku = ""
+            source = None
+            ptc_id = _ptc_at(t)
+            if ptc_id:
+                material = ptc_id.get("material", "") or ""
+                color = ptc_id.get("color")
+                subtype = ptc_id.get("sku", "") or ""
         toolheads.append({
             "idx":                t,
             "name":               f"T{t}",
@@ -394,7 +476,11 @@ def _parse_state(status: dict) -> dict:
             "module_exist":       feed.get("module_exist"),
             "color":              color,
             "material":           material,
-            "head_source_known":  d_explicit is not None,
+            "subtype":            subtype,
+            "sku":                sku,
+            "head_source_known":  (d_explicit is not None) and not is_manual,
+            "manual":             is_manual,
+            "source":             source,
         })
 
         if d_explicit is not None and sl_explicit is not None:
@@ -457,6 +543,10 @@ class ConfigUpdate(BaseModel):
 class SnapshotSave(BaseModel):
     name: str
     description: str | None = None
+
+class HeadManual(BaseModel):
+    head: int
+    enable: bool
 
 class SlotOverride(BaseModel):
     ace: int
@@ -551,13 +641,27 @@ def _cleanup_preflight_dir() -> None:
         except Exception:
             pass
 
+async def _any_head_manual() -> bool:
+    """True if any toolhead is set to manual/TPU. The preflight color matcher
+    works off ACE slots, so a hand-fed manual head (no ACE slot) can't be
+    matched/assigned - preflight is disabled when one is active (Pro feature)."""
+    try:
+        status = await _query_state_gated()
+        parsed = _parse_state(status)
+        return any(th.get("manual") for th in parsed.get("toolheads", []) or [])
+    except Exception:
+        return False
+
 async def _live_slots_async() -> list[dict]:
-    status = await _query_state()
+    status = await _query_state_gated()
     out = []
     parsed = _parse_state(status)
     for ace in parsed.get("aces", []) or []:
         for slot in ace.get("slots", []) or []:
             if slot.get("state") == "empty":
+                continue
+
+            if slot.get("source") not in ("rfid", "override"):
                 continue
             out.append({
                 "ace":      ace.get("idx"),
@@ -626,7 +730,6 @@ def _real_swap_count(events, mapping):
             head_current[h] = key
     return swaps
 
-
 def _layout_from_head_assignment(c2h, slicer_colors, slicer_types):
     """Turn {color: head} into a mapping list with (ace, slot=head)
     per color. ACE within each head = first-come-first-served (sorted
@@ -650,7 +753,6 @@ def _layout_from_head_assignment(c2h, slicer_colors, slicer_types):
         }))
     rows.sort(key=lambda r: (r[0], r[1], r[2]))
     return [r[3] for r in rows]
-
 
 def _build_plan(pp, plan_name, body, result, mapping,
                 slicer_colors=None, slicer_types=None, num_aces=4):
@@ -751,6 +853,13 @@ async def preflight(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
         raise HTTPException(status_code=400, detail="not a g-code file")
+
+    if await _any_head_manual():
+        raise HTTPException(
+            status_code=409,
+            detail=("Preflight is disabled while a head is set to manual. "
+                    "Switch the head back to auto, or upload the file directly "
+                    "via Fluidd."))
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="empty file")
@@ -954,6 +1063,7 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
         if missing_mats:
             raise RuntimeError(
                 "required material(s) not loaded: " + ", ".join(missing_mats))
+
         if mode == "slicer":
             remap, _info, _ = pp.match_colors_to_slots(
                 slicer_colors, live_slots, num_heads=4,
@@ -1307,7 +1417,7 @@ async def upload_and_print(file: UploadFile = File(...)) -> dict:
 async def get_state() -> dict:
     """Aggregated dashboard state (ACEs + toolheads + dryer + status)."""
     try:
-        status = await _query_state()
+        status = await _query_state_gated()
     except httpx.HTTPError as e:
         return {"error": f"moonraker: {e}"}
     return _parse_state(status)
@@ -1316,7 +1426,7 @@ async def get_state() -> dict:
 async def list_aces() -> dict:
     """Backwards-compatible subset of /api/state - only the per-ACE list."""
     try:
-        status = await _query_state()
+        status = await _query_state_gated()
     except httpx.HTTPError as e:
         return {"aces": [], "error": f"moonraker: {e}"}
     parsed = _parse_state(status)
@@ -1326,7 +1436,7 @@ async def list_aces() -> dict:
 async def get_debug() -> dict:
     """Raw moonraker dump - useful for inspecting unknown fields."""
     try:
-        return await _query_state()
+        return await _query_state_gated()
     except httpx.HTTPError as e:
         return {"error": f"moonraker: {e}"}
 
@@ -1402,6 +1512,7 @@ async def run_macro(req: MacroRequest) -> dict:
             parts.append(f"{k}={v}")
     script = " ".join(parts)
     try:
+
         result = await _mr_post("/printer/gcode/script",
                                 {"script": script}, timeout=1800.0)
     except httpx.HTTPStatusError as e:
@@ -1616,7 +1727,7 @@ async def save_snapshot(req: SnapshotSave) -> dict:
     p = _snap_path(req.name)
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
-        status = await _query_state()
+        status = await _query_state_gated()
     except httpx.HTTPError as e:
         raise HTTPException(502, f"moonraker: {e}")
     snap = _capture_snapshot(status)
@@ -1655,7 +1766,7 @@ async def apply_snapshot(name: str) -> dict:
         raise HTTPException(404, "snapshot not found")
     snap = json.loads(p.read_text(encoding="utf-8"))
     try:
-        status = await _query_state()
+        status = await _query_state_gated()
     except httpx.HTTPError as e:
         raise HTTPException(502, f"moonraker: {e}")
     cur = _parse_state(status)
@@ -2015,6 +2126,9 @@ async def _moonraker_log_listener() -> None:
 
                     if debug_recv:
                         _trace.warning("moonraker WS recv #%d: %s", msg_count, str(raw)[:240])
+
+                    if _homing_active():
+                        continue
                     try:
                         msg = json.loads(raw)
                     except (TypeError, ValueError):
@@ -2220,29 +2334,99 @@ async def plugin_api_gcode(req: _PluginGcode) -> dict:
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
 
+@app.post("/api/head-manual")
+async def head_manual_set(req: HeadManual) -> dict:
+    """Toggle manual/TPU bypass for a head (no ACE feed/retract/FA/RFID;
+    the head sensor stays active). Persisted by the Klipper module."""
+    if req.head < 0 or req.head > 3:
+        raise HTTPException(status_code=400, detail="head must be 0..3")
+    script = "ACE_SET_HEAD_MANUAL HEAD=%d ENABLE=%d" % (
+        req.head, 1 if req.enable else 0)
+    try:
+        await _mr_post("/printer/gcode/script", {"script": script})
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code,
+                            detail=f"moonraker: {e.response.text}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"moonraker: {e}")
+    return {"ok": True, "head": req.head, "manual": req.enable}
+
+_FIL_DB_CACHE: dict = {}
+
+def _load_filament_db() -> dict:
+    """Parse the Snapmaker firmware filament DB and return the full
+    {type: {vendor: [subtype, ...]}} hierarchy (subtypes exclude the implicit
+    'generic'; the 'generic' vendor is normalised to 'Generic' to match the
+    display/PTC vocabulary). Reads only dict KEYS from the
+    FILAMENT_PARA_CFG_DEFAULT literal via ast, so module-constant values never
+    need to resolve. Cached per file mtime. Returns {} if no readable file."""
+    for raw in FILAMENT_PARAMS_PATHS:
+        path = raw.strip()
+        if not path:
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        cached = _FIL_DB_CACHE.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                tree = ast.parse(f.read())
+        except (OSError, SyntaxError):
+            continue
+        cfg = None
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name)
+                    and t.id == "FILAMENT_PARA_CFG_DEFAULT"
+                    for t in node.targets):
+                cfg = node.value
+                break
+        if not isinstance(cfg, ast.Dict):
+            continue
+        db: dict = {}
+        for k, v in zip(cfg.keys, cfg.values):
+            if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                continue
+            name = k.value
+            if name in _FIL_DB_META_KEYS or not isinstance(v, ast.Dict):
+                continue
+            vendors: dict = {}
+            for vk, vv in zip(v.keys, v.values):
+                if not (isinstance(vk, ast.Constant)
+                        and isinstance(vk.value, str)
+                        and vk.value.startswith("vendor_")
+                        and isinstance(vv, ast.Dict)):
+                    continue
+                vendor = vk.value[7:]
+                vendor = "Generic" if vendor == "generic" else vendor
+                subs: list = []
+                for sk in vv.keys:
+                    if (isinstance(sk, ast.Constant)
+                            and isinstance(sk.value, str)
+                            and sk.value.startswith("sub_")):
+                        s = sk.value[4:]
+                        if s and s != "generic" and s not in subs:
+                            subs.append(s)
+                vendors[vendor] = subs
+            db[name] = vendors or {"Generic": []}
+        _FIL_DB_CACHE[path] = (mtime, db)
+        return db
+    return {}
+
 @app.get("/api/materials")
 async def get_materials() -> dict:
-    """Return the user-editable filament material list. Seeds the file from
-    DEFAULT_MATERIALS on first access if it doesn't exist, so it works no
-    matter how multiACE was installed."""
-    p = Path(MATERIALS_FILE)
-    try:
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            mats = data.get("materials") if isinstance(data, dict) else data
-            if isinstance(mats, list) and mats:
-                return {"materials": [str(m) for m in mats]}
-        else:
-            try:
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(json.dumps({"materials": DEFAULT_MATERIALS},
-                                        indent=2, ensure_ascii=False),
-                             encoding="utf-8")
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return {"materials": DEFAULT_MATERIALS}
+    """Return the selectable filament materials and the full
+    type -> vendor -> subtypes hierarchy, sourced from the firmware filament
+    DB (filament_parameters.py). Falls back to DEFAULT_MATERIALS if the
+    firmware file can't be read."""
+    db = _load_filament_db()
+    if db:
+        return {"materials": list(db.keys()), "db": db}
+    return {"materials": DEFAULT_MATERIALS,
+            "db": {m: {"Generic": []} for m in DEFAULT_MATERIALS}}
 
 @app.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
@@ -2273,6 +2457,7 @@ async def ws(websocket: WebSocket) -> None:
                         return
                     last_seen_notif_id = n["id"]
             if now - last_ts >= 1.0 and not _homing_active():
+
                 try:
                     status = await _query_state()
                     payload = _parse_state(status)

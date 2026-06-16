@@ -22,7 +22,9 @@ KINEMATICS_DIR="${HOME_DIR}/klipper/klippy/kinematics"
 CONFIG_DIR="${HOME_DIR}/printer_data/config/extended"
 MULTIACE_DIR="${CONFIG_DIR}/multiace"
 PRINTER_CFG="${HOME_DIR}/printer_data/config/printer.cfg"
-LOGFILE="/tmp/multiace_install.log"
+LOG_DIR="${HOME_DIR}/printer_data/logs"
+mkdir -p "$LOG_DIR" 2>/dev/null
+LOGFILE="${LOG_DIR}/multiace_install.log"
 IS_ROOT=0
 if [ "$(id -u)" = "0" ]; then
     IS_ROOT=1
@@ -101,6 +103,8 @@ log "  Klipper kinematics installed"
 # mitigation (= Klipper's own single-MCU value) masks it. The standalone
 # web-head daemon (S98multiace-web) reduces but does not eliminate the 0003
 # (web-preflight bedmesh still trips it), so the mitigation is re-armed here.
+# The root cause - klippy code-page eviction on overlay/SSH installs during
+# the multi-MCU homing-probe window - is tracked separately.
 #
 # TESTING: set to "0.050" to leave stock untouched and observe the real 0003
 # signal. To re-arm the mitigation, change this ONE value back to "0.250".
@@ -110,6 +114,7 @@ if [ -f "$MCU_PY" ] && grep -qE '^TRSYNC_TIMEOUT = ' "$MCU_PY" \
         && ! grep -qE "^TRSYNC_TIMEOUT = ${TRSYNC_VALUE}\$" "$MCU_PY"; then
     [ -f "${MCU_PY}.pre_multiace" ] || cp "$MCU_PY" "${MCU_PY}.pre_multiace" 2>/dev/null || true
     sed -i -E "s/^TRSYNC_TIMEOUT = .*/TRSYNC_TIMEOUT = ${TRSYNC_VALUE}/" "$MCU_PY"
+    log "  TRSYNC_TIMEOUT armed to ${TRSYNC_VALUE} in mcu.py (backup: ${MCU_PY}.pre_multiace)"
 fi
 NEW_CFG="$INSTALL_DIR/config/extended/ace.cfg"
 ACTIVE_CFG="$CONFIG_DIR/ace.cfg"
@@ -153,16 +158,9 @@ if [ ! -f "$MULTIACE_DIR/ace_vars.cfg" ]; then
 else
     log "  ace_vars.cfg exists, keeping current settings"
 fi
-# User-editable filament material list. Created fresh; never overwritten, so
-# user additions survive updates. (Bin installs that skip this still work -
-# the web backend seeds materials.json from its built-in default on first
-# access.)
-if [ ! -f "$MULTIACE_DIR/materials.json" ]; then
-    cp "$INSTALL_DIR/config/extended/multiace/materials.json" "$MULTIACE_DIR/materials.json" 2>/dev/null \
-        && log "  materials.json created (fresh)" || true
-else
-    log "  materials.json exists, keeping user materials"
-fi
+# Filament material list is no longer a static file: the web backend reads
+# the selectable materials + subtypes straight from the firmware filament DB
+# (klippy/extras/filament_parameters.py), so there is nothing to seed here.
 log "  multiace config installed"
 if [ -d "$INSTALL_DIR/i18n" ]; then
     mkdir -p "$MULTIACE_DIR/i18n"
@@ -174,6 +172,17 @@ if [ -f "$INSTALL_DIR/uninstall_multiace.sh" ]; then
     cp "$INSTALL_DIR/uninstall_multiace.sh" "$MULTIACE_DIR/uninstall_multiace.sh"
     chmod +x "$MULTIACE_DIR/uninstall_multiace.sh"
     log "  Uninstall script installed"
+fi
+# $MULTIACE_DIR is created with `mkdir -p` above; in the root (SSH) install
+# context that leaves it root:root, so the web backend (lava) cannot write
+# its runtime files (slot_overrides.json, filament_snapshots/) and Klipper
+# (lava) cannot read them -> "[Errno 13] Permission denied" on
+# slot_overrides.json. Hand the whole tree back to lava. Self-heals any
+# pre-existing root-owned files from an earlier SSH overwrite. Lava context
+# already owns them, so this is root-only.
+if [ "$IS_ROOT" = "1" ]; then
+    chown -R lava:lava "$MULTIACE_DIR" 2>/dev/null || true
+    log "  multiace config dir ownership set to lava:lava"
 fi
 if [ -d "$INSTALL_DIR/tools" ]; then
     mkdir -p "${HOME_DIR}/printer_data/config/tools"
@@ -448,9 +457,9 @@ PYEOF
     if [ "$IS_ROOT" = "1" ]; then
         cp "$WEB_SRC/deploy/S98multiace-web" "$INITD_SCRIPT"
         sed -i 's/\r$//' "$INITD_SCRIPT"
-        # 0755 (not just +x): ace.py runs as lava and must be able to
-        # execute this script. A root-only -rwx------ leaves the web head
-        # unstartable from the Klipper side after a reboot.
+        # 0755 (not just +x): ace.py runs as lava and starts this script
+        # via sudo; a root-only -rwx------ is fine for sudo but 0755 keeps
+        # it consistent and inspectable.
         chmod 0755 "$INITD_SCRIPT"
         log "  Installed init script: $INITD_SCRIPT"
     else
