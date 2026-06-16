@@ -11,7 +11,7 @@
 - Paxx 12-19  version available.
 - Matched to 1.4.1 Firmware routines.
 - Filaments synced from printer
-- Error Corrections: Resume Bug, Filament runout an other problems sovled
+- Error Corrections: Resume Bug, Filament runout an other problems solved
 
 ## multiACE 
 
