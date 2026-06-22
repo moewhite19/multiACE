@@ -6,7 +6,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
-## What's new in multiACE 0.98b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
+## What's new in multiACE 0.98.1b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
 - Removed another Air-Print issue with ACE V2
 - RFID Filament Vendor now correctly imported.
 
