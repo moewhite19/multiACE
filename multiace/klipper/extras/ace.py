@@ -16,12 +16,12 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "0.98b"
+MULTIACE_VERSION = "0.98.1b"
 MULTIACE_CODENAME = "Kindred Allies"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "17e08d6"
+MULTIACE_BUILD_TAG = "aaf00f7"
 MULTIACE_BUNDLE_SHA1 = "6675cd6"
 
 def _load_i18n_catalog(i18n_dir, lang):
@@ -80,6 +80,8 @@ V2_FA_RUNNING_STATES = (
     'assisting', 'rollback_assisting', 'feeding', 'rollback', 'preloading')
 
 FA_HOMING_SETTLE = 0.5
+
+FA_ASSIST_VERIFY_MARGIN = 1.5
 
 class MultiAce:
     VARS_ACE_REVISION = 'ace__revision'
@@ -2575,6 +2577,9 @@ class MultiAce:
         self._feed_assist_per_ace[idx] = slot
         if idx == self._active_device_index:
             self._feed_assist_index = slot
+        _vst = self._v2_velocity_state.get(idx)
+        if _vst is not None:
+            _vst['last_arm_time'] = self.reactor.monotonic()
 
         max_retries = self._fa_start_retries
         retry_delay = self._fa_start_retry_delay
@@ -2593,24 +2598,24 @@ class MultiAce:
                     if attempt > 0:
 
                         self._fa_log.warning(
-                            'start_feed_assist OK after %d retry(s): ACE %s slot %s'
-                            % (attempt, self._disp(idx), self._disp(slot)))
+                            'start_feed_assist OK after %d retry(s): ACE %d slot %d'
+                            % (attempt, idx, slot))
                     return
                 if msg == 'error_2':
                     vstate = self._v2_velocity_state.get(idx)
                     snap = (vstate or {}).get('last_slot_statuses', {})
                     if snap.get(slot) == 'assisting':
                         self._fa_log.info(
-                            'start_feed_assist error_2 ignored - ACE %s slot %s already assisting'
-                            % (self._disp(idx), self._disp(slot)))
+                            'start_feed_assist error_2 ignored - ACE %d slot %d already assisting'
+                            % (idx, slot))
                         return
                 if msg in ('forbidden', 'error_2') and attempt < max_retries:
                     next_attempt = attempt + 1
 
                     self._fa_log.info(
-                        'start_feed_assist %s, retry %d/%d in %.1fs: ACE %s slot %s'
+                        'start_feed_assist %s, retry %d/%d in %.1fs: ACE %d slot %d'
                         % (msg.upper(), next_attempt, max_retries,
-                           retry_delay, self._disp(idx), self._disp(slot)))
+                           retry_delay, idx, slot))
                     def _retry(eventtime):
 
                         if not self._auto_feed_enabled:
@@ -2625,9 +2630,8 @@ class MultiAce:
                             if vstate is not None:
                                 vstate['last_arm_time'] = self.reactor.monotonic()
                             self._fa_log.info(
-                                'start_feed_assist RETRY %d/%d sent: ACE %s slot %s'
-                                % (next_attempt, max_retries,
-                                   self._disp(idx), self._disp(slot)))
+                                'start_feed_assist RETRY %d/%d sent: ACE %d slot %d'
+                                % (next_attempt, max_retries, idx, slot))
                         except Exception as e:
                             self.log_error(self._t('msg.fa_retry_send_failed',
                                 error=e))
@@ -3179,6 +3183,22 @@ class MultiAce:
                     break
 
             if armed_slot is None:
+                _verify_to = self._fa_settle_after_stop + FA_ASSIST_VERIFY_MARGIN
+                if (target_slot is not None
+                        and self._feed_assist_per_ace.get(idx, -1) == target_slot
+                        and self._auto_feed_enabled
+                        and self._fa_context == 'print'
+                        and not getattr(self, '_v2_active_rev_assist', False)
+                        and self._v2_get_slot_status(idx, target_slot)
+                            not in V2_FA_RUNNING_STATES
+                        and (eventtime - state.get('last_arm_time', 0.0)
+                             > _verify_to)):
+                    self._fa_log.warning(
+                        '[v2-recover] FA arm not confirmed on ACE %d slot %d '
+                        '(%.1fs since arm, never -> assisting) - resending'
+                        % (idx, target_slot, _verify_to))
+                    self._v2_schedule_fa_rearm(
+                        idx, target_slot, 'arm-dropped:no-assist')
                 if state['last_armed_slot'] is not None:
                     last_idx = state['last_armed_slot']
                     new_state = 'unknown'
@@ -3383,9 +3403,11 @@ class MultiAce:
 
                 for _s in result.get('slots', []) or []:
                     if isinstance(_s, dict):
-                        _bt, _st = self._split_type_subtype(_s.get('type', ''))
+                        _bt, _st, _vn = self._split_type_subtype(_s.get('type', ''))
                         _s['type'] = _bt
                         _s['subtype'] = _st
+                        if _vn and not (_s.get('brand') or ''):
+                            _s['brand'] = _vn
 
                 display_refresh_needed = False
                 for i in range(4):
@@ -4115,24 +4137,22 @@ class MultiAce:
         return types
 
     def _split_type_subtype(self, type_str):
-        """A spool's RFID 'type' can arrive with the sub-type merged in
-        (e.g. 'PLA Glow' from an app-written tag). The firmware DB only
-        knows base materials, so 'PLA Glow' as FILAMENT_TYPE is not
-        printable. Split off a leading KNOWN base material -> (base,
-        subtype) so we push FILAMENT_TYPE=base (printable, DB falls back to
-        sub_generic for an unknown subtype) + FILAMENT_SUBTYPE=subtype.
-        Leave the string unchanged when the first token is not a known
-        material (don't invent a split). Match is case-insensitive."""
+        """Split an RFID 'type' that arrived with the vendor PREFIXED and/or the
+        sub-type SUFFIXED onto the base material (e.g. 'Snapmaker PLA Tr' or
+        'PLA Glow'). Scan tokens for the first known base material: before =
+        vendor, the token = base, after = subtype. Returns (base, subtype,
+        vendor); unchanged base when no token is a known material."""
         t = (type_str or '').strip()
         if not t:
-            return ('', '')
+            return ('', '', '')
         known = self._get_known_main_types()
         if t.upper() in known:
-            return (t, '')
-        parts = t.split(None, 1)
-        if len(parts) == 2 and parts[0].upper() in known:
-            return (parts[0], parts[1].strip())
-        return (t, '')
+            return (t, '', '')
+        parts = t.split()
+        for i, tok in enumerate(parts):
+            if tok.upper() in known:
+                return (tok, ' '.join(parts[i + 1:]), ' '.join(parts[:i]))
+        return (t, '', '')
 
     def _override_for(self, ace_idx, slot_idx):
         """Return the override dict for (ace, slot) when at least one
