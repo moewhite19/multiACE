@@ -6,7 +6,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
-**Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a single ACE.**
+**Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a U1 with single ACE.**
 
 For now it works with one ACE only (either V1 or V2). It ships as a prerelease and comes without support. I am setting up a sticky feedback thread in the Issues, and I would love to hear how it works out for you.
 
@@ -14,7 +14,7 @@ Just select head mode in config (tested with head 4 only, but selectable) and co
 Remaining Feeders work like Stock-Mode.
 
 ## What's new in multiACE 0.99b "Persistent Pesterers" Prerelease (unsupported / paxx bin available)
-- Ace per Head mode (1 ACE 1/2 only at the moment)  7 Colors with just 1 ACE Pro
+- Ace per Head mode (1 ACE 1/2 only at the moment)  7 Colors with U1 + just 1 ACE Pro
 - Ace per Head Preflight and Optimization Modes
 - Selectable Slots in multi and head preflight
 
