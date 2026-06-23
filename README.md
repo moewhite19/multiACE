@@ -405,36 +405,53 @@ For a real multi-color print where the slicer already thinks in tool changes, le
 
 **Running the analysis on your PC (post-processing script)**
 
-Since the heavy work runs on the Snapmaker (limited RAM/CPU), you can run the exact same logic on your PC instead. It is the standalone version of the engine. It does two things: it rewrites the G-code in place (injects the ACE_SWAP_HEAD commands) and writes a report with the loadout/swap plan.
+Since the heavy work runs on the Snapmaker (limited RAM/CPU), you can run the exact same logic on your PC instead. It is the standalone version of the engine. It does two things: it **rewrites the G-code in place** (injects the `ACE_SWAP_HEAD` commands) and **writes a report** with the loadout/swap plan.
 
-Command
+**Command**
 
+```
 python post_process_virtual_toolheads.py [options] <file.gcode>
+```
+
 Options:
 
---layer : layer mode (swaps only at layer boundaries, fewest swaps)
---optimize : free optimization (mid-layer swaps allowed)
-(neither) : simple slot==head
---live-lookup [printer-ip] : match against the printer's currently loaded slots (needs network access to the U1; without an IP it uses the MULTIACE_HOST env var or 127.0.0.1)
---aces N : override the ACE count (otherwise auto-detected)
-The <file.gcode> must be the last argument and is overwritten in place (this is standard for a slicer post-processor). Keep a copy first if you want to preserve the original.
+- `--layer` : layer mode (swaps only at layer boundaries, fewest swaps)
+- `--optimize` : free optimization (mid-layer swaps allowed)
+- *(neither)* : simple slot==head
+- `--live-lookup [printer-ip]` : match against the printer's currently loaded slots (needs network access to the U1; without an IP it uses the `MULTIACE_HOST` env var or `127.0.0.1`)
+- `--aces N` : override the ACE count (otherwise auto-detected)
 
-Hooking it into Orca / Snapmaker Orca (runs automatically on slice)
+The `<file.gcode>` must be the **last argument** and is **overwritten in place** (this is standard for a slicer post-processor). Keep a copy first if you want to preserve the original.
 
-Print Settings -> Output options -> Post-processing Scripts, add one line (Windows example, full paths in quotes):
+**Hooking it into Orca / Snapmaker Orca (runs automatically on slice)**
 
+`Print Settings -> Output options -> Post-processing Scripts`, add one line (Windows example, full paths in quotes):
+
+```
 "C:\Python\python.exe" "C:\multiace\post_process_virtual_toolheads.py" --layer
+```
+
 Orca appends the exported G-code path automatically. This moves the heavy computation onto your PC instead of the printer, so 130-180 MB files finish in seconds instead of minutes (or failing).
 
-Where the results go (two options)
+**Where the results go (two options)**
 
-Automatic: every run appends the report (loadout recommendation, T-remap, swap counts, LAYER MODE: X->Y swaps) to
-multiace_postprocess.log
-located in the same folder as the script. Just open it after slicing.
-Manual (console): redirect stdout:
-python post_process_virtual_toolheads.py --layer file.gcode > report.txt 2>&1
-writes the same report to report.txt (2>&1 also captures any errors).
-In short: the G-code is rewritten in place, and the analysis report is written automatically to multiace_postprocess.log next to the script (or wherever you redirect it with > report.txt).  
+1. **Automatic:** every run appends the report (loadout recommendation, T-remap, swap counts, `LAYER MODE: X->Y swaps`) to
+
+   ```
+   multiace_postprocess.log
+   ```
+
+   located in the **same folder as the script**. Just open it after slicing.
+
+2. **Manual (console):** redirect stdout:
+
+   ```
+   python post_process_virtual_toolheads.py --layer file.gcode > report.txt 2>&1
+   ```
+
+   writes the same report to `report.txt` (`2>&1` also captures any errors).
+
+In short: the G-code is rewritten in place, and the analysis report is written automatically to `multiace_postprocess.log` next to the script (or wherever you redirect it with `> report.txt`).
 
 
 ## Configuration
