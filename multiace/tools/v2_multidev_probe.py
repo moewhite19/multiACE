@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """V2 multi-device bus probe.
 
 Opens the V2 CH343 USB-UART, sends DISCOVER_DEVICE (cmd 0) and ASSIGN_DEVICE_ID

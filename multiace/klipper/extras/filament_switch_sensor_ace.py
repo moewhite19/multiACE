@@ -63,7 +63,6 @@ class RunoutHelper:
         return 0
 
     def _runout_disp(self):
-
         ace = self.printer.lookup_object('ace', None)
         head = self.extruder_index
         if ace is not None and hasattr(ace, '_t'):
@@ -123,7 +122,6 @@ class RunoutHelper:
             logging.exception("Script running error")
         self.min_event_systime = self.reactor.monotonic() + self.event_delay
     def note_filament_present(self, is_filament_present, force=False):
-
         if is_filament_present == self.filament_present and force == False:
             return
         self.filament_present = is_filament_present

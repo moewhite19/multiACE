@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Preserve user values from an existing ace.cfg when refreshing to a new
 ace.cfg.default shipped by a firmware update.
 

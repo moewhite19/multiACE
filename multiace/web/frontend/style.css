@@ -127,8 +127,12 @@ h3 { margin: 1.2rem 0 .5rem 0; color: var(--muted); font-size: .85rem; font-weig
 .ace-th-wrap .ace-grid, .ace-th-wrap .toolhead-grid, .ace-th-wrap h3,
 .ace-th-wrap p { position: relative; z-index: 1; }
 .ace-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 1rem; }
-/* Solo ACE: don't stretch the only card across the full row width. */
-.ace-grid > .ace-card:only-child { max-width: 500px; }
+/* Solo ACE (head/single view): span the full grid row and use a fixed width
+   (not max-width) so the card is the same size whether left- or right-aligned
+   - justify-self:end would otherwise shrink it to content width on the right. */
+.ace-grid > .ace-card:only-child { grid-column: 1 / -1; width: min(500px, 100%); }
+/* head mode: ACE head on the right side (display head 3/4) -> right-align the card */
+.ace-grid > .ace-card.ace-right { justify-self: end; }
 .ace-card { background: var(--card); padding: 1rem; border-radius: 6px;
             border: 1px solid var(--border); transition: border-color .15s; }
 .ace-card.primary   { border-color: var(--accent); }
@@ -292,6 +296,9 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .toolhead-card.unknown .meta .muted { color: #d6b842; }
 .toolhead-card.manual { border-color: #3a6a8a; }
 .toolhead-card.manual .meta .muted { color: #6aa6c8; }
+.toolhead-card.feeder { border-color: #2f6f5f; }
+.toolhead-card.feeder .meta .muted { color: #5fae9a; }
+.toolhead-card.feeder-empty { opacity: .5; }
 @keyframes th-blink-load {
   0%, 100% { background: #3a3a3a; }
   50%      { background: #1f4d2a; }

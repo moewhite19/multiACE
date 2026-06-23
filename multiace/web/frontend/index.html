@@ -73,7 +73,7 @@
         </p>
         <div class="ace-grid">
           <article v-for="ace in state.aces" :key="ace.idx" class="ace-card"
-                   :class="{primary: ace.idx === state.active_device, clickable: ace.idx !== state.active_device}"
+                   :class="{primary: ace.idx === state.active_device, clickable: ace.idx !== state.active_device, 'ace-right': state.mode === 'head' && state.ace_head >= 2}"
                    @click="ace.idx !== state.active_device && switchAce(ace.idx)">
             <h2>
               <span class="ace-name">ACE {{ dispIdx(ace.idx) }}
@@ -92,7 +92,7 @@
                         :class="{active: dryOpenAce === ace.idx, running: aceDrying(ace)}"
                         @click="toggleDryPanel(ace.idx)"
                         :title="t('ui.dashboard.dryer')">☀</button>
-                <button class="ace-load-all" @click.stop="loadAll(ace.idx)">{{ t('ui.dashboard.load_all') }}</button>
+                <button class="ace-load-all" v-if="state.mode !== 'head'" @click.stop="loadAll(ace.idx)">{{ t('ui.dashboard.load_all') }}</button>
               </span>
             </h2>
             <div class="slot-row" @click.stop>
@@ -118,7 +118,7 @@
                 <button class="slot-load-btn"
                         :class="{reload: needsReload(ace.idx, slot.idx)}"
                         @click.stop="loadSlot(ace.idx, slot.idx)"
-                        :disabled="!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx)"
+                        :disabled="state.mode === 'head' ? slotLoadedInHead(slot.idx) : (!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx))"
                         :title="needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload_hint') : t('ui.dashboard.load')">
                   {{ needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload') : t('ui.dashboard.load') }}
                 </button>
@@ -156,10 +156,10 @@
           <article v-for="t_ in state.toolheads" :key="t_.idx"
                    :ref="el => setThEl(t_.idx, el)"
                    class="toolhead-card"
-                   :class="{empty: !t_.module_exist, present: t_.head_source_known, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual, manual: t_.manual, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
+                   :class="{empty: !t_.module_exist, present: t_.head_source_known, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
             <h2>T{{ dispIdx(t_.idx) }}
               <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
-              <span class="th-color" v-if="t_.color && (t_.head_source_known || t_.manual) && !toolheadOps[t_.idx]" :style="{background: t_.color}"></span>
+              <span class="th-color" v-if="t_.color && (t_.head_source_known || t_.manual || t_.feeder) && !toolheadOps[t_.idx]" :style="{background: t_.color}"></span>
             </h2>
             <p class="meta" v-if="toolheadOps[t_.idx]">
               <span class="muted">{{ toolheadOps[t_.idx] === 'loading' ? t('ui.dashboard.load') : t('ui.dashboard.unload') }}…</span>
@@ -172,6 +172,12 @@
             </p>
             <p class="meta" v-else-if="t_.manual">
               <span class="muted">{{ t('ui.dashboard.manual') }}</span>
+              <span v-if="t_.material"> · {{ t_.material }}</span>
+              <br v-if="t_.material && subText(t_.subtype)">
+              <span v-if="t_.material && subText(t_.subtype)" class="muted">{{ subText(t_.subtype) }}</span>
+            </p>
+            <p class="meta" v-else-if="t_.feeder">
+              <span class="muted">{{ t('ui.dashboard.feeder') }}</span>
               <span v-if="t_.material"> · {{ t_.material }}</span>
               <br v-if="t_.material && subText(t_.subtype)">
               <span v-if="t_.material && subText(t_.subtype)" class="muted">{{ subText(t_.subtype) }}</span>
@@ -189,6 +195,7 @@
               </span>
             </p>
             <div class="toolhead-actions" v-if="t_.module_exist">
+              <button v-if="t_.feeder && !t_.filament_at_extruder" @click="loadFeederHead(t_.idx)">{{ t('ui.dashboard.load') }}</button>
               <button class="warn" @click="unloadHead(t_.idx)" :disabled="!t_.head_source_known && !t_.filament_at_extruder">{{ t('ui.dashboard.unload') }}</button>
             </div>
             <label class="th-manual" v-if="t_.module_exist"
@@ -204,8 +211,8 @@
           </article>
         </div>
       </div>
-      <h3>{{ t('ui.dashboard.snapshots') }}</h3>
-      <div class="snapshot-row">
+      <h3 v-if="state.mode !== 'head'">{{ t('ui.dashboard.snapshots') }}</h3>
+      <div class="snapshot-row" v-if="state.mode !== 'head'">
         <select v-model="selectedSnapshot">
           <option value="">- {{ t('ui.dashboard.snapshot_select_or_new') }} -</option>
           <option v-for="s in snapshots" :key="s.name" :value="s.name">
@@ -216,7 +223,7 @@
         <button @click="saveSnapshot" class="primary">{{ t('ui.dashboard.save_current') }}</button>
         <button @click="deleteSnapshot" :disabled="!selectedSnapshot" class="warn">×</button>
       </div>
-      <div v-if="snapshotPreview" class="snapshot-preview">
+      <div v-if="snapshotPreview && state.mode !== 'head'" class="snapshot-preview">
         <strong>{{ snapshotPreview.name }}</strong>
         <div class="snapshot-thds">
           <span v-for="t_ in snapshotPreview.toolheads" :key="t_.idx" class="snapshot-th"
@@ -234,10 +241,16 @@
       <p v-if="configLoadError" class="error">{{ configLoadError }}</p>
       <h3>{{ t('ui.config.mode') }}</h3>
       <div class="mode-row">
-        <button v-for="m in ['normal','multi']"
+        <button v-for="m in ['normal','multi','head']"
                 :key="m"
                 :class="{active: state.mode === m}"
                 @click="setMode(m)">{{ m }}</button>
+        <label class="ace-head-pick">
+          {{ t('ui.config.ace_head') }}
+          <select v-model.number="aceHeadSel">
+            <option v-for="h in [0,1,2,3]" :key="h" :value="h">{{ dispIdx(h) }}</option>
+          </select>
+        </label>
         <span v-if="modeChangePending" class="pill warn-pill">
           {{ t('ui.config.mode_change_pending') }}
         </span>
@@ -610,6 +623,7 @@ reboot</pre>
         </div>
       </div>
       <template v-if="preflight.report">
+        <template v-if="!preflight.report.head_mode">
         <h4>{{ t('ui.preflight.printer_loadout') }}</h4>
         <div class="preflight-grid">
           <div v-for="s in preflight.report.live_slots"
@@ -657,8 +671,10 @@ reboot</pre>
               <h4>{{ t('ui.preflight.plan_' + mode) }}</h4>
               <span v-if="preflight.report.plans[mode].feasible"
                     class="muted small">
-                {{ preflight.report.plans[mode].swaps }}
+                {{ mode === 'slicer' ? slicerSwapsDisplay() : preflight.report.plans[mode].swaps }}
                 {{ t('ui.preflight.swaps_label') }}
+                <span v-if="mode === 'slicer' && preflight.slicerDirty"
+                      class="preflight-stale">· {{ t('ui.preflight.stale') }}</span>
               </span>
               <span v-else class="preflight-infeasible">
                 {{ t('ui.preflight.not_feasible') }}
@@ -680,10 +696,26 @@ reboot</pre>
                 <tr v-for="m in sortedMapping(preflight.report.plans[mode])" :key="'r-'+mode+'-'+m.t"
                     :class="{warn: tierWarn(m.tier)}">
                   <td v-if="m.slot">
-                    <span class="preflight-dot"
-                          :style="{background: m.slot.color || '#444'}"></span>
-                    ACE {{ dispIdx(m.slot.ace) }} Slot {{ dispIdx(m.slot.slot) }}
-                    <span class="muted small">· {{ m.slot.material || '?' }}</span>
+                    <template v-if="mode === 'slicer'">
+                      <select class="preflight-slot-select"
+                              :style="{background: (slicerEffectiveSlot(m.t) && slicerEffectiveSlot(m.t).color) || '#444',
+                                       color: textOn(slicerEffectiveSlot(m.t) && slicerEffectiveSlot(m.t).color)}"
+                              :value="slotKey(slicerEffectiveSlot(m.t))"
+                              @change="onSlicerSlotChange(m.t, $event.target.value)">
+                        <option v-for="opt in slicerSlotOptions(m.t)"
+                                :key="'opt-'+m.t+'-'+slotKey(opt)"
+                                :value="slotKey(opt)"
+                                :style="{background: opt.color || '#444', color: textOn(opt.color)}">
+                          ACE {{ dispIdx(opt.ace) }} Slot {{ dispIdx(opt.slot) }} · {{ opt.material || '?' }}
+                        </option>
+                      </select>
+                    </template>
+                    <template v-else>
+                      <span class="preflight-dot"
+                            :style="{background: m.slot.color || '#444'}"></span>
+                      ACE {{ dispIdx(m.slot.ace) }} Slot {{ dispIdx(m.slot.slot) }}
+                      <span class="muted small">· {{ m.slot.material || '?' }}</span>
+                    </template>
                   </td>
                   <td v-else class="muted">-</td>
                   <td>T{{ dispIdx(m.t) }}</td>
@@ -699,8 +731,13 @@ reboot</pre>
             </table>
             <div class="row" v-if="!preflight.report.missing_materials.length
                                    && preflight.report.plans[mode].feasible">
+              <button v-if="mode === 'slicer' && preflight.slicerDirty"
+                      @click="recalcSlicer">
+                {{ t('ui.preflight.recalc') }}
+              </button>
               <button class="primary"
-                      :disabled="preflight.sending !== ''"
+                      :disabled="preflight.sending !== ''
+                                 || (mode === 'slicer' && preflight.slicerDirty)"
                       @click="startPreflightPrint(mode)">
                 {{ preflight.sending === mode
                      ? t('ui.preflight.sending')
@@ -708,6 +745,142 @@ reboot</pre>
               </button>
             </div>
           </div>
+        </template>
+        </template>
+
+        <template v-else>
+          <h4>
+            {{ t('ui.preflight.head_mode_title') }}
+            <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ dispIdx(preflight.report.ace_head) }}</span>
+          </h4>
+
+          <h4>{{ t('ui.preflight.head_targets') }}</h4>
+          <div class="preflight-grid">
+            <div v-for="tg in preflight.report.targets" :key="'ht-'+tg.id"
+                 class="preflight-card">
+              <div class="preflight-swatch"
+                   :style="{background: tg.color || '#444'}"></div>
+              <div class="preflight-meta">
+                <div><strong>{{ headTargetLabel(tg) }}</strong></div>
+                <div class="small">{{ tg.name }}</div>
+                <div class="muted small">{{ tg.color || '?' }}</div>
+              </div>
+            </div>
+          </div>
+          <h4>{{ t('ui.preflight.slicer_colors') }}</h4>
+          <div class="preflight-grid">
+            <div v-for="c in preflight.report.slicer_colors" :key="'hsc-'+c.t"
+                 class="preflight-card">
+              <div class="preflight-swatch"
+                   :style="{background: c.hex || '#444'}"></div>
+              <div class="preflight-meta">
+                <div><strong>T{{ dispIdx(c.t) }}</strong></div>
+                <div class="muted small">{{ c.material || '?' }}</div>
+                <div class="small">{{ c.name }}</div>
+                <div class="muted small">{{ c.hex }}</div>
+              </div>
+            </div>
+          </div>
+
+          <template v-for="hp in ['loadout', 'optimize', 'layer']"
+                    :key="'hplan-'+hp">
+            <div v-if="preflight.report.plans[hp]" class="preflight-plan">
+              <div class="preflight-plan-head">
+                <h4>{{ t('ui.preflight.head_plan_' + hp) }}</h4>
+                <span v-if="headPlanFeasible(hp)" class="muted small">
+                  {{ headPlanSwaps(hp) }} {{ t('ui.preflight.swaps_label') }}
+                  <span v-if="hp === 'loadout' && preflight.headDirty"
+                        class="preflight-stale">· {{ t('ui.preflight.stale') }}</span>
+                </span>
+                <span v-else class="preflight-infeasible">
+                  {{ t('ui.preflight.not_feasible') }}
+                  <span v-if="preflight.report.plans[hp].reason"
+                        class="muted small">- {{ preflight.report.plans[hp].reason }}</span>
+                </span>
+              </div>
+
+              <table v-if="hp === 'loadout'" class="preflight-mapping">
+                <thead>
+                  <tr>
+                    <th>{{ t('ui.preflight.printer') }}</th>
+                    <th>←</th>
+                    <th>{{ t('ui.preflight.slicer') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in preflight.report.slicer_colors" :key="'hm-'+c.t"
+                      :class="{warn: !headEffectiveTargetId(c.t)}">
+                    <td>
+                      <select class="preflight-slot-select"
+                              :style="{background: headTargetColor(headEffectiveTargetId(c.t)),
+                                       color: textOn(headTargetColor(headEffectiveTargetId(c.t)))}"
+                              :value="headEffectiveTargetId(c.t)"
+                              @change="onHeadTargetChange(c.t, $event.target.value)">
+                        <option value="" style="background:#444;color:#fff">— {{ t('ui.preflight.not_feasible') }} —</option>
+                        <option v-for="tg in headTargetOptions(c.t)"
+                                :key="'hmo-'+c.t+'-'+tg.id"
+                                :value="tg.id"
+                                :style="{background: tg.color || '#444', color: textOn(tg.color)}">
+                          {{ headTargetLabel(tg) }}
+                        </option>
+                      </select>
+                    </td>
+                    <td>←</td>
+                    <td>
+                      <span class="preflight-dot" :style="{background: c.hex || '#444'}"></span>
+                      T{{ dispIdx(c.t) }}
+                      <span class="muted small">· {{ c.material || '?' }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <table v-else-if="preflight.report.plans[hp].mapping.length"
+                     class="preflight-mapping">
+                <thead>
+                  <tr>
+                    <th>{{ t('ui.preflight.printer') }}</th>
+                    <th>←</th>
+                    <th>{{ t('ui.preflight.slicer') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="m in preflight.report.plans[hp].mapping"
+                      :key="'hpm-'+hp+'-'+m.t" :class="{warn: m.kind === 'none'}">
+                    <td v-if="m.kind !== 'none'">
+                      <span class="preflight-dot"
+                            :style="{background: headSlicerHex(m.t) || '#444'}"></span>
+                      {{ headProposalLabel(m) }}
+                    </td>
+                    <td v-else class="muted">-</td>
+                    <td>←</td>
+                    <td>
+                      <span class="preflight-dot"
+                            :style="{background: headSlicerHex(m.t) || '#444'}"></span>
+                      T{{ dispIdx(m.t) }}
+                      <span class="muted small">· {{ headSlicerMat(m.t) }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div class="row">
+                <button v-if="hp === 'loadout' && preflight.headDirty"
+                        @click="recalcHead">
+                  {{ t('ui.preflight.recalc') }}
+                </button>
+                <button class="primary"
+                        :disabled="preflight.sending !== ''
+                                   || (hp === 'loadout' && preflight.headDirty)
+                                   || !headPlanFeasible(hp)"
+                        @click="startPreflightPrint('head', hp)">
+                  {{ preflight.sending === hp
+                       ? t('ui.preflight.sending')
+                       : t('ui.preflight.head_go_' + hp) }}
+                </button>
+              </div>
+            </div>
+          </template>
         </template>
       </template>
       <div class="row">

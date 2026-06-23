@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import sys, re, os, json
 import urllib.request, urllib.error
 from collections import defaultdict
@@ -145,7 +147,6 @@ def lookup_live_slots(host, port=80, path='/multiace/api/state', timeout=5.0):
         for slot in ace.get('slots', []) or []:
             if slot.get('state') == 'empty':
                 continue
-
             if 'source' in slot and slot['source'] not in ('rfid', 'override'):
                 continue
             color = (slot.get('color') or '').strip().lower()
@@ -434,7 +435,6 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
         for t in list(pending):
             tm = t_meta[t]
             t_mat = (tm.get('mat') or '').strip().lower()
-
             candidates = [sm for sm in already
                           if not t_mat or not sm['mat']
                           or sm['mat'] == t_mat]
@@ -472,6 +472,346 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
         if synthetic_T != t:
             remap[t] = synthetic_T
     return remap, info, used
+
+def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
+                             ace_slots, ace_head, fuzzy_max_distance=None):
+    """Head-mode layout: ONE ACE-driven head (`ace_head`) prints every colour
+    that isn't pinned, multiplexed via slot-swaps on its ACE; the other (feeder)
+    heads are PINNED to a single fixed colour each (no swap).
+
+    This is the "pinned heads + one swap head" primitive - the same shape a
+    future multi+manual matcher needs (a manual head = a pinned head).
+
+    Args:
+      slicer_colors:  {t: 'rrggbb'}   slicer tool colour per used T.
+      slicer_types:   {t: material}   slicer material per T (material-strict).
+      pinned_heads:   [{'head': int, 'material': str,
+                        'color': 'rrggbb' | '#rrggbb'}]
+                      the feeder heads' loaded identity; a slicer colour that
+                      matches one (material-strict) pins to that head.
+      ace_slots:      [{'ace','slot','material','color'}] - the slots the ACE
+                      head's ACE can swap between (e.g. ACE 0).
+      ace_head:       the ACE-driven head index.
+
+    Returns dict with:
+      'assignment': {t: entry}, entry one of
+          {'kind':'pin', 'head':H,        'tier':str}
+          {'kind':'ace', 'head':ace_head, 'ace':a, 'slot':s, 'tier':str}
+          {'kind':'none','tier':'no_slot'}      (no feeder AND no ACE slot)
+      'feasible':   bool (no 'none' assignments)
+      'infeasible': [t,...]
+      'pinned':     sorted feeder heads actually used
+      'ace_head':   ace_head
+    """
+    pins = {}
+    for p in (pinned_heads or []):
+        try:
+            pins[int(p['head'])] = p
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    assignment = {}
+    pinned_t = set()
+
+    for t in sorted(slicer_colors.keys()):
+        c = (slicer_colors.get(t) or '').strip().lstrip('#').lower()
+        if not c:
+            continue
+        mat = (slicer_types.get(t) or '').strip().lower()
+        cands = []
+        for head, p in pins.items():
+            pmat = (p.get('material') or '').strip().lower()
+            if mat and pmat and pmat != mat:
+                continue
+            cands.append({'head': head,
+                          'color': (p.get('color') or '').strip().lstrip('#').lower()})
+        match, tier = _find_color_match(
+            cands, c, strict_color=False, fuzzy_max_distance=fuzzy_max_distance)
+        if match is not None:
+            assignment[t] = {'kind': 'pin', 'head': match['head'], 'tier': tier}
+            pinned_t.add(t)
+
+    rest_colors = {t: slicer_colors[t] for t in slicer_colors if t not in pinned_t}
+    rest_types = {t: (slicer_types.get(t) or '') for t in rest_colors}
+    _remap, info, _used = match_colors_to_slots(
+        rest_colors, ace_slots, num_heads=4,
+        filament_types=rest_types, strict_color=False,
+        fuzzy_max_distance=fuzzy_max_distance)
+    for t, entry in info.items():
+        s = entry.get('slot')
+        if s is None:
+            assignment[t] = {'kind': 'none', 'tier': entry.get('tier', 'no_slot')}
+        else:
+            assignment[t] = {'kind': 'ace', 'head': ace_head,
+                             'ace': s['ace'], 'slot': s['slot'],
+                             'tier': entry.get('tier')}
+
+    infeasible = sorted(t for t, e in assignment.items() if e['kind'] == 'none')
+    pinned_used = sorted({e['head'] for e in assignment.values()
+                          if e['kind'] == 'pin'})
+    return {
+        'assignment': assignment,
+        'feasible': not infeasible,
+        'infeasible': infeasible,
+        'pinned': pinned_used,
+        'ace_head': ace_head,
+    }
+
+def head_mode_swap_count(events, assignment):
+    """Swaps the ACE head performs for a head-mode `assignment` over the slicer
+    toolchange sequence `events`. Pinned colours never swap (they print on their
+    own feeder head); only (ace,slot) changes on ACE-assigned colours count. The
+    first ACE load counts as a swap (the initial combiner load)."""
+    cur = None
+    swaps = 0
+    for t in events:
+        e = assignment.get(t)
+        if not e or e.get('kind') != 'ace':
+            continue
+        key = (e['ace'], e['slot'])
+        if cur != key:
+            swaps += 1
+            cur = key
+    return swaps
+
+def compute_head_mode_optimize(events, feeder_heads, ace_head, ace_num,
+                               num_slots, layer_color_sets=None, max_colors=12):
+    """Head-mode loadout OPTIMIZER - the swap-minimal PROPOSED loadout that
+    IGNORES the current physical load (plan 'optimize' + plan 'layer'/Belady).
+
+    Cache model for the combiner hardware: the ACE head is a SINGLE active
+    filament drawn from `num_slots` pre-loaded slots, and each feeder head holds
+    one fixed colour:
+      * F feeder "heads", capacity 1   -> a pinned colour, NEVER swaps.
+      * 1 ACE head, capacity num_slots -> swaps when its active colour changes;
+        the <=num_slots distinct ACE colours sit pre-loaded in its slots so any
+        switch is an automated combiner swap (no manual reload).
+    This mirrors the multi optimizer (compute_swap_aware_layout) but with an
+    asymmetric F-feeders + 1-ACE-head bin model; swaps are only ever charged on
+    the ACE head. Brute-force over (F+1)^N (N = distinct colours, capped at
+    `max_colors`; F+1 is small, so this stays well inside the multi 4^12 bound).
+
+    layer_color_sets (plan 'layer'/Belady): reject any assignment that routes
+    2+ colours of a single layer through the ACE head -> the ACE only ever swaps
+    at a layer boundary (Belady-/layer-optimal, like the multi 'layer' plan).
+
+    Args:
+      events:        toolchange sequence (slicer T-indices in print order).
+      feeder_heads:  list of physical non-ACE head indices available to pin.
+      ace_head:      the ACE-driven head index.
+      ace_num:       the ACE unit number the ACE head feeds from (combiner ACE).
+      num_slots:     the ACE's slot capacity (pre-loadable colours, e.g. 4).
+      layer_color_sets: per-layer colour sets; when given, layer-only swap mode.
+      max_colors:    distinct-colour cap before bailing (brute-force guard).
+
+    Returns (assignment, swaps) in the SAME format as compute_head_mode_layout
+    (so head_mode_swap_count + rewrite_head_mode_to_file are reused unchanged):
+      assignment[t] = {'kind':'pin','head':H,'tier':'optimize'}
+                    | {'kind':'ace','head':ace_head,'ace':ace_num,'slot':s,
+                       'tier':'optimize'}
+    or (None, None) when infeasible (>F+num_slots distinct colours, too many
+    colours to brute-force, or a layer needs >1 ACE colour in layer mode)."""
+    from itertools import product
+
+    colors_list = sorted(set(events))
+    n = len(colors_list)
+    F = len(feeder_heads)
+    S = int(num_slots)
+    if n == 0:
+        return {}, 0
+    if F <= 0 and S <= 0:
+        return None, None
+    if n > max_colors:
+        return None, None
+
+    ACE = F
+    best_c2h = None
+    best_key = None
+    for combo in product(range(F + 1), repeat=n):
+        feeder_count = [0] * F
+        ace_colors = 0
+        ok = True
+        for h in combo:
+            if h == ACE:
+                ace_colors += 1
+            else:
+                feeder_count[h] += 1
+                if feeder_count[h] > 1:
+                    ok = False
+                    break
+        if not ok or ace_colors > S:
+            continue
+
+        c2h = {colors_list[i]: combo[i] for i in range(n)}
+
+        if layer_color_sets is not None:
+            conflict = False
+            for lset in layer_color_sets:
+                ace_in_layer = 0
+                for c in lset:
+                    if c2h.get(c) == ACE:
+                        ace_in_layer += 1
+                        if ace_in_layer > 1:
+                            conflict = True
+                            break
+                if conflict:
+                    break
+            if conflict:
+                continue
+
+        cur = None
+        swaps = 0
+        for t in events:
+            if c2h[t] != ACE:
+                continue
+            if cur != t:
+                swaps += 1
+                cur = t
+
+        pins = sum(1 for h in combo if h != ACE)
+        key = (swaps, pins)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_c2h = c2h
+
+    if best_c2h is None:
+        return None, None
+
+    feeders_sorted = sorted(feeder_heads)
+    feeder_bin_to_head = {}
+    next_feeder = 0
+    ace_color_to_slot = {}
+    next_slot = 0
+    assignment = {}
+    for t in events:
+        if t in assignment:
+            continue
+        h = best_c2h[t]
+        if h == ACE:
+            slot = ace_color_to_slot.get(t)
+            if slot is None:
+                slot = next_slot
+                ace_color_to_slot[t] = slot
+                next_slot += 1
+            assignment[t] = {'kind': 'ace', 'head': ace_head,
+                             'ace': ace_num, 'slot': slot, 'tier': 'optimize'}
+        else:
+            head = feeder_bin_to_head.get(h)
+            if head is None:
+                head = feeders_sorted[next_feeder]
+                feeder_bin_to_head[h] = head
+                next_feeder += 1
+            assignment[t] = {'kind': 'pin', 'head': head, 'tier': 'optimize'}
+
+    return assignment, head_mode_swap_count(events, assignment)
+
+def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head,
+                              progress=None):
+    """Streaming head-mode rewrite of the ORIGINAL slicer gcode. Each slicer
+    T<n> is rewritten per `assignment` (compute_head_mode_layout):
+      - 'pin' -> T<pin_head>                       (feeder head, no swap)
+      - 'ace' -> T<ace_head> + ACE_SWAP_HEAD HEAD=ace_head ACE=a SLOT=s
+                 (deduped on consecutive same (ace,slot))
+    M104/M109 T<n> and the pre-body tool selection are remapped to the assigned
+    physical head (no swap). SM_PRINT_PREEXTRUDE_FILAMENT for an ACE colour is
+    dropped (the swap purges); for a pinned colour it is remapped to the head.
+    No apply_remap step is needed - the assignment IS the remap.
+    Returns (active_swaps, skipped_swaps)."""
+    def head_of(n):
+        e = assignment.get(n)
+        if not e:
+            return None
+        if e.get('kind') == 'pin':
+            return e.get('head')
+        if e.get('kind') == 'ace':
+            return ace_head
+        return None
+
+    def ace_slot_of(n):
+        e = assignment.get(n)
+        if e and e.get('kind') == 'ace':
+            return (e['ace'], e['slot'])
+        return None
+
+    m104_re    = re.compile(r'^M10[49]\b')
+    preextr_re = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=(\d{1,2})\b')
+    change_t   = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
+    bare_t     = re.compile(r'^T(\d{1,2})\s*$')
+
+    def fix_m104(line):
+        def repl(m):
+            h = head_of(int(m.group(1)))
+            return 'T' + str(h if h is not None else int(m.group(1)) % 4)
+        return re.sub(r'T(\d{1,2})', repl, line)
+
+    in_body = False
+    cur = None
+    active = 0
+    skipped = 0
+    total = os.path.getsize(in_path) or 1
+    seen = 0
+    last_pr = 0
+
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
+         open(out_path, 'w', encoding='utf-8') as fout:
+        for line in fin:
+            seen += len(line.encode('utf-8', errors='ignore'))
+            stripped = line.rstrip('\r\n')
+
+            if m104_re.match(stripped):
+                fout.write(fix_m104(line))
+                last_pr = _emit_progress(progress, seen, total, last_pr)
+                continue
+
+            mp = preextr_re.match(stripped)
+            if mp:
+                n = int(mp.group(1))
+                if ace_slot_of(n) is not None:
+                    last_pr = _emit_progress(progress, seen, total, last_pr)
+                    continue
+                h = head_of(n)
+                fout.write('SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d\n' % h
+                           if h is not None else line)
+                last_pr = _emit_progress(progress, seen, total, last_pr)
+                continue
+
+            if not in_body and change_t.match(stripped):
+                in_body = True
+
+            mt = bare_t.match(stripped)
+            if mt:
+                n = int(mt.group(1))
+                h = head_of(n)
+                if h is None:
+                    fout.write(line)
+                    last_pr = _emit_progress(progress, seen, total, last_pr)
+                    continue
+                fout.write('T%d\n' % h)
+                if in_body:
+                    slot = ace_slot_of(n)
+                    if slot is not None:
+                        if cur == slot:
+                            fout.write('; ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
+                                       '  ; skipped (already loaded)\n'
+                                       % (ace_head, slot[0], slot[1]))
+                            skipped += 1
+                        else:
+                            fout.write('ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d\n'
+                                       % (ace_head, slot[0], slot[1]))
+                            cur = slot
+                            active += 1
+                last_pr = _emit_progress(progress, seen, total, last_pr)
+                continue
+
+            fout.write(line)
+            last_pr = _emit_progress(progress, seen, total, last_pr)
+
+    if progress is not None:
+        try:
+            progress(total, total)
+        except Exception:
+            pass
+    return active, skipped
 
 def parse_filament_types(gcode):
     """Best-effort lookup table T-index -> material name (PLA, PETG, …).
@@ -1445,6 +1785,43 @@ def print_recommendation(result, num_aces, file=None):
 
     p('=' * 60)
 
+_E_VAL_RE = re.compile(r'\bE(-?\d*\.?\d+)')
+
+def _is_extruding_move(line):
+    """True for a G0/G1 move that advances the extruder (positive E). The
+    language-independent boundary for the auto-load: the heads must be loaded
+    before ANY filament is extruded (the prime/draw-line). Retracts (E<0) and
+    non-move lines are ignored."""
+    s = line.strip()
+    if not (s.startswith('G1') or s.startswith('G0')):
+        return False
+    m = _E_VAL_RE.search(s)
+    if not m:
+        return False
+    try:
+        return float(m.group(1)) > 0
+    except ValueError:
+        return False
+
+def _structural_inject_idx(lines):
+    """Section boundary right before the first extruding move - the geometry-
+    safe, slicer/locale-independent auto-load anchor. We inject at the boundary
+    (nearest preceding blank line or ;===== section header) rather than right at
+    the extrusion so the prime's own positioning move still runs AFTER the
+    auto-load. Returns an index or None (no extrusion found / no boundary)."""
+    ext_idx = None
+    for idx, line in enumerate(lines):
+        if _is_extruding_move(line):
+            ext_idx = idx
+            break
+    if ext_idx is None:
+        return None
+    for j in range(ext_idx - 1, max(-1, ext_idx - 200), -1):
+        s = lines[j].strip()
+        if s == '' or (s.startswith(';') and '=====' in s):
+            return j
+    return ext_idx
+
 def inject_auto_load(gcode):
     """Insert ACE_SWAP_HEAD calls for each used head AT the safest point
     that is past G28 + heating but before the first move that needs the
@@ -1505,12 +1882,13 @@ def inject_auto_load(gcode):
             continue
         cleaned.append(ln)
     lines = cleaned
-    inject_idx = None
+    inject_idx = _structural_inject_idx(lines)
 
-    for idx, line in enumerate(lines):
-        if '画起始线' in line:
-            inject_idx = idx
-            break
+    if inject_idx is None:
+        for idx, line in enumerate(lines):
+            if '画起始线' in line or 'draw the starting line' in line.lower():
+                inject_idx = idx
+                break
 
     if inject_idx is None:
         for idx, line in enumerate(lines):
@@ -1859,7 +2237,7 @@ def rewrite_to_file(in_path, out_path, progress=None):
             pass
     return active, skipped, swapbacks
 
-def inject_auto_load_to_file(in_path, out_path, progress=None):
+def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
     """Streaming equivalent of inject_auto_load(gcode).
 
     Three passes:
@@ -1899,6 +2277,9 @@ def inject_auto_load_to_file(in_path, out_path, progress=None):
     first_chg     = None
     first_preextr = None
     first_swap    = None
+    first_ext     = None
+    ext_boundary  = None
+    last_boundary = None
 
     in_old_block = False
     old_block_ranges: list[tuple[int, int]] = []
@@ -1923,7 +2304,15 @@ def inject_auto_load_to_file(in_path, out_path, progress=None):
                 block_start = line_no
                 continue
 
-            if first_huaqi is None and '画起始线' in stripped:
+            if first_ext is None:
+                if ls_strip == '' or (ls_strip.startswith(';') and '=====' in ls_strip):
+                    last_boundary = line_no
+                elif _is_extruding_move(stripped):
+                    first_ext = line_no
+                    ext_boundary = last_boundary
+
+            if first_huaqi is None and ('画起始线' in stripped
+                    or 'draw the starting line' in stripped.lower()):
                 first_huaqi = line_no
             if first_chg is None and chg_re.match(stripped):
                 first_chg = line_no
@@ -1935,8 +2324,9 @@ def inject_auto_load_to_file(in_path, out_path, progress=None):
     if in_old_block and block_start is not None:
         old_block_ranges.append((block_start, last_line_no))
 
+    structural = ext_boundary if ext_boundary is not None else first_ext
     anchor_line_no = None
-    for candidate in (first_huaqi, first_chg, first_preextr, first_swap):
+    for candidate in (structural, first_huaqi, first_chg, first_preextr, first_swap):
         if candidate is not None:
             anchor_line_no = candidate
             break
@@ -1997,6 +2387,9 @@ def inject_auto_load_to_file(in_path, out_path, progress=None):
     for head in used_heads:
         if head not in initial:
             initial[head] = (0, head)
+
+    if only_heads is not None:
+        initial = {h: v for h, v in initial.items() if h in only_heads}
 
     inject_block: list[str] = []
     if initial:
@@ -2224,7 +2617,6 @@ def main():
               '(override with --aces N if needed)' % num_aces)
 
     if live_lookup_host is not None:
-
         if host_has_manual_head(live_lookup_host):
             print('ERROR: a toolhead is set to manual - live-lookup '
                   'colour matching is disabled (cannot place a hand-fed manual '

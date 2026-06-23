@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Generate testmatrix.3mf: 12-color multiACE test matrix.
 
 Layout: 4x3 grid, 20x20 mm cells, 2 mm gap, 5 mm border -> ~96x74 mm plate.
