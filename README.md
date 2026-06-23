@@ -6,7 +6,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
-Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a single ACE.
+**Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a single ACE.**
 
 For now it works with one ACE only (either V1 or V2). It ships as a prerelease and comes without support. I am setting up a sticky feedback thread in the Issues, and I would love to hear how it works out for you.
 
