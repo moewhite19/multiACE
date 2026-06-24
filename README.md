@@ -18,6 +18,9 @@ Remaining Feeders work like Stock-Mode.
 - Ace per Head Preflight and Optimization Modes
 - Selectable Slots in multi and head preflight
 
+  ## Issues
+  - All slots have to be filled, will be fixed in next version
+
 
 ## What's new in multiACE 0.98.1b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
 - Removed another Air-Print issue with ACE V2
