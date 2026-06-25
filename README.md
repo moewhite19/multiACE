@@ -28,7 +28,7 @@ Remaining Feeders work like Stock-Mode.
 - RFID Filament Vendor now correctly imported.
 
   ## Issues
-  - When loading via the display, the ACE source can be assigned to the wrong head, which       can cause air printing. Will be fixed in Hotfix 2
+  - When manual loading via the display, the ACE source can be assigned to the wrong head,      which can cause air printing. Will be fixed in Hotfix 2
 
 ## What's new in multiACE 0.98b "Kindred Allies" 
 
