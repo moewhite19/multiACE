@@ -20,7 +20,7 @@ Remaining Feeders work like Stock-Mode.
 
   ## Issues
   - All ACE slots have to be filled, will be fixed in next version
-  - Don't start drying during prints, may stop FA, will be fixed
+  - GUI Actions during print may stop FA, will be fixed
 
 
 ## What's new in multiACE 0.98.1b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
@@ -30,7 +30,7 @@ Remaining Feeders work like Stock-Mode.
 
   ## Issues
   - When manual (not normal) loading via the display, the ACE source can be assigned to the     wrong head, which can cause air printing. Will be fixed in Hotfix 2
-  - Don't start drying during prints, may stop FA, will be fixed
+  - GUI Actions during print may stop FA, will be fixed
 
 ## What's new in multiACE 0.98b "Kindred Allies" 
 
