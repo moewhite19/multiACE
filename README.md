@@ -13,14 +13,12 @@ For now it works with one ACE only (either V1 or V2). It ships as a prerelease a
 Just select head mode in config (tested with head 4 only, but selectable) and connect complete ACE with a 4in1 combiner to that head.
 Remaining Feeders work like Stock-Mode.
 
-## What's new in multiACE 0.99b "Persistent Pesterers" Prerelease (unsupported / paxx bin available)
+## What's new in multiACE 0.99.2b "Persistent Pesterers" 
 - Ace per Head mode (1 ACE 1/2 only at the moment)  7 Colors with U1 + just 1 ACE Pro
 - Ace per Head Preflight and Optimization Modes
 - Selectable Slots in multi and head preflight
-
-  ## Issues
-  - All ACE slots have to be filled, will be fixed in next version
-  - GUI Actions during print may stop FA, will be fixed
+- Preflight is now computed on client pc (thanks @hfoi589 for initial js code)
+- Error corrections
 
 
 ## What's new in multiACE 0.98.1b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
