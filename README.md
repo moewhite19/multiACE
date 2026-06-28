@@ -14,7 +14,7 @@ Just select head mode in config (tested with head 4 only, but selectable) and co
 Remaining Feeders work like Stock-Mode.
 
 ## What's new in multiACE 0.99.2b "Persistent Pesterers" 
-- Ace per Head mode (1 ACE 1/2 only at the moment)  7 Colors with U1 + just 1 ACE Pro
+- Ace per Head mode (1 ACE 1/2 only at the moment)  7 Colors with U1 + just 1 ACE Pro (still experimental)
 - Ace per Head Preflight and Optimization Modes
 - Selectable Slots in multi and head preflight
 - Preflight is now computed on client pc (thanks @hfoi589 for initial js code)
