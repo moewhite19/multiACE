@@ -147,6 +147,7 @@ def lookup_live_slots(host, port=80, path='/multiace/api/state', timeout=5.0):
         for slot in ace.get('slots', []) or []:
             if slot.get('state') == 'empty':
                 continue
+
             if 'source' in slot and slot['source'] not in ('rfid', 'override'):
                 continue
             color = (slot.get('color') or '').strip().lower()
@@ -435,6 +436,7 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
         for t in list(pending):
             tm = t_meta[t]
             t_mat = (tm.get('mat') or '').strip().lower()
+
             candidates = [sm for sm in already
                           if not t_mat or not sm['mat']
                           or sm['mat'] == t_mat]
@@ -669,6 +671,7 @@ def compute_head_mode_optimize(events, feeder_heads, ace_head, ace_num,
                 cur = t
 
         pins = sum(1 for h in combo if h != ACE)
+
         key = (swaps, pins)
         if best_key is None or key < best_key:
             best_key = key
@@ -1882,6 +1885,7 @@ def inject_auto_load(gcode):
             continue
         cleaned.append(ln)
     lines = cleaned
+
     inject_idx = _structural_inject_idx(lines)
 
     if inject_idx is None:
@@ -2277,6 +2281,7 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
     first_chg     = None
     first_preextr = None
     first_swap    = None
+
     first_ext     = None
     ext_boundary  = None
     last_boundary = None
@@ -2617,6 +2622,7 @@ def main():
               '(override with --aces N if needed)' % num_aces)
 
     if live_lookup_host is not None:
+
         if host_has_manual_head(live_lookup_host):
             print('ERROR: a toolhead is set to manual - live-lookup '
                   'colour matching is disabled (cannot place a hand-fed manual '

@@ -55,11 +55,16 @@ createApp({
       if (n == null) return "–";
       return Number(n) + indexBase.value;
     }
+    // Subtype label for display: hide the implicit defaults (empty / Basic /
+    // generic) so only a meaningful subtype (Matte, Silk, HF, ...) shows.
     function subText(sku) {
       const s = (sku || "").trim();
       if (!s || ["basic", "generic"].includes(s.toLowerCase())) return "";
       return s;
     }
+    // Provenance badge label for an identity source (spec §4 / D3):
+    // rfid = read from tag, override = user-set, derived = from print job.
+    // Empty/raw slots have no badge.
     function sourceLabel(src) {
       if (src === "rfid") return t("ui.common.source_rfid");
       if (src === "override") return t("ui.common.source_override");
@@ -101,6 +106,9 @@ createApp({
       language.value = lang;
       localStorage.setItem("multiace.lang", lang);
       await loadCatalog(lang);
+      // Drive the Klipper-side _t() catalog too (pause/error messages) and
+      // persist as ace__language, so display popup + Fluidd follow the UI
+      // language. Live reload - no Klipper restart needed.
       try {
         await fetch(`${API}/macro`, {
           method: "POST",
@@ -171,6 +179,19 @@ createApp({
     }
     function applyState(s) {
       if (!s) return;
+      // Klippy is down (firmware_restart / reboot in progress, Moonraker up).
+      // Show a "please restart printer" hint instead of the raw 503, and keep
+      // the last good dashboard visible. Recovers on the next state once
+      // Klipper is back. Reuses loadError (no extra UI); cleared below when a
+      // real state arrives so the hint never sticks.
+      if (s.klippy === 'disconnected') {
+        loadError.value = t('ui.common.please_restart');
+        // A restart is in progress -> the pending config/mode change is being
+        // applied; drop the persistent "restart needed" banner.
+        rebootNeeded.value = false;
+        return;
+      }
+      if (loadError.value === t('ui.common.please_restart')) loadError.value = "";
       state.ace_status    = s.ace_status ?? null;
       state.ace_temp      = s.ace_temp ?? null;
       state.printer_state = s.printer_state ?? null;
@@ -269,6 +290,12 @@ createApp({
       if (cmdQueueRunning) return;
       if (cmdPaused.value) return;
       if (cmdQueue.value.length === 0) return;
+      // Klipper processes gcode serially: a Load/Unload swap holds
+      // its slot for 5-15 min. POSTing /api/macro while
+      // state.swap_in_progress would just block waiting for the
+      // current swap and eventually hit httpx's ReadTimeout. Let
+      // queued items wait visible in the queue; a watcher on
+      // state.swap_in_progress re-invokes us when Klipper clears.
       if (state.swap_in_progress) return;
       const arr = cmdQueue.value;
       let target = null;
@@ -450,6 +477,9 @@ createApp({
         requestAnimationFrame(recomputeWiring);
       });
     }
+    // Resume the queue automatically the moment Klipper's swap flag
+    // flips back to false. Without this the queue would only advance
+    // on the next user action.
     watch(() => state.swap_in_progress, (v) => { if (!v) _scheduleAdvance(); });
 
     watch(() => state.wiring, scheduleWiringRecompute, {deep: true});
@@ -460,6 +490,7 @@ createApp({
       run("ACE_SWITCH", {TARGET: idx});
     }
     function loadAll(idx) {
+      if (_blockIfPrinting()) return;
       run("ACE_SWITCH", {TARGET: idx, AUTOLOAD: 1});
     }
     function _phaseFor(channelState) {
@@ -481,12 +512,36 @@ createApp({
       }
       return ops;
     });
+    // During an ACTIVE print, a user-initiated load/unload from the dashboard
+    // would interleave its homing/moves into the running motion queue and ruin
+    // the print: Klipper is single-threaded, but gcode injected via Moonraker
+    // runs BETWEEN the SD-print lines, it is NOT ignored. The print's OWN swaps
+    // (ACE_SWAP_HEAD from the gcode file) and runout-reloads do not go through
+    // these buttons, so block the buttons here instead of in the engine (a
+    // command-level block would also kill the print's own swap). Gated on
+    // 'printing' ONLY - a PAUSED print still needs Load for runout recovery
+    // (see needsReload). Drying the other ACE mid-print is a wanted feature and
+    // stays enabled (the FA-preserve in _perform_switch + the V2 watchdog keep
+    // the printing head fed).
+    const isPrinting = computed(() => state.printer_state === 'printing');
+    function _blockIfPrinting() {
+      if (isPrinting.value) {
+        setMacroLog(t("ui.dashboard.blocked_printing"));
+        return true;
+      }
+      return false;
+    }
     function isToolheadOccupied(aceIdx, slotIdx) {
       const th = state.toolheads.find(tt => tt.idx === slotIdx);
       if (!th) return false;
       if (th.head_source_known) return th.ace === aceIdx;
       return !!th.filament_at_extruder;
     }
+    // Mid-print runout: print paused, the head still owns its ACE source
+    // (head_source NOT cleared - that would break FA-rearm on resume), but the
+    // toolhead motion sensor reads empty. ACE_LOAD_HEAD's "already loaded" guard
+    // is gated on that same toolhead sensor, so a reload goes through during a
+    // runout even though head_source is set. We just re-enable the load button.
     function needsReload(aceIdx, slotIdx) {
       if (state.printer_state !== 'paused') return false;
       const th = state.toolheads.find(tt => tt.idx === slotIdx);
@@ -494,7 +549,12 @@ createApp({
       return th.ace === aceIdx && th.filament_at_extruder === false;
     }
     function unloadHead(idx) {
+      if (_blockIfPrinting()) return;
       run("ACE_UNLOAD_HEAD", {HEAD: idx});
+    }
+    function unloadAll() {
+      if (_blockIfPrinting()) return;
+      run("ACE_UNLOAD_ALL_HEADS");
     }
     async function setHeadManual(idx, enable) {
       try {
@@ -507,7 +567,10 @@ createApp({
       reloadState();
     }
     function loadSlot(aceIdx, slotIdx) {
+      if (_blockIfPrinting()) return;
       if (state.mode === "head") {
+        // head mode: the ACE's slots all feed the ONE ACE head (combiner).
+        // Loading a slot loads that head from this slot (swap if already loaded).
         const h = state.ace_head;
         const th = state.toolheads.find(tt => tt.idx === h);
         if (th && th.head_source_known) {
@@ -524,14 +587,21 @@ createApp({
       }
       enqueue("ACE_LOAD_HEAD", {HEAD: slotIdx, ACE: aceIdx});
     }
+    // head mode: load a feeder head via its native stock side feeder (no ACE).
     function loadFeederHead(h) {
+      if (_blockIfPrinting()) return;
       enqueue("ACE_LOAD_HEAD", {HEAD: h});
     }
+    // head mode: is this ACE slot the one currently loaded into the ACE head?
+    // (used to disable that slot's Load button; other slots stay loadable=swap).
     function slotLoadedInHead(slotIdx) {
       if (state.mode !== "head") return false;
       const th = state.toolheads.find(tt => tt.idx === state.ace_head);
       return !!(th && th.head_source_known && th.slot === slotIdx);
     }
+    // Default/fallback list; the live list + per-type subtypes are loaded
+    // from /api/materials, which sources them from the firmware filament DB
+    // (filament_parameters.py) - same materials the printer's display offers.
     const pickerMaterials = ref([
       "PLA", "PLA-CF",
       "PETG", "PETG-CF", "PETG-HF",
@@ -541,6 +611,7 @@ createApp({
       "PC", "PC-ABS",
       "PVA",
     ]);
+    // Full { type: { vendor: [subtype, ...] } } hierarchy from the firmware DB.
     const pickerDb = ref({});
     async function loadMaterials() {
       try {
@@ -556,14 +627,33 @@ createApp({
         }
       } catch (_) {}
     }
-    const pickerVendors = computed(() => {
+    // Vendors for the chosen material (Generic always first) straight from the
+    // firmware DB. The cascade watchers validate a user pick against THIS list.
+    const pickerDbVendors = computed(() => {
       const v = Object.keys(pickerDb.value[picker.material] || { Generic: [] });
       return v.includes("Generic") ? ["Generic", ...v.filter(x => x !== "Generic")] : v;
     });
-    const currentSubtypes = computed(() => {
+    // Display list for the <select>: the DB vendors PLUS the slot's current
+    // vendor when the printer doesn't ship it (e.g. an RFID-set brand). Without
+    // this the <select> shows blank for an unknown vendor, so it can't be
+    // changed or cleared. Display-only - the cascade still validates against the
+    // DB list, so a user material change resets a non-DB vendor.
+    const pickerVendors = computed(() => {
+      const v = pickerDbVendors.value;
+      return (picker.vendor && !v.includes(picker.vendor)) ? [...v, picker.vendor] : v;
+    });
+    // Subtypes for the chosen material + vendor from the firmware DB; "Basic" =
+    // firmware 'generic'.
+    const pickerDbSubtypes = computed(() => {
       const byVendor = pickerDb.value[picker.material] || {};
-      const extra = byVendor[picker.vendor] || [];
-      return ["Basic", ...extra];
+      return ["Basic", ...(byVendor[picker.vendor] || [])];
+    });
+    // Display list: DB subtypes PLUS the slot's current subtype when the printer
+    // doesn't know it (e.g. an RFID-set subtype) - same display-only rationale
+    // as pickerVendors (this is the RFID 'Transparent' that couldn't be cleared).
+    const currentSubtypes = computed(() => {
+      const s = pickerDbSubtypes.value;
+      return (picker.subtype && !s.includes(picker.subtype)) ? [...s, picker.subtype] : s;
     });
     const picker = reactive({
       show: false,
@@ -574,20 +664,29 @@ createApp({
       vendor: "Generic",
       color: "#ffffff",
     });
+    // Suppress the cascade snap while openPicker is programmatically setting the
+    // fields, so an RFID-set vendor/subtype the printer doesn't know is NOT
+    // snapped away on open (it's preserved + shown via the augmented lists). A
+    // real user material/vendor change (flag clear) still snaps to a DB-valid
+    // value. Validate against the DB lists, not the augmented display lists.
+    let _pickerOpening = false;
     watch(() => picker.material, () => {
-      if (!pickerVendors.value.includes(picker.vendor)) {
-        picker.vendor = pickerVendors.value[0] || "Generic";
+      if (_pickerOpening) return;
+      if (!pickerDbVendors.value.includes(picker.vendor)) {
+        picker.vendor = pickerDbVendors.value[0] || "Generic";
       }
-      if (!currentSubtypes.value.includes(picker.subtype)) {
+      if (!pickerDbSubtypes.value.includes(picker.subtype)) {
         picker.subtype = "Basic";
       }
     });
     watch(() => picker.vendor, () => {
-      if (!currentSubtypes.value.includes(picker.subtype)) {
+      if (_pickerOpening) return;
+      if (!pickerDbSubtypes.value.includes(picker.subtype)) {
         picker.subtype = "Basic";
       }
     });
     function openPicker(ace, slot) {
+      _pickerOpening = true;
       picker.ace = ace.idx;
       picker.slot = slot.idx;
       picker.material = (slot.material || "PLA");
@@ -595,6 +694,8 @@ createApp({
       picker.vendor = slot.brand || "Generic";
       picker.color = slot.color || "#ffffff";
       picker.show = true;
+      // Let the watchers' snap run again only after this open settles.
+      nextTick(() => { _pickerOpening = false; });
     }
     function closePicker() { picker.show = false; }
     function _pickerSlot() {
@@ -621,6 +722,10 @@ createApp({
         color: lum > 0.55 ? "#001619" : "#ffffff",
       };
     });
+    // Slots without an RFID tag get a "Clear" button instead of "Read
+    // RFID"; shown only when the slot's identity actually comes from a
+    // manual override (source === "override"), so RFID/derived/empty
+    // slots offer nothing to clear.
     const pickerHasOverride = computed(() => {
       if (!picker.show) return false;
       const s = _pickerSlot();
@@ -630,10 +735,20 @@ createApp({
       const s = _pickerSlot();
       const r = s && s.rfid_data;
       if (!r) return;
-      if (r.material) picker.material = r.material;
-      if (r.subtype)  picker.subtype  = r.subtype;
-      if (r.brand)    picker.vendor   = r.brand;
-      if (r.color)    picker.color    = r.color;
+      // Reset the WHOLE identity to the tag's values unconditionally. Guarding
+      // each field on a truthy RFID value left a manually-changed vendor/subtype
+      // stuck when the tag had none (empty brand/subtype) - then it never
+      // matched _pickerMatchesRfid and save kept a shadow override. Empty tag
+      // fields fall back to the same Generic/Basic placeholders openPicker uses,
+      // so save then matches the tag and drops the override. _pickerOpening
+      // suppresses the cascade snap while we set the fields (as in openPicker),
+      // so a tag vendor/subtype the printer doesn't ship isn't snapped away.
+      _pickerOpening = true;
+      picker.material = r.material || "PLA";
+      picker.subtype  = r.subtype  || "Basic";
+      picker.vendor   = r.brand    || "Generic";
+      picker.color    = r.color    || "#ffffff";
+      nextTick(() => { _pickerOpening = false; });
     }
     function _ptcGcodeFor(aceIdx, slotIdx, mat, brand, sub, colorHex) {
       const dq = (s) => `"${String(s || "").replace(/"/g, "")}"`;
@@ -647,6 +762,10 @@ createApp({
         FILAMENT_SUBTYPE: dq(sub || ""),
       };
     }
+    // Bug 1: saving an RFID slot unchanged must not create an override
+    // that masks the tag. openPicker prefills Generic/Basic placeholders
+    // for empty vendor/subtype, so normalise those to "" when comparing
+    // the form against the tag's rfid_data.
     function _ovNorm(s) { return String(s || "").trim().toLowerCase(); }
     function _ovVendor(s) { const v = _ovNorm(s); return v === "generic" ? "" : v; }
     function _ovSub(s) { const v = _ovNorm(s); return (v === "basic" || v === "generic") ? "" : v; }
@@ -664,6 +783,8 @@ createApp({
       const aceIdx = picker.ace;
       const slotIdx = picker.slot;
       if (_pickerMatchesRfid()) {
+        // Values equal the RFID tag -> drop any existing override so the
+        // RFID identity stays the source of truth (no shadow override).
         try {
           await fetch(`${API}/slot-override/${aceIdx}/${slotIdx}`, {method: "DELETE"});
         } catch (e) {
@@ -925,7 +1046,14 @@ createApp({
       }
     }
     watch(() => configForm.ace_device_count, _ensurePerAceLength, {immediate: true});
-    const modeChangePending = ref(false);
+    // True after a config save, which needs a full printer restart to take
+    // effect (a bare Klipper restart misses USB/serial + PAXX boot-script
+    // changes). Drives the prominent top reboot banner; cleared once a restart
+    // actually starts (klippy down). Mode changes do NOT use this - crossing
+    // 'normal' raises a backend reboot error that reaches the display too.
+    const rebootNeeded = ref(false);
+    // head-mode ACE head picker (0-based). Default 3 (combiner head); seeded
+    // once from live state, then user-controlled.
     const aceHeadSel = ref(3);
     let aceHeadInit = false;
     function paramsToForm(params, perAceParams) {
@@ -1094,6 +1222,10 @@ createApp({
       for (let i = 0; i < configForm.perAce.length; i++) {
         insertMissing(`[ace ${i}]`, perAceRepl[i], seenSet(i));
       }
+      // Drop any [ace N] section header that ends up with no content.
+      // When the user clears all per-ACE overrides, the keyed lines get
+      // filtered out by the value=='' rule above, leaving a bare header.
+      // Klipper refuses to load an empty section, so strip it here.
       const cleaned = [];
       for (let i = 0; i < out.length; i++) {
         const m = out[i].match(/^\s*\[ace\s+\d+\]\s*$/);
@@ -1111,6 +1243,8 @@ createApp({
           cleaned.push(out[i]);
           continue;
         }
+        // Drop header + intervening lines; also strip one trailing blank
+        // line from cleaned so we don't pile up separators.
         if (cleaned.length && cleaned[cleaned.length - 1].trim() === '') {
           cleaned.pop();
         }
@@ -1259,15 +1393,21 @@ createApp({
       configLog.value = t("ui.common.saving");
       const newContent = formToCfgContent(config.content);
       try {
+        // Do NOT auto-restart Klipper: a bare Klipper restart applies most
+        // [ace] scalars but NOT changes that need a full reboot (USB/serial
+        // re-enumeration, PAXX boot-script settings), and it caused a scary
+        // "503 Klippy Host not connected" mid-restart. Save the file and tell
+        // the user to restart the printer so every change takes effect.
         const r = await fetch(`${API}/config`, {
           method: "PUT",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({content: newContent, restart_klipper: true}),
+          body: JSON.stringify({content: newContent, restart_klipper: false}),
         });
         if (!r.ok) throw new Error(`HTTP ${r.status} ${await r.text()}`);
         const j = await r.json();
         config.content = newContent;
-        configLog.value = `✓ ${j.path}\nBackup: ${j.backup}\n${t("ui.log.klipper_restart_requested")}`;
+        rebootNeeded.value = true;
+        configLog.value = `✓ ${j.path}\nBackup: ${j.backup}\n${t("ui.common.please_restart")}`;
       } catch (e) { configLog.value = `${t("ui.common.error")}: ${e}`; }
     }
     async function saveConfigRaw() {
@@ -1283,8 +1423,16 @@ createApp({
       } catch (e) { configLog.value = `${t("ui.common.error")}: ${e}`; }
     }
     async function setMode(m) {
+      // head mode carries the ACE head; allow re-applying head with a changed
+      // head even when already in head mode. multi<->head is a runtime flip
+      // (no reboot); only transitions crossing 'normal' need a Klipper restart.
       const headChanged = (m === "head" && state.ace_head !== aceHeadSel.value);
       if (state.mode === m && !headChanged) return;
+      // Mode changes that cross 'normal' (stock<->ACE file swap) require all
+      // toolheads unloaded - mirror the SET_ACE_MODE macro guard client-side so
+      // the "unload first" rejection is visible in the web, not only in Fluidd's
+      // console (action_respond_info). filament_at_extruder is the same toolhead
+      // motion-sensor signal the macro checks (eN_filament.filament_detected).
       const cur = state.mode || "normal";
       if ((cur === "normal") !== (m === "normal")) {
         const loaded = (state.toolheads || []).filter(th => th.filament_at_extruder);
@@ -1307,10 +1455,12 @@ createApp({
         message: t("ui.dialog.switch_mode_msg", {mode: m}),
         okLabel: t("ui.dialog.switch"),
         onOk: async () => {
-          const ok = await run("SET_ACE_MODE", args);
-          if (ok) {
-            modeChangePending.value = (m === "normal" || state.mode === "normal");
-          }
+          // No web reboot banner for a mode change: a transition crossing
+          // 'normal' makes ACE_RUN_MODE_SWITCH raise a reboot error, which
+          // shows on the touchscreen popup AND Fluidd AND the web - for both
+          // directions and any trigger (web or Fluidd SET_ACE_MODE), unlike a
+          // web-only banner. multi<->head is a runtime flip and raises nothing.
+          await run("SET_ACE_MODE", args);
         },
       });
     }
@@ -1462,12 +1612,21 @@ createApp({
       report:  null,
       error:   "",
       progress: null,
+      // Manual slot reassignment for the slicer plan only: {origT: "ace-slot"}.
+      // slicerSwaps holds the recomputed swap count (null = use the plan's
+      // server value); slicerDirty = overrides changed since the last recalc.
       slicerOverrides: {},
       slicerSwaps: null,
       slicerDirty: false,
+      // Head mode: same idea for the single colour->target table. headOverrides
+      // is {origT: target_id} ("feeder-N" / "slot-A-S"); headSwaps the recomputed
+      // ACE-head swap count (null = use the server plan value).
       headOverrides: {},
       headSwaps: null,
       headDirty: false,
+      // true when this report was produced in-browser (Pyodide worker) rather
+      // than by the printer backend - selects the local rewrite+upload path.
+      local: false,
     });
     function triggerUpload() { uploadInput.value && uploadInput.value.click(); }
     function tierLabel(tier) {
@@ -1508,8 +1667,11 @@ createApp({
         return a.t - b.t;
       });
     }
+    // --- slicer-plan manual slot reassignment ---------------------------
     function slotKey(slot) { return slot ? (slot.ace + "-" + slot.slot) : ""; }
     function textOn(hex) {
+      // Readable text colour (dark/light) for a coloured background, by
+      // perceived luminance. Unknown/short colour -> neutral light text.
       const s = (hex || "").replace(/^#/, "");
       if (s.length < 6) return "#e8e8e8";
       const r = parseInt(s.slice(0, 2), 16);
@@ -1527,6 +1689,8 @@ createApp({
       return ((c && c.material) || "").trim().toLowerCase();
     }
     function slicerSlotOptions(tt) {
+      // Only loaded slots whose material matches the slicer-T (material-strict,
+      // mirrors the auto-matcher / CLAUDE.md §23).
       const mat = _slicerColorMat(tt);
       return (preflight.report?.live_slots || []).filter(ls => {
         const m = (ls.material || "").trim().toLowerCase();
@@ -1556,6 +1720,8 @@ createApp({
         .map(m => ({t: m.t, slot: slicerEffectiveSlot(m.t)}));
     }
     function realSwapCount(events, mapping) {
+      // Port of backend _real_swap_count: replay the toolchange T-sequence,
+      // initial loadout = slot==head per head, count head re-(ace,slot) changes.
       const byT = {};
       for (const m of mapping) if (m.slot) byT[m.t] = m.slot;
       const head = {0: [0, 0], 1: [0, 1], 2: [0, 2], 3: [0, 3]};
@@ -1583,6 +1749,7 @@ createApp({
                  && preflight.report.plans.slicer;
       return (plan && plan.swaps) || 0;
     }
+    // --- head-mode colour -> target (feeder pin / ACE slot) assignment -----
     function headTargets() {
       return (preflight.report && preflight.report.targets) || [];
     }
@@ -1590,6 +1757,9 @@ createApp({
       return headTargets().find(tg => tg.id === id) || null;
     }
     function headTargetOptions(tt) {
+      // Only targets whose material matches the slicer-T (material-strict,
+      // mirrors compute_head_mode_layout's pre-filter). Empty material on
+      // either side is treated as a wildcard.
       const mat = _slicerColorMat(tt);
       return headTargets().filter(tg => {
         const m = (tg.material || "").trim().toLowerCase();
@@ -1623,6 +1793,7 @@ createApp({
       preflight.headDirty = true;
     }
     function _headEffectiveAssignment() {
+      // {origT: target_id} across every slicer colour (base plan + overrides).
       const out = {};
       for (const c of ((preflight.report && preflight.report.slicer_colors) || [])) {
         out[c.t] = headEffectiveTargetId(c.t);
@@ -1630,6 +1801,8 @@ createApp({
       return out;
     }
     function headSwapCount(events, assignment) {
+      // Port of backend head_mode_swap_count: only ACE-target (ace,slot)
+      // changes count; pinned feeder colours never swap.
       let cur = null, swaps = 0;
       for (const tt of (events || [])) {
         const tg = _headTargetById(assignment[tt]);
@@ -1652,9 +1825,11 @@ createApp({
       return (plan && plan.swaps) || 0;
     }
     function headFeasible() {
+      // Every slicer colour must resolve to a real target (no unassigned row).
       const asn = _headEffectiveAssignment();
       return Object.values(asn).every(id => !!_headTargetById(id));
     }
+    // --- the three head plans (loadout editable, optimize/layer proposed) -----
     function headPlanFeasible(hp) {
       if (hp === "loadout") return headFeasible();
       const p = preflight.report && preflight.report.plans
@@ -1680,6 +1855,7 @@ createApp({
       return (c && c.material) || "?";
     }
     function headProposalLabel(m) {
+      // The proposed destination for a slicer colour (load that colour here).
       if (!m || m.kind === "none") return "";
       if (m.kind === "pin") return t("ui.preflight.feeder") + " " + dispIdx(m.head);
       return "ACE " + dispIdx(m.ace) + " Slot " + dispIdx(m.slot);
@@ -1697,6 +1873,9 @@ createApp({
         });
         return;
       }
+      // Preflight can't handle a manual/TPU head (hand-fed, no ACE slot) - it
+      // would be ignored/mis-assigned. Disable preflight while one is active;
+      // the user uploads directly via Fluidd instead. (Full support is Pro.)
       if (state.toolheads.some(th => th.manual)) {
         confirm({
           title: t("ui.upload.title"),
@@ -1707,12 +1886,161 @@ createApp({
       }
       _runPreflight(f);
     }
+    // ---- in-browser (Pyodide) preflight ----------------------------------
+    // The heavy parse/rewrite runs in a Web Worker via Pyodide, executing the
+    // UNMODIFIED post-processor + preflight_core (served by /api/preflight/pysrc)
+    // - the same Python the backend runs, so no JS re-port / drift. Falls back
+    // to the server /api/preflight path if the browser can't do it (no Worker,
+    // offline CDN, etc.).
+    const PYODIDE_INDEX_URL = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/";
+    let preflightWorker = null;
+    let preflightWorkerReady = null;
+    let preflightFile = null;
+    let preflightJobId = "";
+    let preflightJobSeq = 0;
+
+    function ensurePreflightWorker() {
+      if (!window.Worker) throw new Error(t("ui.preflight.local_worker_missing"));
+      if (preflightWorker && preflightWorkerReady) return preflightWorkerReady;
+      preflightWorker = new Worker("preflight_pyodide_worker.js?v=pyodide-20260624");
+      preflightWorkerReady = (async () => {
+        const r = await fetch(`${API}/preflight/pysrc`);
+        if (!r.ok) throw new Error("pysrc " + r.status);
+        const src = await r.json();
+        await new Promise((resolve, reject) => {
+          const onMsg = (ev) => {
+            const m = ev.data || {};
+            if (m.type === "ready") {
+              preflightWorker.removeEventListener("message", onMsg); resolve();
+            } else if (m.type === "error") {
+              preflightWorker.removeEventListener("message", onMsg);
+              reject(new Error(m.message || "worker init failed"));
+            }
+          };
+          preflightWorker.addEventListener("message", onMsg);
+          preflightWorker.postMessage({
+            type: "init",
+            pyodideIndexURL: PYODIDE_INDEX_URL,
+            postprocessSrc: src.postprocess,
+            coreSrc: src.core,
+          });
+        });
+      })();
+      // On a failed bring-up, drop the worker so the next attempt re-inits.
+      preflightWorkerReady.catch(() => {
+        try { preflightWorker.terminate(); } catch (_) {}
+        preflightWorker = null; preflightWorkerReady = null;
+      });
+      return preflightWorkerReady;
+    }
+
+    function runPreflightWorker(type, payload, onProgress) {
+      return new Promise((resolve, reject) => {
+        const worker = preflightWorker;
+        const jobId = payload.jobId;
+        const onMsg = (ev) => {
+          const msg = ev.data || {};
+          if (msg.jobId && msg.jobId !== jobId) return;
+          if (msg.type === "progress") { if (onProgress) onProgress(msg); return; }
+          if (msg.type === "error") {
+            worker.removeEventListener("message", onMsg);
+            reject(new Error(msg.message || "worker error"));
+            return;
+          }
+          if ((type === "analyze" && msg.type === "analyze-done")
+              || (type === "rewrite" && msg.type === "rewrite-done")) {
+            worker.removeEventListener("message", onMsg);
+            resolve(msg);
+          }
+        };
+        worker.addEventListener("message", onMsg);
+        worker.postMessage(Object.assign({type}, payload));
+      });
+    }
+
+    // Live ACE/slot identity + head-mode context, in the exact shape
+    // preflight_core expects. Fetched from the backend (single source) rather
+    // than re-derived in JS.
+    async function loadLiveSlotsForPreflight() {
+      const r = await fetch(`${API}/preflight/livedata`);
+      if (!r.ok) {
+        let d = `${r.status}`;
+        try { const j = await r.json(); if (j.detail) d = j.detail; } catch (_) {}
+        throw new Error(d);
+      }
+      return await r.json();   // {live_slots, head_ctx}
+    }
+
+    function clearLocalPreflightJob() {
+      if (preflightWorker && preflightJobId) {
+        try { preflightWorker.postMessage({type: "clear", jobId: preflightJobId}); } catch (_) {}
+      }
+      preflightJobId = "";
+      preflightFile = null;
+    }
+
+    // Entry point: try the browser path, offer the server fallback on failure.
     async function _runPreflight(f) {
+      try {
+        await _runLocalPreflight(f);
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        confirm({
+          title: t("ui.preflight.local_failed_title"),
+          message: t("ui.preflight.local_failed_msg", {error: msg}),
+          okLabel: t("ui.preflight.local_fallback_ok"),
+          altLabel: t("ui.common.cancel"),
+          onOk: () => { _runServerPreflight(f); },
+          onAlt: () => { closePreflight(); },
+        });
+      }
+    }
+
+    async function _runLocalPreflight(f) {
       preflight.open    = true;
       preflight.busy    = true;
       preflight.sending = "";
       preflight.report  = null;
       preflight.error   = "";
+      preflight.local   = true;
+      preflight.progress = {percent: 0, stage: "queued", running: true};
+      uploading.value   = true;
+      clearLocalPreflightJob();
+      preflightFile  = f;
+      preflightJobId = `local-${Date.now()}-${++preflightJobSeq}`;
+      try {
+        await ensurePreflightWorker();
+        const live = await loadLiveSlotsForPreflight();
+        const j = await runPreflightWorker("analyze", {
+          jobId: preflightJobId, file: f,
+          liveSlots: live.live_slots, headCtx: live.head_ctx,
+        }, msg => {
+          preflight.progress = {
+            percent: Number(msg.percent || 0),
+            stage:   String(msg.stage || ""), running: true};
+        });
+        preflight.report = Object.assign({local: true}, j.report || {});
+        preflight.slicerOverrides = {};
+        preflight.slicerSwaps = null;
+        preflight.slicerDirty = false;
+        preflight.headOverrides = {};
+        preflight.headSwaps = null;
+        preflight.headDirty = false;
+        preflight.progress = null;
+      } finally {
+        uploading.value = false;
+        preflight.busy  = false;
+      }
+    }
+
+    async function _runServerPreflight(f) {
+      preflight.open    = true;
+      preflight.busy    = true;
+      preflight.sending = "";
+      preflight.report  = null;
+      preflight.error   = "";
+      preflight.local   = false;
+      preflight.progress = null;
       uploading.value   = true;
       try {
         const fd = new FormData();
@@ -1742,6 +2070,9 @@ createApp({
       preflight.report  = null;
       preflight.error   = "";
       preflight.sending = "";
+      preflight.progress = null;
+      preflight.local   = false;
+      clearLocalPreflightJob();
     }
     function stageLabel(stage) {
       const map = {
@@ -1761,7 +2092,82 @@ createApp({
     async function startPreflightPrint(mode, headPlan) {
       if (preflight.busy || preflight.sending) return;
       const rep = preflight.report;
+      if (!rep) return;
+      if (rep.local) { await _startLocalPreflightPrint(mode, headPlan); return; }
+      await _startServerPreflightPrint(mode, headPlan);
+    }
+
+    // Browser path: rewrite in the worker, upload straight to Moonraker.
+    async function _startLocalPreflightPrint(mode, headPlan) {
+      const rep = preflight.report;
+      if (!rep || !preflightFile || !preflightJobId) return;
+      preflight.sending = (mode === "head") ? (headPlan || "loadout") : mode;
+      preflight.error   = "";
+      preflight.progress = {percent: 0, stage: "queued", running: true};
+      const startedAt = Date.now();
+      const MIN_VISIBLE_MS = 1500;
+      try {
+        const payload = {jobId: preflightJobId, file: preflightFile, mode};
+        if (mode === "slicer") {
+          // Same (possibly user-edited) remap the server path sends.
+          const remap = {};
+          for (const m of _slicerEffectiveMapping()) {
+            if (!m.slot) continue;
+            const synth = m.slot.ace * 4 + m.slot.slot;
+            if (synth !== m.t) remap[String(m.t)] = synth;
+          }
+          payload.remapOverride = remap;
+        } else if (mode === "head") {
+          const hp = headPlan || "loadout";
+          payload.headPlan = hp;
+          if (hp === "loadout") {
+            const asn = {};
+            const eff = _headEffectiveAssignment();
+            for (const k of Object.keys(eff)) { if (eff[k]) asn[String(k)] = eff[k]; }
+            payload.headAssignment = asn;
+          }
+        }
+        const live = await loadLiveSlotsForPreflight();
+        payload.liveSlots = live.live_slots;
+        payload.headCtx   = live.head_ctx;
+        const j = await runPreflightWorker("rewrite", payload, msg => {
+          preflight.progress = {
+            percent: Number(msg.percent || 0),
+            stage:   String(msg.stage || ""), running: true};
+        });
+        preflight.progress = {percent: 90, stage: "upload", running: true};
+        const fd = new FormData();
+        fd.append("root", "gcodes");
+        fd.append("print", "true");
+        fd.append("file",
+          new Blob([j.text || ""], {type: "application/octet-stream"}),
+          rep.filename || preflightFile.name);
+        const r = await fetch("/server/files/upload", {method: "POST", body: fd});
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const detail = body.error || body.detail || body.message
+            || `${r.status} ${r.statusText}`;
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
+        preflight.progress = {percent: 100, stage: "done", running: true};
+        const elapsed = Date.now() - startedAt;
+        const wait = Math.max(0, MIN_VISIBLE_MS - elapsed);
+        if (wait > 0) await new Promise(res => setTimeout(res, wait));
+        setMacroLog(t("ui.upload.started", {name: rep.filename || preflightFile.name}));
+        closePreflight();
+      } catch (e) {
+        preflight.error = e.message || String(e);
+      } finally {
+        preflight.sending = "";
+        if (preflight.progress) preflight.progress.running = false;
+      }
+    }
+
+    async function _startServerPreflightPrint(mode, headPlan) {
+      const rep = preflight.report;
       if (!rep || !rep.token) return;
+      // For head mode the button identity is the head plan (loadout/optimize/
+      // layer); for multi it is the mode.
       preflight.sending = (mode === "head") ? (headPlan || "loadout") : mode;
       preflight.error   = "";
       preflight.progress = {percent: 0, stage: "queued", running: true};
@@ -1772,6 +2178,9 @@ createApp({
       try {
         const body = {token: rep.token, mode};
         if (mode === "slicer") {
+          // Send the (possibly user-edited) slot assignment verbatim so the
+          // print matches the preview exactly. Only entries differing from
+          // slot==head go into the remap.
           const remap = {};
           for (const m of _slicerEffectiveMapping()) {
             if (!m.slot) continue;
@@ -1783,6 +2192,8 @@ createApp({
           const hp = headPlan || "loadout";
           body.head_plan = hp;
           if (hp === "loadout") {
+            // Send the (possibly user-edited) colour->target assignment verbatim
+            // so the print matches the preview exactly. Keys are slicer-T strings.
             const asn = {};
             const eff = _headEffectiveAssignment();
             for (const k of Object.keys(eff)) {
@@ -1790,6 +2201,8 @@ createApp({
             }
             body.head_assignment = asn;
           }
+          // optimize / layer: the server recomputes the proposed loadout, so we
+          // send no assignment (the user has arranged spools to match it).
         }
         const r = await fetch(`${API}/preflight/print`, {
           method: "POST",
@@ -1843,6 +2256,9 @@ createApp({
     let resizeObserver = null;
     onMounted(async () => {
       await loadLanguageList();
+      // No explicit browser choice yet -> follow the printer's persisted
+      // language (ace__language), so a fresh browser opens in the same
+      // language as the printer instead of defaulting to English.
       if (!localStorage.getItem("multiace.lang")) {
         try {
           const r = await fetch(`${API}/state`);
@@ -1903,10 +2319,11 @@ createApp({
       sourceLabel,
       tab, version, printerName, printerFw, connClass, connText, screenAvailable,
       state, loadError, run, macroLog,
-      slotTitle, switchAce, loadSlot, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, setHeadManual, isToolheadOccupied, needsReload, toolheadOps,
+      slotTitle, switchAce, loadSlot, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, isToolheadOccupied, needsReload, toolheadOps,
+      isPrinting,
       dryerCfg, dryStart, dryStop, dryOpenAce, toggleDryPanel, aceDrying,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
-      config, configLog, configLoadError, showRawConfig, configForm, modeChangePending,
+      config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,
       aceHeadSel,
       loadConfig, saveConfigForm, saveConfigRaw, setMode,
       preflight, closePreflight, startPreflightPrint, stageLabel,

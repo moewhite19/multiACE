@@ -67,6 +67,14 @@ h3 { margin: 1.2rem 0 .5rem 0; color: var(--muted); font-size: .85rem; font-weig
 .error { color: var(--error); background: var(--error-bg); padding: .6rem .8rem;
          border-radius: 4px; border: 1px solid #5a2a2a; }
 .error-inline { color: var(--error); font-size: .8rem; }
+/* Persistent "restart the printer to apply changes" bar - shown full-width
+   right under the header (config save / mode change crossing 'normal'), so it
+   is visible on every tab instead of buried in the config log. */
+.reboot-banner {
+  background: var(--warn-bg); color: var(--warn);
+  border-bottom: 1px solid var(--warn);
+  padding: .6rem 1rem; font-size: .9rem; font-weight: 600; text-align: center;
+}
 .status-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
 .pill {
   background: var(--card); border: 1px solid var(--border);

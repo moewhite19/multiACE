@@ -42,6 +42,8 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import preflight_core
+
 MOONRAKER_URL = os.environ.get("MOONRAKER_URL", "http://127.0.0.1:7125")
 MULTIACE_CFG_PATH = os.environ.get(
     "MULTIACE_CFG_PATH",
@@ -55,6 +57,7 @@ OVERRIDE_FILE = os.environ.get(
     "MULTIACE_OVERRIDE_FILE",
     "/home/lava/printer_data/config/extended/multiace/slot_overrides.json",
 )
+
 FILAMENT_PARAMS_PATHS = tuple(
     os.environ.get(
         "MULTIACE_FILAMENT_PARAMS",
@@ -63,9 +66,11 @@ FILAMENT_PARAMS_PATHS = tuple(
         "/usr/share/klipper/klippy/extras/filament_parameters.py",
     ).split(":")
 )
+
 _FIL_DB_META_KEYS = {
     "version", "hard_filaments_max_flow_k", "soft_filaments_max_flow_k",
 }
+
 DEFAULT_MATERIALS = [
     "PLA", "PLA-CF",
     "PETG", "PETG-CF", "PETG-HF",
@@ -108,6 +113,7 @@ async def _query_state_gated() -> dict:
     if _homing_active():
         if _LAST_STATUS and (now - _LAST_STATUS_TS) <= _STATUS_CACHE_TTL:
             return _LAST_STATUS
+
         deadline = now + _GATE_WAIT_MAX
         while _homing_active() and time.time() < deadline:
             await asyncio.sleep(0.05)
@@ -316,9 +322,11 @@ def _parse_state(status: dict) -> dict:
 
             override = _override_for(i, s)
             loaded_t = loaded_by_source.get((i, s))
+
             if override is not None:
                 ptc_overlay = {
                     "material": override.get("material", ""),
+
                     "sku":      "",
                     "brand":    override.get("brand", ""),
                     "color":    override.get("color") or None,
@@ -439,14 +447,17 @@ def _parse_state(status: dict) -> dict:
                     slot_obj = slots_arr[sl_explicit]
                     color = slot_obj.get("color")
                     material = slot_obj.get("material", "")
+
                     subtype = slot_obj.get("subtype", "")
                     sku = slot_obj.get("sku", "")
                     source = slot_obj.get("source")
         is_manual = bool(head_manual.get(str(t), head_manual.get(t, False)))
+
         op_mode = ace.get("mode", "multi")
         ace_head = int(ace.get("ace_head", 3) or 3)
         is_feeder = (op_mode == "head" and t != ace_head and not is_manual)
         if is_manual or is_feeder:
+
             d_explicit = sl_explicit = None
             ace_field = slot_field = None
             color = None
@@ -598,7 +609,7 @@ _PREFLIGHT_TTL = 86400.0
 _PREFLIGHT_FUZZY = 30
 
 _PREFLIGHT_MAX_SIZE = int(os.environ.get(
-    "MULTIACE_PREFLIGHT_MAX_MB", "200")) * 1024 * 1024
+    "MULTIACE_PREFLIGHT_MAX_MB", "110")) * 1024 * 1024
 
 _pp_module = None
 
@@ -657,6 +668,7 @@ async def _live_slots_async() -> list[dict]:
         for slot in ace.get("slots", []) or []:
             if slot.get("state") == "empty":
                 continue
+
             if slot.get("source") not in ("rfid", "override"):
                 continue
             out.append({
@@ -665,27 +677,6 @@ async def _live_slots_async() -> list[dict]:
                 "material": (slot.get("material") or "").strip(),
                 "color":    (slot.get("color") or "").strip().lower(),
             })
-    return out
-
-def _slot_to_dict(s: dict | None) -> dict | None:
-    if s is None:
-        return None
-    return {
-        "ace":      s.get("ace"),
-        "slot":     s.get("slot"),
-        "material": s.get("material") or "",
-        "color":    s.get("color") or "",
-    }
-
-def _mapping_from_info(info: dict) -> list[dict]:
-    out = []
-    for t in sorted(info.keys()):
-        out.append({
-            "t":         t,
-            "slot":      _slot_to_dict(info[t]["slot"]),
-            "tier":      info[t]["tier"],
-            "loose_mat": bool(info[t].get("loose_mat")),
-        })
     return out
 
 def _remap_mapping(base_mapping: list[dict], remap_t_to_t: dict[int, int]) -> list[dict]:
@@ -711,136 +702,6 @@ def _remap_mapping(base_mapping: list[dict], remap_t_to_t: dict[int, int]) -> li
         out.append(new_m)
     return out
 
-def _real_swap_count(events, mapping):
-    by_t = {m["t"]: m["slot"] for m in mapping if m.get("slot")}
-    head_current = {h: (0, h) for h in range(4)}
-    swaps = 0
-    for t in events:
-        slot = by_t.get(t)
-        if slot is None:
-            continue
-        h = slot["slot"]
-        key = (slot["ace"], slot["slot"])
-        if head_current.get(h) != key:
-            swaps += 1
-            head_current[h] = key
-    return swaps
-
-def _layout_from_head_assignment(c2h, slicer_colors, slicer_types):
-    """Turn {color: head} into a mapping list with (ace, slot=head)
-    per color. ACE within each head = first-come-first-served (sorted
-    by T-index)."""
-    head_ace = {h: 0 for h in range(4)}
-    rows = []
-    for c in sorted(c2h.keys(), key=lambda x: (c2h[x], x)):
-        h = c2h[c]
-        ace = head_ace[h]
-        head_ace[h] += 1
-        rows.append((ace, h, c, {
-            "t":         c,
-            "slot": {
-                "ace":      ace,
-                "slot":     h,
-                "material": (slicer_types.get(c) or "") or "",
-                "color":    (slicer_colors.get(c) or "").lower(),
-            },
-            "tier":      "planned",
-            "loose_mat": False,
-        }))
-    rows.sort(key=lambda r: (r[0], r[1], r[2]))
-    return [r[3] for r in rows]
-
-def _build_plan(pp, plan_name, body, result, mapping,
-                slicer_colors=None, slicer_types=None, num_aces=4):
-    slicer_colors = slicer_colors or {}
-    slicer_types  = slicer_types  or {}
-    events = result.get("events") or []
-    tool_changes = int(result.get("total_changes") or 0)
-
-    if plan_name == "slicer":
-        return {
-            "feasible":     True,
-            "swaps":        _real_swap_count(events, mapping),
-            "tool_changes": tool_changes,
-            "mapping":      mapping,
-        }
-
-    if plan_name == "optimize":
-        try:
-            c2h, swaps = pp.compute_swap_aware_layout(
-                events, num_aces=num_aces)
-        except Exception:
-            c2h, swaps = None, None
-        if c2h is None:
-            return {
-                "feasible":     False,
-                "swaps":        0,
-                "tool_changes": tool_changes,
-                "mapping":      [],
-                "reason":       "no feasible head assignment",
-            }
-        return {
-            "feasible":     True,
-            "swaps":        swaps,
-            "tool_changes": tool_changes,
-            "mapping":      _layout_from_head_assignment(
-                c2h, slicer_colors, slicer_types),
-        }
-
-    layer_info = result.get("layer_info") or {}
-    layer_color_sets_raw = layer_info.get("layer_color_sets") or []
-    layer_color_sets = [set(s) for s in layer_color_sets_raw]
-    try:
-        c2h, swaps = pp.compute_swap_aware_layout(
-            events, num_aces=num_aces,
-            layer_color_sets=layer_color_sets if layer_color_sets else None)
-    except Exception:
-        c2h, swaps = None, None
-    if c2h is None:
-        reason = "no layer-feasible head assignment"
-        max_per = layer_info.get("max_per_layer", 0)
-        if max_per > 4:
-            reason = ">4 colors in some layer"
-        return {
-            "feasible":     False,
-            "swaps":        0,
-            "tool_changes": tool_changes,
-            "mapping":      [],
-            "reason":       reason,
-        }
-    return {
-        "feasible":     True,
-        "swaps":        swaps,
-        "tool_changes": tool_changes,
-        "mapping":      _layout_from_head_assignment(
-            c2h, slicer_colors, slicer_types),
-        "reason":       "",
-    }
-
-_TOOLCHANGE_RE = re.compile(
-    r"^;\s*Change Tool\s*(\d+)\s*->\s*Tool\s*(\d+)", re.MULTILINE)
-
-def _used_tool_indices(pp, gcode: str) -> set[int]:
-    """Return the set of T-indices actually activated by the gcode.
-    Slicers declare a colour for every defined extruder in the
-    profile header even if the print only uses a subset; we don't
-    want those unused entries cluttering the preflight UI or the
-    material check. 'Change Tool X -> Tool Y' comments enumerate
-    every transition - union of X and Y is every T-index touched.
-    For single-tool gcodes with no transitions we fall back to the
-    post-processor's bare-T fallback so a one-colour print still
-    shows its initial T."""
-    used: set[int] = set()
-    for m in _TOOLCHANGE_RE.finditer(gcode):
-        used.add(int(m.group(1)))
-        used.add(int(m.group(2)))
-    if not used:
-        try:
-            used = set(pp.parse_toolchanges(gcode))
-        except Exception:
-            used = set()
-    return used
-
 async def _head_mode_context() -> tuple:
     """(op_mode, ace_head, feeders) for the head-mode preflight. feeders are the
     non-ACE heads that carry a loaded identity (the pin candidates)."""
@@ -861,139 +722,6 @@ async def _head_mode_context() -> tuple:
         feeders.append({"head": int(th["idx"]), "material": mat, "color": col})
     return mode, ace_head, feeders
 
-def _head_mode_targets(pp, feeders: list, ace_slots: list) -> list:
-    """The dropdown universe: each pin-able feeder + each ACE slot, with an id."""
-    targets = []
-    for f in feeders:
-        targets.append({
-            "id": "feeder-%d" % f["head"], "kind": "pin", "head": f["head"],
-            "material": f["material"], "color": (f["color"] or "").lower(),
-            "name": pp.approx_color_name(f["color"]) or ""})
-    for s in sorted(ace_slots, key=lambda x: (x["ace"], x["slot"])):
-        targets.append({
-            "id": "slot-%d-%d" % (s["ace"], s["slot"]), "kind": "ace",
-            "ace": s["ace"], "slot": s["slot"],
-            "material": s["material"], "color": (s["color"] or "").lower(),
-            "name": pp.approx_color_name(s["color"]) or ""})
-    return targets
-
-def _head_target_id(e: dict):
-    if not e:
-        return None
-    if e.get("kind") == "pin":
-        return "feeder-%d" % e["head"]
-    if e.get("kind") == "ace":
-        return "slot-%d-%d" % (e["ace"], e["slot"])
-    return None
-
-def _assignment_from_target_ids(target_ids: dict, targets: list, ace_head: int) -> dict:
-    """Rebuild {t: entry} from the frontend's {t: target_id} via the universe."""
-    by_id = {t["id"]: t for t in targets}
-    out = {}
-    for k, tid in (target_ids or {}).items():
-        try:
-            t = int(k)
-        except (TypeError, ValueError):
-            continue
-        tgt = by_id.get(tid)
-        if tgt is None:
-            out[t] = {"kind": "none"}
-        elif tgt["kind"] == "pin":
-            out[t] = {"kind": "pin", "head": tgt["head"]}
-        else:
-            out[t] = {"kind": "ace", "head": ace_head,
-                      "ace": tgt["ace"], "slot": tgt["slot"]}
-    return out
-
-def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_head,
-                        ace_num, num_slots, layer_sets) -> dict:
-    """A head-mode PROPOSED-loadout plan (plan 'optimize' / plan 'layer'-Belady):
-    the swap-minimal FREE assignment that ignores the current physical load. The
-    user arranges spools to match before printing, so this table is read-only
-    (mirrors the multi optimize/layer plans)."""
-    try:
-        assignment, swaps = pp.compute_head_mode_optimize(
-            events, feeder_heads, ace_head, ace_num, num_slots,
-            layer_color_sets=layer_sets)
-    except Exception:
-        assignment, swaps = None, None
-    if assignment is None:
-        reason = ("no layer-feasible loadout" if layer_sets
-                  else "too many colours for the loadout")
-        return {"feasible": False, "swaps": 0, "mapping": [], "reason": reason}
-    mapping = []
-    feasible = True
-    for t in sorted(slicer_colors.keys()):
-        e = assignment.get(t)
-        if not e or e.get("kind") == "none":
-            feasible = False
-            mapping.append({"t": t, "kind": "none"})
-        else:
-            mapping.append({"t": t, "kind": e["kind"], "head": e.get("head"),
-                            "ace": e.get("ace"), "slot": e.get("slot"),
-                            "tier": e.get("tier")})
-    return {"feasible": feasible, "swaps": swaps, "mapping": mapping}
-
-def _head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
-                       slicer_types, ace_head, feeders, ace_slots, plan_proxy) -> dict:
-    """Build the head-mode preflight preview: THREE plans, mirroring multi:
-      loadout  - match against the currently-loaded feeders + ACE slots (editable)
-      optimize - swap-minimal proposed loadout (free, Belady on the ACE head)
-      layer    - same with layer-only swaps (Belady-/layer-optimal)
-    Plus the colour grids at the top (available targets + slicer colours)."""
-    targets = _head_mode_targets(pp, feeders, ace_slots)
-    try:
-        result = pp.plan_loadout(plan_proxy) or {}
-    except Exception:
-        result = {}
-    events = list(result.get("events") or [])
-    if not events:
-        try:
-            events = list(pp.parse_toolchanges(plan_proxy))
-        except Exception:
-            events = []
-    lcs = (result.get("layer_info") or {}).get("layer_color_sets") or []
-    layer_sets = [set(s) for s in lcs] if lcs else None
-
-    layout = pp.compute_head_mode_layout(
-        slicer_colors, slicer_types, feeders, ace_slots, ace_head,
-        fuzzy_max_distance=_PREFLIGHT_FUZZY)
-    assignment = layout["assignment"]
-    loadout_mapping = []
-    for t in sorted(slicer_colors.keys()):
-        e = assignment.get(t) or {}
-        loadout_mapping.append({"t": t, "target_id": _head_target_id(e),
-                                "tier": e.get("tier", "no_slot")})
-    plans = {
-        "loadout": {
-            "feasible": layout["feasible"],
-            "swaps": pp.head_mode_swap_count(events, assignment),
-            "mapping": loadout_mapping},
-    }
-
-    feeder_heads = [h for h in range(4) if h != ace_head]
-    ace_num = min((s["ace"] for s in ace_slots), default=0)
-    num_slots = 4
-    plans["optimize"] = _head_proposal_plan(
-        pp, events, slicer_colors, feeder_heads, ace_head, ace_num,
-        num_slots, None)
-    plans["layer"] = _head_proposal_plan(
-        pp, events, slicer_colors, feeder_heads, ace_head, ace_num,
-        num_slots, layer_sets)
-
-    return {
-        "token": token, "filename": safe_name, "size": upload_size,
-        "head_mode": True, "ace_head": ace_head,
-        "slicer_colors": [
-            {"t": t, "hex": (slicer_colors[t] or "").lower(),
-             "name": pp.approx_color_name(slicer_colors[t]) or "",
-             "material": slicer_types.get(t, "") or ""}
-            for t in sorted(slicer_colors.keys())],
-        "targets": targets,
-        "events": events,
-        "plans": plans,
-    }
-
 @app.post("/api/preflight")
 async def preflight(file: UploadFile = File(...)) -> dict:
     raw_name = file.filename or ""
@@ -1002,6 +730,7 @@ async def preflight(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
         raise HTTPException(status_code=400, detail="not a g-code file")
+
     if await _any_head_manual():
         raise HTTPException(
             status_code=409,
@@ -1014,12 +743,15 @@ async def preflight(file: UploadFile = File(...)) -> dict:
     if len(data) > _PREFLIGHT_MAX_SIZE:
         raise HTTPException(
             status_code=413,
-            detail=(f"gcode too large for in-printer preflight "
+            detail=(f"This g-code is too large for in-printer preflight "
                     f"({len(data)//1024//1024} MB > "
-                    f"{_PREFLIGHT_MAX_SIZE//1024//1024} MB limit). "
-                    f"Bypass: upload directly via Moonraker's normal "
-                    f"upload endpoint, or raise the limit via "
-                    f"MULTIACE_PREFLIGHT_MAX_MB env."))
+                    f"{_PREFLIGHT_MAX_SIZE//1024//1024} MB limit). The "
+                    f"Snapmaker U1 is too slow to analyse files this large. "
+                    f"Run the multiACE post-processing script in your slicer "
+                    f"instead - it does the same analysis on your PC in "
+                    f"seconds - then upload the result directly via Moonraker. "
+                    f"Advanced: raise the limit via the "
+                    f"MULTIACE_PREFLIGHT_MAX_MB env var."))
 
     _cleanup_preflight_dir()
     _PREFLIGHT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1033,92 +765,22 @@ async def preflight(file: UploadFile = File(...)) -> dict:
 
     pp = _load_post_processor()
 
-    plan_keep_re = re.compile(
-        r'^(;\s*Change Tool|;\s*LAYER_CHANGE|;\s*filament\b|T\d{1,2}\s*$)',
-        re.IGNORECASE)
-    head_lines: list[str] = []
-    tail_lines: deque[str] = deque(maxlen=2000)
-    plan_lines: list[str] = []
-    used: set[int] = set()
     with open(src_path, "r", encoding="utf-8", errors="replace") as f:
-        for i, line in enumerate(f):
-            if i < 300:
-                head_lines.append(line)
-            else:
-                tail_lines.append(line)
-            m = _TOOLCHANGE_RE.match(line)
-            if m:
-                used.add(int(m.group(1)))
-                used.add(int(m.group(2)))
-            if plan_keep_re.match(line):
-                plan_lines.append(line.rstrip('\n'))
-    meta_buf = "".join(head_lines) + "".join(tail_lines)
-    plan_proxy = "\n".join(plan_lines)
-    del head_lines, tail_lines, plan_lines
-
-    slicer_colors = pp.parse_color_names(meta_buf)
-    slicer_types  = pp.parse_filament_types(meta_buf)
-    num_aces      = pp.infer_num_aces(meta_buf)
-    del meta_buf
-
-    if used:
-        slicer_colors = {t: c for t, c in slicer_colors.items() if t in used}
-        slicer_types  = {t: m for t, m in slicer_types.items() if t in used}
+        slicer_colors, slicer_types, num_aces, _used, plan_proxy = \
+            preflight_core.parse_meta(pp, f)
 
     live_slots = await _live_slots_async()
     if not live_slots:
         raise HTTPException(status_code=409,
                             detail="no slots are loaded on the printer")
-    num_aces = max(num_aces, max((s["ace"] for s in live_slots), default=0) + 1)
-
     hm_mode, hm_ace_head, hm_feeders = await _head_mode_context()
-    if hm_mode == "head":
-        return _head_mode_preview(
-            pp, token, safe_name, upload_size, slicer_colors, slicer_types,
-            hm_ace_head, hm_feeders, live_slots, plan_proxy)
+    head_ctx = {"mode": hm_mode, "ace_head": hm_ace_head, "feeders": hm_feeders}
 
-    missing_mats = pp.check_material_availability(slicer_types, live_slots)
-
-    out = {
-        "token":         token,
-        "filename":      safe_name,
-        "size":          upload_size,
-        "num_aces":      num_aces,
-        "slicer_colors": [
-            {"t": t, "hex": (slicer_colors[t] or "").lower(),
-             "name": pp.approx_color_name(slicer_colors[t]) or "",
-             "material": slicer_types.get(t, "") or ""}
-            for t in sorted(slicer_colors.keys())
-        ],
-        "live_slots": [
-            {"ace": s["ace"], "slot": s["slot"],
-             "material": s["material"], "color": s["color"],
-             "name": pp.approx_color_name(s["color"]) or ""}
-            for s in sorted(live_slots, key=lambda x: (x["ace"], x["slot"]))
-        ],
-        "missing_materials": missing_mats,
-        "plans": {},
-    }
-    if not missing_mats:
-
-        remap, info, _ = pp.match_colors_to_slots(
-            slicer_colors, live_slots, num_heads=4,
-            filament_types=slicer_types,
-            strict_color=False,
-            fuzzy_max_distance=_PREFLIGHT_FUZZY,
-        )
-        mapping = _mapping_from_info(info)
-        proxy_remapped = pp.apply_remap(plan_proxy, remap) if remap else plan_proxy
-        result = pp.plan_loadout(proxy_remapped, num_aces=num_aces) or {}
-        out["events"] = list(result.get("events") or [])
-        del plan_proxy, proxy_remapped
-        for mode in ("slicer", "optimize", "layer"):
-            out["plans"][mode] = _build_plan(
-                pp, mode, None, result, mapping,
-                slicer_colors=slicer_colors, slicer_types=slicer_types,
-                num_aces=num_aces)
-        del result
-    return out
+    return preflight_core.build_report(
+        pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
+        num_aces=num_aces, plan_proxy=plan_proxy, live_slots=live_slots,
+        head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
+        fuzzy=_PREFLIGHT_FUZZY)
 
 _PREFLIGHT_JOBS: dict[str, dict] = {}
 _PREFLIGHT_JOBS_LOCK = asyncio.Lock()
@@ -1191,147 +853,29 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
         _set_stage(state, "analyze", 0.0)
 
         with open(src, "r", encoding="utf-8", errors="replace") as f:
-
-            head_lines: list[str] = []
-            tail_lines: deque[str] = deque(maxlen=2000)
-            for i, line in enumerate(f):
-                if i < 300:
-                    head_lines.append(line)
-                else:
-                    tail_lines.append(line)
-        meta_buf = "".join(head_lines) + "".join(tail_lines)
-        slicer_colors = pp.parse_color_names(meta_buf)
-        slicer_types  = pp.parse_filament_types(meta_buf)
-        num_aces      = pp.infer_num_aces(meta_buf)
-        del meta_buf, head_lines, tail_lines
-
-        used: set[int] = set()
-        with open(src, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                m = _TOOLCHANGE_RE.match(line)
-                if m:
-                    used.add(int(m.group(1)))
-                    used.add(int(m.group(2)))
-        if used:
-            slicer_colors = {t: c for t, c in slicer_colors.items() if t in used}
-            slicer_types  = {t: m for t, m in slicer_types.items() if t in used}
+            slicer_colors, slicer_types, num_aces, _used, _plan = \
+                preflight_core.parse_meta(pp, f)
 
         live_slots = await _live_slots_async()
-        num_aces = max(num_aces, max((s["ace"] for s in live_slots), default=0) + 1)
-        if mode != "head":
-            missing_mats = pp.check_material_availability(slicer_types, live_slots)
-            if missing_mats:
-                raise RuntimeError(
-                    "required material(s) not loaded: " + ", ".join(missing_mats))
-
         if mode == "head":
             _, hm_ace_head, hm_feeders = await _head_mode_context()
-            targets = _head_mode_targets(pp, hm_feeders, live_slots)
-            if head_plan in ("optimize", "layer"):
-                _set_stage(state, head_plan, 1.0)
-                hm_result = await asyncio.to_thread(
-                    pp.plan_loadout_from_file, str(src), num_aces) or {}
-                hm_events = list(hm_result.get("events") or [])
-                hm_layer_sets = None
-                if head_plan == "layer":
-                    lcs = (hm_result.get("layer_info") or {}).get(
-                        "layer_color_sets") or []
-                    hm_layer_sets = [set(s) for s in lcs] if lcs else None
-                feeder_heads = [h for h in range(4) if h != hm_ace_head]
-                ace_num = min((s["ace"] for s in live_slots), default=0)
-                assignment, _hm_swaps = pp.compute_head_mode_optimize(
-                    hm_events, feeder_heads, hm_ace_head, ace_num, 4,
-                    layer_color_sets=hm_layer_sets)
-                if assignment is None:
-                    raise RuntimeError(
-                        "no feasible head-mode loadout for %s plan" % head_plan)
-            elif head_assignment:
-                assignment = _assignment_from_target_ids(
-                    head_assignment, targets, hm_ace_head)
-            else:
-                layout = pp.compute_head_mode_layout(
-                    slicer_colors, slicer_types, hm_feeders, live_slots,
-                    hm_ace_head, fuzzy_max_distance=_PREFLIGHT_FUZZY)
-                assignment = layout["assignment"]
-
-            _set_stage(state, "rewrite", 10.0)
-            await asyncio.to_thread(
-                pp.rewrite_head_mode_to_file,
-                str(src), str(tmp_a), assignment, hm_ace_head,
-                _stage_progress(state, 10.0, 60.0))
-            cur, nxt = tmp_a, tmp_b
-
-            _set_stage(state, "inject_auto_load", 70.0)
-            await asyncio.to_thread(
-                pp.inject_auto_load_to_file,
-                str(cur), str(nxt),
-                _stage_progress(state, 70.0, 12.0),
-                {hm_ace_head})
-            cur, nxt = nxt, cur
+            head_ctx = {"mode": "head", "ace_head": hm_ace_head,
+                        "feeders": hm_feeders}
         else:
-            if mode == "slicer":
-                if remap_override is not None:
-                    remap = {}
-                    for k, v in remap_override.items():
-                        try:
-                            ik, iv = int(k), int(v)
-                        except (TypeError, ValueError):
-                            continue
-                        if 0 <= iv <= 15 and ik != iv:
-                            remap[ik] = iv
-                else:
-                    remap, _info, _ = pp.match_colors_to_slots(
-                        slicer_colors, live_slots, num_heads=4,
-                        filament_types=slicer_types,
-                        strict_color=False,
-                        fuzzy_max_distance=_PREFLIGHT_FUZZY,
-                    )
-            else:
-                _set_stage(state, mode, 1.0)
-                sa_result = await asyncio.to_thread(
-                    pp.plan_loadout_from_file, str(src), num_aces) or {}
-                sa_events = sa_result.get("events") or []
-                sa_layer_sets = None
-                if mode == "layer":
-                    lcs = (sa_result.get("layer_info") or {}).get("layer_color_sets") or []
-                    sa_layer_sets = [set(s) for s in lcs] if lcs else None
-                c2h, _sa_swaps = pp.compute_swap_aware_layout(
-                    sa_events, num_aces=num_aces,
-                    layer_color_sets=sa_layer_sets)
-                if c2h is None:
-                    raise RuntimeError("no feasible head assignment for "
-                                       "%s mode" % mode)
-                head_ace_counter = {h: 0 for h in range(4)}
-                remap = {}
-                for c in sorted(c2h.keys(), key=lambda x: (c2h[x], x)):
-                    h = c2h[c]
-                    remap[c] = head_ace_counter[h] * 4 + h
-                    head_ace_counter[h] += 1
+            head_ctx = {"mode": "multi"}
 
-            _set_stage(state, "apply_remap", 5.0)
-            await asyncio.to_thread(
-                pp.apply_remap_to_file,
-                str(src), str(tmp_a), remap,
-                _stage_progress(state, 5.0, 25.0),
-            )
-            cur = tmp_a
-            nxt = tmp_b
-
-            _set_stage(state, "rewrite", 45.0)
-            await asyncio.to_thread(
-                pp.rewrite_to_file,
-                str(cur), str(nxt),
-                _stage_progress(state, 45.0, 30.0),
-            )
-            cur, nxt = nxt, cur
-
-            _set_stage(state, "inject_auto_load", 75.0)
-            await asyncio.to_thread(
-                pp.inject_auto_load_to_file,
-                str(cur), str(nxt),
-                _stage_progress(state, 75.0, 10.0),
-            )
-            cur, nxt = nxt, cur
+        final = await asyncio.to_thread(
+            preflight_core.rewrite_pipeline, pp,
+            src_path=str(src), tmp_a=str(tmp_a), tmp_b=str(tmp_b),
+            slicer_colors=slicer_colors, slicer_types=slicer_types,
+            num_aces=num_aces, live_slots=live_slots, head_ctx=head_ctx,
+            mode=mode, remap_override=remap_override,
+            head_assignment=head_assignment, head_plan=head_plan,
+            fuzzy=_PREFLIGHT_FUZZY,
+            set_stage=lambda s, p: _set_stage(state, s, p),
+            stage_cb=lambda base, span: _stage_progress(state, base, span))
+        cur = Path(final)
+        nxt = tmp_b if cur == tmp_a else tmp_a
 
         if set_prefs:
             _set_stage(state, "print_prefs", 84.0)
@@ -1374,8 +918,11 @@ class _PreflightPrint(BaseModel):
     token: str
     mode:  str
     set_prefs: bool = False
+
     remap: dict[str, int] | None = None
+
     head_assignment: dict[str, str] | None = None
+
     head_plan: str = "loadout"
 
 @app.post("/api/preflight/print")
@@ -1425,6 +972,49 @@ async def preflight_print_status(job_id: str) -> dict:
         "error":   state.get("error"),
         "filename": state.get("filename"),
         "mode":    state.get("mode"),
+    }
+
+@app.get("/api/preflight/pysrc")
+async def preflight_pysrc() -> dict:
+    """The two Python sources the in-browser Pyodide worker runs: the
+    unmodified post-processor + preflight_core. Served so the browser executes
+    the SAME code as the backend (one source of truth, no JS re-port/drift)."""
+    candidates = [
+        Path("/home/lava/printer_data/config/tools/post_process_virtual_toolheads.py"),
+        Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
+    ]
+    pp_src = next((p for p in candidates if p.is_file()), None)
+    if pp_src is None:
+        raise HTTPException(status_code=503,
+                            detail="post-processor script not installed")
+    core_src = Path(__file__).resolve().parent / "preflight_core.py"
+    if not core_src.is_file():
+        raise HTTPException(status_code=503,
+                            detail="preflight_core not installed")
+    try:
+        return {
+            "postprocess": pp_src.read_text(encoding="utf-8"),
+            "core":        core_src.read_text(encoding="utf-8"),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"cannot read sources: {exc}")
+
+@app.get("/api/preflight/livedata")
+async def preflight_livedata() -> dict:
+    """Live ACE/slot identities + head-mode context for the in-browser
+    preflight, in the exact shape preflight_core.build_report expects. Keeps the
+    slot filtering (rfid/override only) and head-mode resolution single-source on
+    the backend - the browser never re-derives it."""
+    if await _any_head_manual():
+        raise HTTPException(
+            status_code=409,
+            detail="preflight is disabled while a head is set to manual")
+    live_slots = await _live_slots_async()
+    mode, ace_head, feeders = await _head_mode_context()
+    return {
+        "live_slots": live_slots,
+        "head_ctx":   {"mode": mode, "ace_head": ace_head, "feeders": feeders},
     }
 
 _cfg_scalar_cache: dict = {"mtime": 0.0, "values": {}}
@@ -1639,6 +1229,11 @@ async def get_state() -> dict:
     """Aggregated dashboard state (ACEs + toolheads + dryer + status)."""
     try:
         status = await _query_state_gated()
+    except httpx.HTTPStatusError as e:
+
+        if e.response is not None and e.response.status_code == 503:
+            return {"klippy": "disconnected"}
+        return {"error": f"moonraker: {e}"}
     except httpx.HTTPError as e:
         return {"error": f"moonraker: {e}"}
     return _parse_state(status)
@@ -1733,6 +1328,7 @@ async def run_macro(req: MacroRequest) -> dict:
             parts.append(f"{k}={v}")
     script = " ".join(parts)
     try:
+
         result = await _mr_post("/printer/gcode/script",
                                 {"script": script}, timeout=1800.0)
     except httpx.HTTPStatusError as e:
@@ -2346,6 +1942,7 @@ async def _moonraker_log_listener() -> None:
 
                     if debug_recv:
                         _trace.warning("moonraker WS recv #%d: %s", msg_count, str(raw)[:240])
+
                     if _homing_active():
                         continue
                     try:
@@ -2676,12 +2273,20 @@ async def ws(websocket: WebSocket) -> None:
                         return
                     last_seen_notif_id = n["id"]
             if now - last_ts >= 1.0 and not _homing_active():
+
                 try:
                     status = await _query_state()
                     payload = _parse_state(status)
                     payload["type"] = "state"
                     payload["ts"] = now
                     await websocket.send_json(payload)
+                except httpx.HTTPStatusError as e:
+
+                    if e.response is not None and e.response.status_code == 503:
+                        await websocket.send_json(
+                            {"type": "state", "klippy": "disconnected", "ts": now})
+                    else:
+                        await websocket.send_json({"type": "error", "ts": now, "error": str(e)})
                 except Exception as e:
                     await websocket.send_json({"type": "error", "ts": now, "error": str(e)})
                 last_ts = now

@@ -16,13 +16,13 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "0.99b"
+MULTIACE_VERSION = "0.99.2b"
 MULTIACE_CODENAME = "Persistent Pesterers"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "388d8e6"
-MULTIACE_BUNDLE_SHA1 = "0bf58b3"
+MULTIACE_BUILD_TAG = "f947950"
+MULTIACE_BUNDLE_SHA1 = "1f491ef"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
@@ -83,6 +83,8 @@ V2_FA_RUNNING_STATES = (
     'assisting', 'rollback_assisting', 'feeding', 'rollback', 'preloading')
 
 FA_HOMING_SETTLE = 0.5
+
+ACE_OPEN_TIMEOUT = 8.0
 
 FA_ASSIST_VERIFY_MARGIN = 1.5
 
@@ -147,7 +149,9 @@ class MultiAce:
         self.load_retry = config.getint('load_retry', 3)              
         self.load_retry_retract = config.getint('load_retry_retract', 50)  
         self.max_dryer_temperature = config.getint('max_dryer_temperature', 55)
+
         self.extra_purge_length = config.getfloat('extra_purge_length', 0, minval=0, maxval=200)
+
         self.swap_purge_length = config.getint('swap_purge_length', 0, minval=0, maxval=200)
 
         self.seat_overshoot_length = config.getint('seat_overshoot_length', 0, minval=0, maxval=100)
@@ -228,6 +232,7 @@ class MultiAce:
             rl = ace_sec.getint('retract_length', None, minval=1)
             if rl is not None:
                 self._ace_section_retract_length[ace_i] = rl
+
             srl = ace_sec.getint('swap_retract_length', None, minval=0, maxval=2000)
             if srl is not None:
                 self._ace_section_swap_retract_length[ace_i] = srl
@@ -289,8 +294,10 @@ class MultiAce:
             'v2_print_assist_mode',
             {'constant': 'constant', 'tracked': 'tracked'},
             'constant')
+
         self._v2_constant_assist_speed = config.getint(
             'v2_constant_assist_speed', 0, minval=0, maxval=50)
+
         self._v2_assist_confirm_time = config.getfloat(
             'v2_assist_confirm_time', 0.5, minval=0.0, maxval=5.0)
 
@@ -305,6 +312,7 @@ class MultiAce:
         self._serials = {}
         self._connected_per_ace = {}
         self._serial_failed_per_ace = {}
+
         self._reconnecting_per_ace = {}
         self._info_per_ace = {}
 
@@ -372,9 +380,15 @@ class MultiAce:
         self._reload_i18n_catalog()
 
         self._head_source = {0: None, 1: None, 2: None, 3: None}
+
         self._heal_official_skip = {}
 
         self._swap_in_progress = False
+
+        self._swap_saved_pos = None
+        self._swap_orig_ext_name = None
+        self._swap_switched_head = False
+
         self._swap_probe_ref_temp = 0
 
         self._swap_phase = 'idle'
@@ -390,10 +404,13 @@ class MultiAce:
         self._last_homing_end = 0.0
 
         self._retract_length_override = None
+
         self._purge_length_override = None
 
         self._last_unload_ok = True
         self._last_load_ok = True
+
+        self._runout_suppress_heads = set()
 
         self._ghost_heads = set()
         self._hotplug_gone = {}
@@ -413,6 +430,7 @@ class MultiAce:
             'multiace_wiggle', os.path.join(log_dir, 'multiace_wiggle.log'))
         self._fa_log = _setup_file_logger(
             'multiace_fa', os.path.join(log_dir, 'multiace_fa.log'))
+
         self._feedlog = _setup_file_logger(
             'multiace_feedlog', os.path.join(log_dir, 'multiace_feedlog.log'))
         self._feedlog_last = {}
@@ -670,6 +688,7 @@ class MultiAce:
         return (proto_bucket, len(port_tuple), port_tuple, path)
 
     def _parse_v2_extra_usb_ids(self, raw):
+
         pairs = []
         hexset = set('0123456789abcdef')
         for tok in (raw or '').replace(',', ' ').split():
@@ -846,6 +865,7 @@ class MultiAce:
                 s.close()
 
         def _evict(sig):
+
             for cmd in (['fuser', '-k', '-%s' % sig, port_spec],
                         ['pkill', '-%s' % sig, '-f', 'uvicorn.*main:app']):
                 try:
@@ -964,6 +984,7 @@ class MultiAce:
                          self._WEB_INITD)
             return
         if self._web_port_busy():
+
             if self._kill_own_klippy_web():
                 for _ in range(20):
                     if not self._web_port_busy():
@@ -975,6 +996,7 @@ class MultiAce:
                              self._web_port)
                 self.log_always(self._t('msg.web_running'))
                 return
+
         import subprocess
         try:
             subprocess.run(['sh', self._WEB_INITD, 'start'],
@@ -1021,6 +1043,7 @@ class MultiAce:
             pass
 
     def _feedlog_tick(self, eventtime):
+
         try:
             ps = self.printer.lookup_object('print_stats', None)
             if ps is None or getattr(ps, 'state', '') != 'printing':
@@ -1048,6 +1071,7 @@ class MultiAce:
         return eventtime + V2_FEED_LOG_INTERVAL
 
     def _feedlog_record(self, idx, slot, head, response):
+
         try:
             fi = ((response or {}).get('result') or {}).get('feed_info') or []
             rec = None
@@ -1184,6 +1208,8 @@ class MultiAce:
                          % self._ace_mode)
 
         self._disable_stock_entangle_detect()
+
+        self._wrap_resume_command()
 
         self._refresh_ace_devices('startup')
 
@@ -1388,6 +1414,7 @@ class MultiAce:
         lines = []
         for slot_idx in range(4):
             if not self.head_uses_ace(slot_idx):
+
                 continue
             ov = self._slot_overrides.get('%d_%d' % (ace_idx, slot_idx)) or {}
             s = slots_by_index.get(slot_idx) or {}
@@ -1523,6 +1550,7 @@ class MultiAce:
                 src = self._head_source.get(head)
                 if detected and src is None:
                     if not self.head_uses_ace(head):
+
                         manual_loaded_heads.append(head)
                     else:
                         ghost_heads.append(head)
@@ -1550,6 +1578,31 @@ class MultiAce:
                     'expected). ACE_SWAP_HEAD will be refused for these heads.'
                     % head_list)
 
+            seen_slots = {}
+            dup = []
+            mismatched = []
+            for head in range(4):
+                src = self._head_source.get(head)
+                if src is None or not self.head_uses_ace(head):
+                    continue
+                key = (src.get('ace_index'), src.get('slot'))
+                if key in seen_slots:
+                    dup.append((seen_slots[key], head, src.get('slot')))
+                else:
+                    seen_slots[key] = head
+                if self._ace_mode == 'multi' and src.get('slot') != head:
+                    mismatched.append((head, src.get('slot')))
+            if dup or mismatched:
+                parts = ['T%s+T%s->slot %s' % (self._disp(a), self._disp(b),
+                         self._disp(s)) for a, b, s in dup]
+                parts += ['T%s->slot %s' % (self._disp(h), self._disp(s))
+                          for h, s in mismatched]
+                self.log_error(self._t('msg.head_source_inconsistent',
+                    detail=', '.join(parts)))
+                self.reactor.register_async_callback(
+                    lambda et: self.gcode.run_script_from_command('CANCEL_PRINT'))
+                return
+
             for head in range(4):
                 source = self._head_source.get(head)
                 if source is None:
@@ -1565,8 +1618,12 @@ class MultiAce:
                         head=self._disp(head), ace=self._disp(ace_idx)))
         self._auto_feed_enabled = True
         self._fa_context = 'print'
+
         self._serial_failed_pause_sent = False
+
         self._reopen_failed_aces_on_resume()
+
+        self._runout_suppress_heads = set()
         logging.info('[multiACE] Print started - auto-feed enabled')
         self._fa_trace('gate OPEN (context=print) via _on_print_start')
 
@@ -1582,6 +1639,7 @@ class MultiAce:
         if source is None:
             return
         if not self.head_uses_ace(head_index):
+
             return
         target_ace = source['ace_index']
         target_slot = source['slot']
@@ -1619,6 +1677,7 @@ class MultiAce:
     def _on_print_end(self, *args):
         self._auto_feed_enabled = False
         self._fa_context = 'idle'
+        self._runout_suppress_heads = set()
         logging.info('[multiACE] Print ended - auto-feed disabled')
         self._fa_trace('gate CLOSE (context=idle) via _on_print_end')
         stopped_any = False
@@ -1701,6 +1760,7 @@ class MultiAce:
                 % (orig_ext_name, e))
 
     def _restore_machine_state_for_resume(self):
+
         try:
             ps = self.printer.lookup_object('print_stats', None)
             if ps is not None:
@@ -1717,6 +1777,7 @@ class MultiAce:
             if cur == 'PRINTING':
                 return
             if cur != 'IDLE':
+
                 self.gcode.run_script_from_command(
                     'SET_MAIN_STATE MAIN_STATE=IDLE ACTION=IDLE')
             self.gcode.run_script_from_command('SET_MAIN_STATE MAIN_STATE=PRINTING')
@@ -1728,7 +1789,44 @@ class MultiAce:
             logging.info(
                 '[multiACE] recovery: machine_state restore failed: %s' % e)
 
+    def _wrap_resume_command(self):
+
+        for name in ('RESUME', '_RESUME_BASE'):
+            try:
+                prev = self.gcode.register_command(name, None)
+            except Exception as e:
+                logging.info('[multiACE] %s unregister failed: %s' % (name, e))
+                continue
+            if prev is None:
+                logging.info('[multiACE] %s not registered - skip wrap' % name)
+                continue
+            try:
+                self.gcode.register_command(
+                    name, self._make_resume_wrap(prev, name),
+                    desc='multiACE: normalise machine_state, then resume')
+                logging.info('[multiACE] wrapped %s for machine_state restore'
+                             % name)
+            except Exception as e:
+                logging.info('[multiACE] %s re-register failed (%s) - restoring '
+                             'stock handler' % (name, e))
+                try:
+                    self.gcode.register_command(name, prev)
+                except Exception:
+                    pass
+
+    def _make_resume_wrap(self, prev, name):
+
+        def _wrap(gcmd):
+            try:
+                self._restore_machine_state_for_resume()
+            except Exception as e:
+                logging.info('[multiACE] %s wrap: machine_state restore '
+                             'failed: %s' % (name, e))
+            prev(gcmd)
+        return _wrap
+
     def _pause_for_recovery(self, gcmd, detail_msg, recovery_steps, code=0):
+
         for i, step in enumerate(recovery_steps, 1):
             try:
                 self.gcode.run_script_from_command(
@@ -1744,12 +1842,20 @@ class MultiAce:
 
         active = self.toolhead.get_extruder().get_name() if self.toolhead else 'extruder'
         idx = 0 if active == 'extruder' else int(active.replace('extruder', '') or 0)
+
+        if not self._head_is_loaded(idx):
+            self._runout_suppress_heads.add(idx)
+            logging.info(
+                '[multiACE] recovery: runout suppressed on empty active head %d '
+                'until it is (re)loaded' % idx)
+
         self._restore_machine_state_for_resume()
         raise gcmd.error(
             message=detail_msg.replace('"', "'")[:200], action='pause',
             id=525, index=idx, code=code, oneshot=1, level=2)
 
     def _machine_state_after_feed_op(self):
+
         try:
             ps = self.printer.lookup_object('print_stats', None)
             if ps is not None and ps.get_status(
@@ -1862,6 +1968,12 @@ class MultiAce:
             return False
         serial_path = self._ace_devices[idx]
         logging.info('[multiACE] Try connecting ACE %d (%s)' % (idx, serial_path))
+
+        try:
+            logging.info('[multiACE][DBG] _open_ace ACE %d caller chain:\n%s' % (
+                idx, ''.join(traceback.format_stack(limit=8)[:-1])))
+        except Exception:
+            pass
         self._usb_log.info('CONNECT attempt idx=%d serial=%s', idx, serial_path)
         connect_start = time.monotonic()
 
@@ -1922,9 +2034,45 @@ class MultiAce:
             protocol_cls = self._ace_path_protocol.get(serial_path, AceProtocolV1)
             protocol = protocol_cls()
             self._protocols[idx] = protocol
-            ser = protocol.open_transport(
-                serial_path, self.baud or protocol.DEFAULT_BAUD)
-            if not ser.is_open:
+
+            _open_res = {'ser': None, 'err': None}
+            _open_done = threading.Event()
+            _open_gaveup = threading.Event()
+            def _open_worker(_p=protocol, _path=serial_path,
+                             _baud=self.baud or protocol.DEFAULT_BAUD):
+                try:
+                    s = _p.open_transport(_path, _baud)
+                except Exception as _e:
+                    _open_res['err'] = _e
+                    _open_done.set()
+                    return
+                if _open_gaveup.is_set():
+
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                else:
+                    _open_res['ser'] = s
+                _open_done.set()
+            threading.Thread(target=_open_worker, daemon=True,
+                             name='ace%d-open' % idx).start()
+            _open_deadline = self.reactor.monotonic() + ACE_OPEN_TIMEOUT
+            while not _open_done.is_set():
+                if self.reactor.monotonic() > _open_deadline:
+                    _open_gaveup.set()
+                    self._usb_stats['connect_failures'] += 1
+                    self._usb_log.warning(
+                        'CONNECT open timeout idx=%d (>%.0fs, still off-thread)',
+                        idx, ACE_OPEN_TIMEOUT)
+                    logging.info('[multiACE] open ACE %d timed out '
+                                 '(serial still opening off-thread)' % idx)
+                    return False
+                self.reactor.pause(self.reactor.monotonic() + 0.05)
+            if _open_res['err'] is not None:
+                raise _open_res['err']
+            ser = _open_res['ser']
+            if ser is None or not ser.is_open:
                 return False
             self._serials[idx] = ser
             self._connected_per_ace[idx] = True
@@ -2008,6 +2156,7 @@ class MultiAce:
                         _fire_ready()
                 self.send_request_to(idx, request=dict(req), callback=cb)
             if on_ready is not None:
+
                 def _ready_timeout(eventtime):
                     _fire_ready()
                     return self.reactor.NEVER
@@ -2116,6 +2265,7 @@ class MultiAce:
                         break
                     logging.info('[multiACE] V2 writer ACE %d error: %s' % (
                         idx, e))
+
                     if not self._serial_failed_per_ace.get(idx, False):
                         self._serial_failed_per_ace[idx] = True
                         try:
@@ -2140,6 +2290,7 @@ class MultiAce:
                 except Exception as e:
                     if stop.is_set():
                         break
+
                     logging.info('[multiACE] V2 reader ACE %d error: %s' % (idx, e))
                     if not self._serial_failed_per_ace.get(idx, False):
                         self._serial_failed_per_ace[idx] = True
@@ -2198,6 +2349,7 @@ class MultiAce:
                 callback(self=self, response=ret)
 
     def send_request_to(self, idx, request, callback):
+
         info = self._info_per_ace.get(idx)
         if info is None:
             info = self._make_default_info(idx)
@@ -2387,9 +2539,11 @@ class MultiAce:
                 self._disconnect_from(idx)
             except Exception:
                 pass
+
         if not self._serial_failed_pause_sent:
             self._serial_failed_pause_sent = True
             def _do_pause(eventtime):
+
                 try:
                     active = self.toolhead.get_extruder().get_name() \
                         if self.toolhead else 'extruder'
@@ -2412,6 +2566,33 @@ class MultiAce:
                             message=detail, oneshot=1, level=2)
                 except Exception:
                     pass
+
+                try:
+                    sp = getattr(self, '_swap_saved_pos', None)
+                    if self._swap_in_progress and sp:
+                        lines = []
+                        if getattr(self, '_swap_switched_head', False):
+                            on = getattr(self, '_swap_orig_ext_name', None)
+                            if on:
+                                oh = (0 if on == 'extruder'
+                                      else int(on.replace('extruder', '') or 0))
+                                lines.append('T%d A0' % oh)
+                        lines += [
+                            'G90',
+                            'G0 Z%.3f F600' % (sp[2] + 3.0),
+                            'G0 Y%.3f F12000' % sp[1],
+                            'G0 X%.3f F12000' % sp[0],
+                            'G0 Z%.3f F600' % (sp[2] + 2.0),
+                            'M400',
+                        ]
+                        self.gcode.run_script('\n'.join(lines))
+                        logging.info(
+                            '[multiACE] comms-loss PAUSE: restored print pos '
+                            'X=%.2f Y=%.2f Z=%.2f before pause (was mid-swap)'
+                            % (sp[0], sp[1], sp[2]))
+                except Exception as pe:
+                    logging.info('[multiACE] comms-loss PAUSE: mid-swap pos '
+                                 'restore failed: %s' % pe)
                 try:
                     self.gcode.run_script('PAUSE')
                 except Exception as pe:
@@ -2472,6 +2653,7 @@ class MultiAce:
                     self._audit_state('V2_RECONNECTED', {'idx': idx})
                 except Exception:
                     pass
+
             else:
                 self._usb_stats['errno5_unrecovered'] += 1
                 self._handle_per_ace_failure(idx, err)
@@ -2498,6 +2680,7 @@ class MultiAce:
             return
         if int(source.get('ace_index', -1)) != idx:
             return
+
         self._feed_assist_per_ace[idx] = -1
         try:
             self._arm_fa_for(idx, source['slot'])
@@ -2520,6 +2703,7 @@ class MultiAce:
             if not self._serial_failed_per_ace.get(idx, False):
                 continue
             try:
+
                 ok = self._open_ace(
                     idx, on_ready=lambda i=idx: self._rearm_fa_after_reconnect(i))
             except Exception as e:
@@ -2542,6 +2726,7 @@ class MultiAce:
     def _on_homing_move_end(self, hmove):
         self._homing_active = False
         self._last_homing_end = self.reactor.monotonic()
+
         self._touch_homing_flag()
 
     def _v1_fa_blocked_by_homing(self, idx):
@@ -2607,6 +2792,7 @@ class MultiAce:
 
         prev_slot = self._feed_assist_per_ace.get(idx, -1)
         if prev_slot == slot:
+
             if self._is_v2_idx(idx):
                 slot_status = self._v2_get_slot_status(idx, slot)
                 if slot_status in V2_FA_RUNNING_STATES:
@@ -2646,6 +2832,7 @@ class MultiAce:
         self._feed_assist_per_ace[idx] = slot
         if idx == self._active_device_index:
             self._feed_assist_index = slot
+
         _vst = self._v2_velocity_state.get(idx)
         if _vst is not None:
             _vst['last_arm_time'] = self.reactor.monotonic()
@@ -2725,6 +2912,7 @@ class MultiAce:
             return start_callback
 
         def _send_start():
+
             if self._v1_fa_blocked_by_homing(idx):
                 self._fa_trace(
                     'FA start deferred (homing active/recent): ACE %d slot %d'
@@ -2947,6 +3135,7 @@ class MultiAce:
         self.dwell(delay=0.7)
 
     _V2_FILAMENT_INFO_PENDING_TTL = 5.0
+
     _V2_FILAMENT_INFO_EMPTY_TTL = 60.0
 
     def _merge_v2_filament_info(self, idx, result):
@@ -2969,6 +3158,7 @@ class MultiAce:
                     slot['sku'] = cached.get('sku', '')
                 else:
                     slot['rfid'] = 1
+
                     empty_ts = empty.get(i)
                     if empty_ts is not None and (now - empty_ts) < self._V2_FILAMENT_INFO_EMPTY_TTL:
                         continue
@@ -2998,6 +3188,7 @@ class MultiAce:
                             res.get('color'), res.get('brand'),
                             res.get('sku'), response)
                         if not ftype:
+
                             self._v2_filament_info_empty.setdefault(
                                 _idx, {})[_slot] = time.monotonic()
                             return
@@ -3177,6 +3368,8 @@ class MultiAce:
             'last_armed_slot': None,
 
             'last_arm_time': 0.0,
+
+            'print_disarm_since': None,
         })
 
         def _tick(eventtime):
@@ -3223,6 +3416,7 @@ class MultiAce:
             state['last_slot_statuses'] = status_snapshot
 
             target_slot = None
+            active_head = None
             try:
                 cur_ext = self.toolhead.get_extruder()
                 active_head = getattr(cur_ext, 'extruder_index',
@@ -3248,6 +3442,7 @@ class MultiAce:
                     break
 
             if armed_slot is None:
+
                 _verify_to = self._fa_settle_after_stop + FA_ASSIST_VERIFY_MARGIN
                 if (target_slot is not None
                         and self._feed_assist_per_ace.get(idx, -1) == target_slot
@@ -3271,6 +3466,7 @@ class MultiAce:
                         if s.get('index') == last_idx:
                             new_state = s.get('slot_status', 'unknown')
                             break
+
                     if new_state not in V2_FA_RUNNING_STATES:
                         self._fa_log.info(
                             '[v2-vel] ace=%d disarmed (was slot=%s, now=%s)' % (
@@ -3291,7 +3487,32 @@ class MultiAce:
                     state['last_armed_slot'] = None
                     state['last_quantum'] = None
                     state['last_direction'] = None
+
+                if (target_slot is not None
+                        and active_head is not None
+                        and self.head_uses_ace(active_head)
+                        and self._feed_assist_per_ace.get(idx, -1) == -1
+                        and self._auto_feed_enabled
+                        and self._fa_context == 'print'
+                        and not self._swap_in_progress
+                        and not getattr(self, '_v2_active_rev_assist', False)
+                        and self._v2_get_slot_status(idx, target_slot)
+                            not in V2_FA_RUNNING_STATES):
+                    if state.get('print_disarm_since') is None:
+                        state['print_disarm_since'] = eventtime
+                    elif (eventtime - state['print_disarm_since']) > _verify_to:
+                        self._fa_log.warning(
+                            '[v2-recover] print-head FA disarmed without re-arm '
+                            'on ACE %d slot %d (%.1fs down, host action) - '
+                            're-arming' % (idx, target_slot, _verify_to))
+                        self._v2_schedule_fa_rearm(
+                            idx, target_slot, 'print-head-disarmed')
+                        state['print_disarm_since'] = None
+                else:
+                    state['print_disarm_since'] = None
                 return eventtime + 0.5
+
+            state['print_disarm_since'] = None
             if state['last_armed_slot'] != armed_slot:
                 self._fa_log.info(
                     '[v2-vel] ace=%d armed slot=%d status=%s' % (
@@ -3334,6 +3555,7 @@ class MultiAce:
                     'cand_since': eventtime,
                     'speed_pinned': False,
                 })
+
                 if (not cdisp['speed_pinned']
                         and self._v2_constant_assist_speed > 0):
                     cdisp['speed_pinned'] = True
@@ -3349,6 +3571,7 @@ class MultiAce:
                     except Exception as e:
                         self._fa_log.info(
                             '[v2-vel] constant pin enqueue failed: %s' % e)
+
                 if direction != cdisp['cand_dir']:
                     cdisp['cand_dir'] = direction
                     cdisp['cand_since'] = eventtime
@@ -3462,13 +3685,16 @@ class MultiAce:
                 prev_info = self._info_per_ace.get(idx, self._make_default_info(idx))
                 prev_slots = prev_info.get('slots', [])
                 self._merge_v2_filament_info(idx, result)
+
                 for _s in result.get('slots', []) or []:
                     if isinstance(_s, dict):
                         _bt, _st, _vn = self._split_type_subtype(_s.get('type', ''))
                         _s['type'] = _bt
                         _s['subtype'] = _st
+
                         if _vn and not (_s.get('brand') or ''):
                             _s['brand'] = _vn
+
                 display_refresh_needed = False
                 for i in range(4):
                     try:
@@ -3536,6 +3762,7 @@ class MultiAce:
                                 push_brand  = new_brand
                                 push_subtype = new_subtype
                             for head in target_heads:
+
                                 if not self.head_uses_ace(head):
                                     continue
                                 self._expect_ptc_push(head, push_type, push_color, push_brand, push_subtype)
@@ -3554,6 +3781,7 @@ class MultiAce:
                         elif is_active:
 
                             source = self._head_source.get(i)
+
                             if not self.head_uses_ace(i):
                                 pass
                             elif not (source and source['ace_index']
@@ -3619,6 +3847,7 @@ class MultiAce:
 
                                 if (is_active and not target_heads and slot_idx < 4
                                         and self.head_uses_ace(slot_idx)):
+
                                     src = self._head_source.get(slot_idx)
                                     if not src:
                                         target_heads = [slot_idx]
@@ -3639,6 +3868,7 @@ class MultiAce:
                                     want_color = want_color[:6]
                                 want_sub = self._norm_subtype(push_subtype)
                                 for head in target_heads:
+
                                     if not self.head_uses_ace(head):
                                         continue
                                     cur_type = ptc_types[head] if head < len(ptc_types) else ''
@@ -3674,6 +3904,7 @@ class MultiAce:
                                         except Exception as phe:
                                             m = str(phe)
                                             if 'not configurable' in m or 'official' in m:
+
                                                 self._heal_official_skip[head] = want_key
                                                 logging.info(
                                                     '[multiACE] display heal: head %d filament is '
@@ -3842,6 +4073,7 @@ class MultiAce:
                 ace=self._disp(ace_idx)))
 
         self.wait_ace_ready_on(ace_idx)
+
         self.send_request_to(ace_idx, {"method": "drying_stop"}, callback)
 
     def _enable_feed_assist(self, index):
@@ -3958,6 +4190,7 @@ class MultiAce:
         self.dwell(delay=(length / speed) + 0.1)
 
     def _ace_slot_for_head(self, head):
+
         src = self._head_source.get(head)
         if src is not None:
             s = src.get('slot')
@@ -3966,6 +4199,7 @@ class MultiAce:
         return head
 
     def _resolve_retract_length(self, slot):
+
         if self._retract_length_override is not None:
             return self._retract_length_override
         return self.get_retract_length(self._active_device_index, slot)
@@ -4321,10 +4555,12 @@ class MultiAce:
             return
         head = int(ev['head'])
         if not self.head_uses_ace(head):
+
             self._fa_trace(
                 'display edit for head %d ignored (no ACE slot: manual or '
                 'feeder)' % head)
             return
+
         if (ev.get('vendor') or '').strip().upper() == 'NONE':
             self._fa_trace(
                 'display edit for head %d ignored (VENDOR=NONE = stock RFID '
@@ -4367,13 +4603,17 @@ class MultiAce:
         inc_vendor = (ev.get('vendor') or '').strip()
         inc_subtype = (ev.get('subtype') or '').strip()
 
-        if (not inc_type
-                and inc_color_raw in ('', '000000', '00000000', '000000FF')
-                and not inc_vendor):
+        has_identity = bool(existing.get('material') or existing.get('color')
+                            or ptc_type)
+        if (not inc_type and not inc_vendor
+                and (inc_color_raw in ('', '00000000')
+                     or (inc_color_raw in ('000000', '000000FF')
+                         and not has_identity))):
             return
 
         merged_material = inc_type or existing.get('material') or ptc_type
         merged_brand = inc_vendor or existing.get('brand') or ptc_vendor
+
         if inc_type:
             merged_subtype = inc_subtype
         else:
@@ -4425,10 +4665,12 @@ class MultiAce:
         logging.info('[multiACE] _push_rfid_info: active_device=%d, head_source=%s' % (
             self._active_device_index, str({k: (v['ace_index'] if v else None) for k, v in self._head_source.items()})))
         active = self._active_device_index
+
         self._refresh_filament_exist_flags()
 
         lines = []
         for head in range(4):
+
             if not self.head_uses_ace(head):
                 logging.info(
                     '[multiACE] _push_rfid_info: head %d - non-ACE '
@@ -4468,6 +4710,7 @@ class MultiAce:
                         'FILAMENT_SUBTYPE="%s"' % (
                             head, push_type, push_color, push_brand, push_subtype))
                 else:
+
                     rfid_type = source.get('type') or (
                         slot.get('type', '') if slot.get('rfid') == 2 else '')
                     if not rfid_type:
@@ -4517,6 +4760,7 @@ class MultiAce:
                         'FILAMENT_SUBTYPE="%s"' % (
                             head, push_type, push_color, push_brand, push_subtype))
                     continue
+
                 ace_info = self._info_per_ace.get(active, {}) or {}
                 aslots = ace_info.get('slots', []) or []
                 aslot = aslots[head] if head < len(aslots) else {}
@@ -4571,6 +4815,7 @@ class MultiAce:
             self._perform_switch(gcmd, target, autoload)
         finally:
             self._swap_in_progress = False
+            self._swap_saved_pos = None
 
     def _perform_switch(self, gcmd, target, autoload):
 
@@ -4611,7 +4856,29 @@ class MultiAce:
                 return
 
             current_slot = self._feed_assist_per_ace.get(self._active_device_index, -1)
-            if current_slot != -1:
+
+            preserve_print_fa = False
+            if current_slot != -1 and self._auto_feed_enabled and not autoload:
+                try:
+                    cur_ext = self.toolhead.get_extruder()
+                    print_head = getattr(cur_ext, 'extruder_index',
+                                getattr(cur_ext, 'extruder_num', None))
+                except Exception:
+                    print_head = None
+                if print_head is not None and self.head_uses_ace(print_head):
+                    psrc = self._head_source.get(print_head)
+                    if (psrc is not None
+                            and psrc.get('ace_index') == self._active_device_index
+                            and psrc.get('slot', -1) == current_slot):
+                        preserve_print_fa = True
+                        logging.info(
+                            '[multiACE] switch: keeping print-head FA armed '
+                            '(ACE %d slot %d head %d) across active switch to '
+                            'ACE %d' % (self._active_device_index, current_slot,
+                                        print_head, target))
+                        self._fa_trace(
+                            'switch: print-head FA preserved across active switch')
+            if current_slot != -1 and not preserve_print_fa:
                 try:
                     self._disarm_fa_for(self._active_device_index)
                 except Exception as e:
@@ -4660,7 +4927,8 @@ class MultiAce:
                 if filament_in_head:
                     logging.info(self._t('msg.switch_extruder_already_loaded',
                         head=gate))
-                elif self.gate_status[gate] == GATE_AVAILABLE:
+
+                elif self.gate_status[self._ace_slot_for_head(gate)] == GATE_AVAILABLE:
                     module, channel = self.EXTRUDER_MAP[gate]
                     logging.info(self._t('msg.switch_extruder_loading',
                         head=gate))
@@ -4711,6 +4979,7 @@ class MultiAce:
             return
         if head is None or head < 0 or head >= 4:
             return
+
         if not self.head_uses_ace(head):
             return
         ace_index = self._active_device_index
@@ -4727,6 +4996,7 @@ class MultiAce:
             return
         if src is not None:
             return
+
         target_slot = self._ace_slot_for_head(head)
         info = self._info_per_ace.get(ace_index) or {}
         slots = info.get('slots') or []
@@ -4770,6 +5040,7 @@ class MultiAce:
             return False
 
     def head_uses_ace(self, head):
+
         if self.head_is_manual(head):
             return False
         if getattr(self, '_ace_mode', 'multi') == 'head':
@@ -4780,6 +5051,7 @@ class MultiAce:
         return True
 
     def _ensure_extruder_change_handler(self):
+
         if self._extruder_handler_registered:
             return
         self.printer.register_event_handler(
@@ -4809,12 +5081,14 @@ class MultiAce:
         head = gcmd.get_int('HEAD', minval=0, maxval=3)
         enable = gcmd.get_int('ENABLE', minval=0, maxval=1)
         was_manual = self.head_is_manual(head)
+
         if bool(enable) != was_manual and self._head_is_loaded(head):
             raise gcmd.error(
                 self._t('msg.head_manual_loaded', head=self._disp(head)))
         self.head_manual[head] = bool(enable)
         if self.save_variables:
             self._save_head_manual()
+
         if enable and not was_manual:
             self._clear_filament_display(head)
         self.log_always(
@@ -4942,6 +5216,7 @@ class MultiAce:
             return
 
         if not self.head_uses_ace(head_index):
+
             self._fa_trace('_on_extruder_change: head %d does not use ACE '
                            '(feeder/manual) - skip FA' % head_index)
             return
@@ -5057,6 +5332,7 @@ class MultiAce:
             'filament_motion_sensor e%d_filament' % head, None)
         if sensor and sensor.get_status(0)['filament_detected']:
             if not self.head_uses_ace(head):
+
                 self.log_always(self._t('msg.load_head_already_loaded',
                     head=self._disp(head)))
                 return
@@ -5163,6 +5439,7 @@ class MultiAce:
             self._in_internal_load_head = False
 
         if not self.head_uses_ace(head):
+
             self._head_source[head] = None
             self._save_head_source()
             self._ghost_heads.discard(head)
@@ -5207,6 +5484,7 @@ class MultiAce:
             push_subtype = self._head_source[head].get('subtype', '') or ''
             do_push = True
         else:
+
             push_type    = ''
             push_color   = '000000FF'
             push_brand   = ''
@@ -5250,6 +5528,7 @@ class MultiAce:
                 '[multiACE] head %d is manual - ACE_UNLOAD_HEAD ignored, '
                 'unload it by hand' % head)
             return
+
         if not self._head_is_loaded(head):
             self.log_always(self._t('msg.unload_head_already_empty',
                 head=self._disp(head)))
@@ -5280,7 +5559,9 @@ class MultiAce:
 
         proto = self._protocols.get(active_idx)
         is_v2 = (proto is not None and getattr(proto, 'NAME', None) == 'v2')
-        if is_v2:
+        if not self.head_uses_ace(head):
+            self._fa_trace('unload: head %d not ACE-driven - skip ACE FA' % head)
+        elif is_v2:
             self._v2_arm_fa_for_unload(head)
             self._fa_trace(
                 'unload skip-stop FA on ACE %d (V2 - velocity tracker '
@@ -5625,6 +5906,7 @@ class MultiAce:
                     'vendor=%r type=%r sub=%r -> get_load_temp=%r'
                     % (head, v, t, s, temp))
                 if temp and temp >= 170:
+
                     try:
                         _en = 'extruder' if head == 0 else 'extruder%d' % head
                         _ex = self.printer.lookup_object(_en, None)
@@ -5812,6 +6094,10 @@ class MultiAce:
             orig_ext_name = self.toolhead.get_extruder().get_name()
             target_ext = 'extruder' if head == 0 else 'extruder%d' % head
             switched_head = (orig_ext_name != target_ext)
+
+            self._swap_saved_pos = saved_pos
+            self._swap_orig_ext_name = orig_ext_name
+            self._swap_switched_head = switched_head
             if switched_head:
                 logging.info('[multiACE] Swap: switching to %s (was %s)' % (target_ext, orig_ext_name))
                 self.gcode.run_script_from_command('T%d A0' % head)
@@ -5825,6 +6111,7 @@ class MultiAce:
             except Exception:
                 pass
             logging.info('[multiACE] Swap: saved heater=%d (swap head)' % saved_heater_target)
+
             self._swap_probe_ref_temp = saved_heater_target
 
             prev_ace = self._active_device_index
@@ -5937,6 +6224,7 @@ class MultiAce:
                 self._swap_back_to_orig_for_pause(
                     switched_head, orig_ext_name)
                 self._restore_pos_for_pause(saved_pos)
+
                 self._restore_machine_state_for_resume()
                 raise
             load_end_ts = time.monotonic()
@@ -5969,6 +6257,7 @@ class MultiAce:
             try:
                 self._arm_fa_for(ace_index, slot)
                 self.wait_ace_ready()
+
                 self._v2_schedule_fa_rearm(
                     ace_index, slot, 'post-load-verify', delay=0.20)
                 self._fa_trace('gate RE-OPEN for post-load wipe (context=%s) on ACE %d slot %d' % (
@@ -6056,6 +6345,7 @@ class MultiAce:
                 head=self._disp(head), ace=self._disp(ace_index), slot=self._disp(slot)))
         finally:
             self._swap_in_progress = False
+            self._swap_saved_pos = None
 
             if self._swap_phase != 'done':
                 self._last_swap_result = {
@@ -6668,6 +6958,8 @@ class MultiAce:
 
     def _push_slot_rfid_to_extruder(self, head):
 
+        if not self.head_uses_ace(head):
+            return
         try:
             slots = self._info.get('slots', [{}] * 4)
             if head < 0 or head >= len(slots):
@@ -6829,6 +7121,7 @@ class MultiAce:
         mode = gcmd.get('MODE', '').lower()
         if mode not in ('normal', 'single', 'multi', 'head'):
             raise gcmd.error('[multiACE] Invalid mode: %s. Use normal, multi, or head.' % mode)
+
         if mode == 'single':
             mode = 'multi'
 
@@ -6846,6 +7139,7 @@ class MultiAce:
                 self.gcode.run_script_from_command(
                     'SAVE_VARIABLE VARIABLE=%s VALUE=%d'
                     % (self.VARS_ACE_HEAD, new_ace_head))
+
                 for h in range(4):
                     if h != self._ace_head and not self.head_is_manual(h):
                         self._clear_filament_display(h)
@@ -7589,6 +7883,7 @@ class MultiAce:
             'swap_phase': self._swap_phase,
             'last_swap_result': self._last_swap_result,
             'event_seq': self._event_seq,
+
             'head_source': {str(k): v for k, v in self._head_source.items()},
             'head_manual': {str(h): bool(self.head_manual.get(h, False))
                             for h in range(4)},

@@ -131,6 +131,7 @@ FEED_MODE_ROLLBACK_ASSIST = 3
 class AceProtocolV2(AceProtocol):
     NAME = 'v2'
     DEFAULT_BAUD = 230400
+
     EXTRA_USB_IDS = ()
     SERIAL_KWARGS = {
         'timeout': 0.1,

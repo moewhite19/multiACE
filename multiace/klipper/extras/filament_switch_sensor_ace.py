@@ -63,6 +63,7 @@ class RunoutHelper:
         return 0
 
     def _runout_disp(self):
+
         ace = self.printer.lookup_object('ace', None)
         head = self.extruder_index
         if ace is not None and hasattr(ace, '_t'):
@@ -80,6 +81,9 @@ class RunoutHelper:
         ace = self.printer.lookup_object('ace', None)
         if ace is not None and getattr(ace, '_swap_in_progress', False):
             logging.info("[multiACE] filament_switch_sensor: blocking runout during swap")
+            return
+        if ace is not None and self.extruder_index in getattr(ace, '_runout_suppress_heads', ()):
+            logging.info("[multiACE] filament_switch_sensor: runout suppressed for head %d (recovery: empty head awaiting reload)" % self.extruder_index)
             return
 
         full_msg = self._runout_disp()
@@ -122,6 +126,7 @@ class RunoutHelper:
             logging.exception("Script running error")
         self.min_event_systime = self.reactor.monotonic() + self.event_delay
     def note_filament_present(self, is_filament_present, force=False):
+
         if is_filament_present == self.filament_present and force == False:
             return
         self.filament_present = is_filament_present
@@ -146,6 +151,11 @@ class RunoutHelper:
         is_printing = print_stats.state == "printing"
 
         if is_filament_present:
+
+            ace = self.printer.lookup_object('ace', None)
+            if ace is not None and self.extruder_index in getattr(ace, '_runout_suppress_heads', ()):
+                ace._runout_suppress_heads.discard(self.extruder_index)
+                logging.info("[multiACE] note_filament_present: head %d (re)loaded - clearing runout suppression" % self.extruder_index)
             if not is_printing and self.insert_gcode is not None:
 
                 self.min_event_systime = self.reactor.NEVER
@@ -160,6 +170,9 @@ class RunoutHelper:
             ace = self.printer.lookup_object('ace', None)
             if ace is not None and getattr(ace, '_swap_in_progress', False):
                 logging.info("[multiACE] note_filament_present: blocking runout callback during swap")
+                return
+            if ace is not None and self.extruder_index in getattr(ace, '_runout_suppress_heads', ()):
+                logging.info("[multiACE] note_filament_present: runout suppressed for head %d (recovery: empty head awaiting reload)" % self.extruder_index)
                 return
 
             if self.print_task_config is not None and \

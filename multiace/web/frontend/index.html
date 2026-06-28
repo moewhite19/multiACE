@@ -38,6 +38,7 @@
     </select>
     <span class="conn" :class="connClass">{{ connText }}</span>
   </header>
+  <div v-if="rebootNeeded" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
   <main>
     <section v-show="tab==='dashboard' && state.mode !== 'normal'">
       <p v-if="loadError" class="error">{{ loadError }}</p>
@@ -92,7 +93,8 @@
                         :class="{active: dryOpenAce === ace.idx, running: aceDrying(ace)}"
                         @click="toggleDryPanel(ace.idx)"
                         :title="t('ui.dashboard.dryer')">☀</button>
-                <button class="ace-load-all" v-if="state.mode !== 'head'" @click.stop="loadAll(ace.idx)">{{ t('ui.dashboard.load_all') }}</button>
+                <button class="ace-load-all" v-if="state.mode !== 'head'" @click.stop="loadAll(ace.idx)"
+                        :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load_all') }}</button>
               </span>
             </h2>
             <div class="slot-row" @click.stop>
@@ -118,8 +120,8 @@
                 <button class="slot-load-btn"
                         :class="{reload: needsReload(ace.idx, slot.idx)}"
                         @click.stop="loadSlot(ace.idx, slot.idx)"
-                        :disabled="state.mode === 'head' ? slotLoadedInHead(slot.idx) : (!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx))"
-                        :title="needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload_hint') : t('ui.dashboard.load')">
+                        :disabled="isPrinting || (state.mode === 'head' ? slotLoadedInHead(slot.idx) : (!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx)))"
+                        :title="isPrinting ? t('ui.dashboard.blocked_printing') : (needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload_hint') : t('ui.dashboard.load'))">
                   {{ needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload') : t('ui.dashboard.load') }}
                 </button>
               </div>
@@ -150,7 +152,8 @@
         </div>
         <h3 class="th-section-head">
           <span>{{ t('ui.dashboard.toolheads') }}</span>
-          <button class="unload-all-btn" @click="run('ACE_UNLOAD_ALL_HEADS')">{{ t('ui.dashboard.unload_all') }}</button>
+          <button class="unload-all-btn" @click="unloadAll()"
+                  :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.unload_all') }}</button>
         </h3>
         <div class="toolhead-grid">
           <article v-for="t_ in state.toolheads" :key="t_.idx"
@@ -195,8 +198,11 @@
               </span>
             </p>
             <div class="toolhead-actions" v-if="t_.module_exist">
-              <button v-if="t_.feeder && !t_.filament_at_extruder" @click="loadFeederHead(t_.idx)">{{ t('ui.dashboard.load') }}</button>
-              <button class="warn" @click="unloadHead(t_.idx)" :disabled="!t_.head_source_known && !t_.filament_at_extruder">{{ t('ui.dashboard.unload') }}</button>
+              <button v-if="t_.feeder && !t_.filament_at_extruder" @click="loadFeederHead(t_.idx)"
+                      :disabled="isPrinting" :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.load') }}</button>
+              <button class="warn" @click="unloadHead(t_.idx)"
+                      :disabled="(!t_.head_source_known && !t_.filament_at_extruder) || isPrinting"
+                      :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.unload') }}</button>
             </div>
             <label class="th-manual" v-if="t_.module_exist"
                    :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
@@ -251,9 +257,6 @@
             <option v-for="h in [0,1,2,3]" :key="h" :value="h">{{ dispIdx(h) }}</option>
           </select>
         </label>
-        <span v-if="modeChangePending" class="pill warn-pill">
-          {{ t('ui.config.mode_change_pending') }}
-        </span>
       </div>
       <h3>{{ t('ui.config.parameters') }}</h3>
       <div class="config-form">
