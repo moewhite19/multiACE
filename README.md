@@ -8,7 +8,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 **Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a U1 with single ACE.**
 
-For now it works with one ACE only (either V1 or V2). It ships as a prerelease and comes without support. I am setting up a sticky feedback thread in the Issues, and I would love to hear how it works out for you.
+For now it works with one ACE only (either V1 or V2). I am setting up a sticky feedback thread in the Issues, and I would love to hear how it works out for you.
 
 Just select head mode in config (tested with head 4 only, but selectable) and connect complete ACE with a 4in1 combiner to that head.
 Remaining Feeders work like Stock-Mode.
