@@ -21,6 +21,9 @@ Remaining Feeders work like Stock-Mode.
 - Preflight is now computed on client pc (thanks @hfoi589 for initial js code)
 - Error corrections
 
+    ## Issues
+  - After flashing the bin over an older Version, preflight in Headmode might fail. Workaround: Enable updates via touch /oem/.debug and update to 0.99.21b. Will be fixed in next version
+
 
 ## What's new in multiACE 0.98.1b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
  
