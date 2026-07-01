@@ -22,7 +22,7 @@ Remaining Feeders work like Stock-Mode.
 - Error corrections
 
     ## Issues
-  - After flashing the bin over an older version, preflight in head mode may fail. Workaround: enable updates with touch /oem/.debug, then run the online update to 0.99.21b. Will be fixed in the next version.
+  - After flashing the bin over an older version, preflight in head mode may fail. Workaround: enable updates with touch /oem/.debug, then run the online update to 0.99.21b. Fixed in 12-20 reupload bin file.
 
 
 ## What's new in multiACE 0.98.1b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
