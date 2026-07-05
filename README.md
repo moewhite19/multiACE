@@ -133,7 +133,7 @@ Tip forming is one of several ACE/U1 load-unload quirks. The first approach here
 It doesn't produce as much poop as a cutter, that's an advantage.
 
 **Is it fast?**
-No. Tip forming instead of a cutter, plus the bowden length, retries, puts a single color swap at up to 3-4 minutes. And since swaps don't happen at the park position, every change adds directly to print time. That said, stock Snapmaker per-layer color changes aren't any faster and require manual intervention every time - here it's at least automated. Park-position swaps are an option for the future.
+No. Tip forming instead of a cutter, plus the bowden length, retries, puts a single color swap at up to 3 minutes. And since swaps don't happen at the park position, every change adds directly to print time. That said, stock Snapmaker per-layer color changes aren't any faster and require manual intervention every time - here it's at least automated. Park-position swaps are an option for the future.
 
 **Does it work with ACE 2, AnkerMake Vivid, or other changers?**
 The Anycubic ACE 2 is supported as of 0.97b "Kindred Allies" - V1 (ACE Pro) and V2 (ACE 2) devices can run side by side. AnkerMake Vivid and other third-party changers are not supported. If you know another changer that is *proven* reliably better than the ACE Pro (and Klipper compatible), let me know - I've seen no trustworthy tests on the Vivid, and self-built machines are much pricier. multiACE aims for a solution anyone can set up.
