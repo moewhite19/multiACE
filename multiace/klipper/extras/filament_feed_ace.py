@@ -695,14 +695,21 @@ class FilamentFeed:
         homed_axes_list = self.toolhead.get_status(curtime)['homed_axes']
         return ('x' in homed_axes_list and 'y' in homed_axes_list)
 
-    def _get_filament_temp(self, channel):
+    def _get_filament_temp(self, channel, action=None):
         print_task_config = self.printer.lookup_object('print_task_config', None)
         filament_parameters = self.printer.lookup_object('filament_parameters', None)
         if print_task_config is None or filament_parameters is None:
             return FEED_FILAMENT_TEMP_DEFAULT
 
         status = print_task_config.get_status()
-        return filament_parameters.get_load_temp(
+
+        if action == FEED_ACT_UNLOAD:
+            return filament_parameters.get_unload_temp(
+                status['filament_vendor'][self.filament_ch[channel]],
+                status['filament_type'][self.filament_ch[channel]],
+                status['filament_sub_type'][self.filament_ch[channel]])
+        else:
+            return filament_parameters.get_load_temp(
                 status['filament_vendor'][self.filament_ch[channel]],
                 status['filament_type'][self.filament_ch[channel]],
                 status['filament_sub_type'][self.filament_ch[channel]])
@@ -838,7 +845,7 @@ class FilamentFeed:
         self.channel_error[ch] = FEED_OK
         self.exception_code[ch] = 0
 
-        filament_feed_temp = self._get_filament_temp(ch)
+        filament_feed_temp = self._get_filament_temp(ch, action)
         filament_soft = self._get_filament_soft(ch)
 
         motor_dir = FEED_MOTOR_DIR_A
