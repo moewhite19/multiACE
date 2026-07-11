@@ -13,7 +13,7 @@ For now it works with one ACE only (either V1 or V2). I am setting up a sticky f
 Just select head mode in config (tested with head 4 only, but selectable) and connect complete ACE with a 4in1 combiner to that head.
 Remaining Feeders work like Stock-Mode.
 
-## What's new in multiACE 0.99.3b "Persistent Pesterers" (forgot to tag, still shows 0.99.2b, will reupload soon)
+## What's new in multiACE 0.99.3b "Persistent Pesterers" 
 - Assign Optimize Layout to ACE Slots / Auto replenish fix
 - Paxx 12-20  version available.
 - Ace per Head mode (1 ACE 1/2 only at the moment)  7 Colors with U1 + just 1 ACE Pro 
