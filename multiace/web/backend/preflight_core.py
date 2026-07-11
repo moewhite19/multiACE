@@ -189,6 +189,20 @@ def build_one_plan(pp, plan_name, result, mapping,
         "reason":       "",
     }
 
+_HEAD_MODE_PP_FUNCS = (
+    "compute_head_mode_layout", "compute_head_mode_optimize",
+    "head_mode_swap_count", "rewrite_head_mode_to_file")
+
+def ensure_head_mode_support(pp):
+    missing = [f for f in _HEAD_MODE_PP_FUNCS if not hasattr(pp, f)]
+    if missing:
+        raise RuntimeError(
+            "post-processor is outdated (missing head-mode support: "
+            + ", ".join(missing)
+            + "). Re-run install_multiace.sh or reboot so the shipped "
+              "post_process_virtual_toolheads.py is refreshed in "
+              "printer_data/config/tools/.")
+
 def head_mode_targets(pp, feeders: list, ace_slots: list) -> list:
     """The dropdown universe: each pin-able feeder + each ACE slot, with an id."""
     targets = []
@@ -339,6 +353,7 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
     num_aces = max(num_aces, max((s["ace"] for s in live_slots), default=0) + 1)
 
     if (head_ctx or {}).get("mode") == "head":
+        ensure_head_mode_support(pp)
         return head_mode_preview(
             pp, token, filename, size, slicer_colors, slicer_types,
             int(head_ctx.get("ace_head", 3) or 3),
@@ -422,6 +437,7 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
                 "required material(s) not loaded: " + ", ".join(missing_mats))
 
     if mode == "head":
+        ensure_head_mode_support(pp)
         ace_head = int((head_ctx or {}).get("ace_head", 3) or 3)
         feeders  = (head_ctx or {}).get("feeders") or []
         targets = head_mode_targets(pp, feeders, live_slots)

@@ -776,11 +776,14 @@ async def preflight(file: UploadFile = File(...)) -> dict:
     hm_mode, hm_ace_head, hm_feeders = await _head_mode_context()
     head_ctx = {"mode": hm_mode, "ace_head": hm_ace_head, "feeders": hm_feeders}
 
-    return preflight_core.build_report(
-        pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
-        num_aces=num_aces, plan_proxy=plan_proxy, live_slots=live_slots,
-        head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
-        fuzzy=_PREFLIGHT_FUZZY)
+    try:
+        return preflight_core.build_report(
+            pp, slicer_colors=slicer_colors, slicer_types=slicer_types,
+            num_aces=num_aces, plan_proxy=plan_proxy, live_slots=live_slots,
+            head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
+            fuzzy=_PREFLIGHT_FUZZY)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 _PREFLIGHT_JOBS: dict[str, dict] = {}
 _PREFLIGHT_JOBS_LOCK = asyncio.Lock()
