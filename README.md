@@ -21,7 +21,7 @@ Remaining Feeders work like Stock-Mode.
 
 ## What's new in multiACE 0.99.5b "Persistent Pesterers" prerelease (comes without support for now)
 - Ace per Head mode up to 4 Aces / 7 Colors with U1 + just 1 ACE Pro
-- Parked position background swaps
+- Parked position background swaps (per Head mode only, it is not possible in multi mode with Ace Hardware)
 - Ace per Head Preflight and Optimization Modes for Background swaps
 - Prepared for 1.5.1 Firmware
 - Many internatl improvements
