@@ -14,7 +14,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 Note: swap orchestration is a first iteration, there is clear room for improvement, reserved for future versions.
 
-Just select head mode in config (tested with head 4 only, but selectable) and connect complete ACE with a 4in1 combiner to that head. Activate BG to enable park position background swaps.
+Just select head mode in config and connect complete ACE with a 4in1 combiner to that head. Activate BG to enable park position background swaps.
 
 
 
