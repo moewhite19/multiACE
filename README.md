@@ -8,10 +8,23 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 **Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a U1 with single ACE.**
 
-For now it works with one ACE only (either V1 or V2). I am setting up a sticky feedback thread in the Issues, and I would love to hear how it works out for you.
+**Now it got even better: 1-4 ACE 1 or ACE 2 units in per Head mode + Parked position background swaps
+Please report how it works in the sticky issue**
 
-Just select head mode in config (tested with head 4 only, but selectable) and connect complete ACE with a 4in1 combiner to that head.
+Note: swap orchestration is a first iteration, there is clear room for improvement, reserved for future versions.
+
+Just select head mode in config (tested with head 4 only, but selectable) and connect complete ACE with a 4in1 combiner to that head. Activate BG to enable park position background swaps.
+
+
+
 Remaining Feeders work like Stock-Mode.
+
+## What's new in multiACE 0.99.5b "Persistent Pesterers" prerelease (comes without support for now)
+- Ace per Head mode up to 4 Aces / 7 Colors with U1 + just 1 ACE Pro
+- Parked position background swaps
+- Ace per Head Preflight and Optimization Modes for Background swaps
+- Prepared for 1.5.1 Firmware
+- 
 
 ## What's new in multiACE 0.99.3b "Persistent Pesterers" 
 - Assign Optimize Layout to ACE Slots / Auto replenish fix
