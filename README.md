@@ -8,8 +8,9 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 **Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a U1 with single ACE.**
 
-**Now it got even better: 1-4 ACE 1 or ACE 2 units in per Head mode + Parked position background swaps
-Please report how it works in the sticky issue**
+**Now it got even better: 1-4 ACE 1 or ACE 2 units in per Head mode + Parked position background swaps**
+
+**Please report how it works in the sticky issue**
 
 Note: swap orchestration is a first iteration, there is clear room for improvement, reserved for future versions.
 
