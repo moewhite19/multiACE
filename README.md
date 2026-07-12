@@ -24,7 +24,7 @@ Remaining Feeders work like Stock-Mode.
 - Parked position background swaps (per Head mode only, it is not possible in multi mode with Ace Hardware)
 - Ace per Head Preflight and Optimization Modes for Background swaps
 - Prepared for 1.5.1 Firmware
-- Many internatl improvements
+- Many internal improvements
 
 ## What's new in multiACE 0.99.3b "Persistent Pesterers" 
 - Assign Optimize Layout to ACE Slots / Auto replenish fix
