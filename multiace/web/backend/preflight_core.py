@@ -10,7 +10,7 @@ _TOOLCHANGE_RE = re.compile(
     r"^;\s*Change Tool\s*(\d+)\s*->\s*Tool\s*(\d+)", re.MULTILINE)
 
 _PLAN_KEEP_RE = re.compile(
-    r'^(;\s*Change Tool|;\s*LAYER_CHANGE|;\s*filament\b|T\d{1,2}\s*$)',
+    r'^(;\s*Change Tool|;\s*LAYER_CHANGE|;\s*filament\b|T\d{1,2}\s*$|M73\b)',
     re.IGNORECASE)
 
 def parse_meta(pp, line_iter):
@@ -42,7 +42,6 @@ def parse_meta(pp, line_iter):
     slicer_colors = pp.parse_color_names(meta_buf)
     slicer_types  = pp.parse_filament_types(meta_buf)
     num_aces      = pp.infer_num_aces(meta_buf)
-
     if used:
         slicer_colors = {t: c for t, c in slicer_colors.items() if t in used}
         slicer_types  = {t: m for t, m in slicer_types.items() if t in used}
@@ -203,17 +202,49 @@ def ensure_head_mode_support(pp):
               "post_process_virtual_toolheads.py is refreshed in "
               "printer_data/config/tools/.")
 
-def head_mode_targets(pp, feeders: list, ace_slots: list) -> list:
-    """The dropdown universe: each pin-able feeder + each ACE slot, with an id."""
+def head_maps(head_ctx: dict) -> tuple:
+    """Resolve the ACE-head topology from head_ctx into the maps the matcher
+    needs: (ace_heads, ace_head_of_ace, ace_num_of_head, feeder_heads).
+      ace_heads        - sorted list of ACE-driven head indices.
+      ace_head_of_ace  - {ace_index: head} (each ACE feeds exactly one head).
+      ace_num_of_head  - {head: ace_index} (the inverse, for output entries).
+      feeder_heads     - the non-ACE heads available to pin.
+    Falls back to the legacy single ACE head (head_ctx['ace_head']) when no
+    ace_heads list is present, so an older context still works."""
+    head_ctx = head_ctx or {}
+    ace_heads = [int(h) for h in (head_ctx.get("ace_heads") or [])]
+    raw = head_ctx.get("head_ace") or {}
+    head_ace = {}
+    for h in range(4):
+        try:
+            head_ace[h] = int(raw.get(str(h), raw.get(h, h)))
+        except (TypeError, ValueError):
+            head_ace[h] = h
+    if not ace_heads:
+        ace_heads = [int(head_ctx.get("ace_head", 3) or 3)]
+    ace_heads = sorted(set(ace_heads))
+    ace_num_of_head = {h: head_ace.get(h, h) for h in ace_heads}
+    ace_head_of_ace = {ace_num_of_head[h]: h for h in ace_heads}
+    feeder_heads = [h for h in range(4) if h not in ace_heads]
+    return ace_heads, ace_head_of_ace, ace_num_of_head, feeder_heads
+
+def head_mode_targets(pp, feeders: list, ace_slots: list,
+                      ace_head_of_ace: dict) -> list:
+    """The dropdown universe: each pin-able feeder + each ACE slot on a wired
+    ACE (tagged with the ACE head that feeds it), with an id."""
     targets = []
     for f in feeders:
         targets.append({
             "id": "feeder-%d" % f["head"], "kind": "pin", "head": f["head"],
             "material": f["material"], "color": (f["color"] or "").lower(),
             "name": pp.approx_color_name(f["color"]) or ""})
+    head_of_ace = {int(a): int(h) for a, h in (ace_head_of_ace or {}).items()}
     for s in sorted(ace_slots, key=lambda x: (x["ace"], x["slot"])):
+        if int(s["ace"]) not in head_of_ace:
+            continue
         targets.append({
             "id": "slot-%d-%d" % (s["ace"], s["slot"]), "kind": "ace",
+            "head": head_of_ace[int(s["ace"])],
             "ace": s["ace"], "slot": s["slot"],
             "material": s["material"], "color": (s["color"] or "").lower(),
             "name": pp.approx_color_name(s["color"]) or ""})
@@ -228,8 +259,10 @@ def head_target_id(e: dict):
         return "slot-%d-%d" % (e["ace"], e["slot"])
     return None
 
-def assignment_from_target_ids(target_ids: dict, targets: list, ace_head: int) -> dict:
-    """Rebuild {t: entry} from the frontend's {t: target_id} via the universe."""
+def assignment_from_target_ids(target_ids: dict, targets: list) -> dict:
+    """Rebuild {t: entry} from the frontend's {t: target_id} via the universe.
+    The ACE head of an 'ace' target comes from the target itself (each ACE is
+    wired to one head)."""
     by_id = {t["id"]: t for t in targets}
     out = {}
     for k, tid in (target_ids or {}).items():
@@ -243,19 +276,62 @@ def assignment_from_target_ids(target_ids: dict, targets: list, ace_head: int) -
         elif tgt["kind"] == "pin":
             out[t] = {"kind": "pin", "head": tgt["head"]}
         else:
-            out[t] = {"kind": "ace", "head": ace_head,
+            out[t] = {"kind": "ace", "head": tgt["head"],
                       "ace": tgt["ace"], "slot": tgt["slot"]}
     return out
 
-def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_head,
-                        ace_num, num_slots, layer_sets) -> dict:
+def _bg_context(pp, head_ctx, plan_proxy, events):
+    """(event_times, bg_heads, bg_available) for the bg-aware preflight
+    bits, all soft-degrading: an older post-processor without the time
+    parser, a file without M73, or a misaligned event list simply yield
+    event_times=None (bg windows unknown - everything reports/optimizes
+    like before)."""
+    bg_heads = [int(h) for h in ((head_ctx or {}).get("bg_heads") or [])]
+    bg_available = bool((head_ctx or {}).get("bg_available"))
+    parse_t = getattr(pp, "parse_toolchanges_with_times", None)
+    event_times = None
+    if parse_t is not None:
+        try:
+            ev_t, times = parse_t(plan_proxy)
+            if list(ev_t) == list(events) and any(
+                    t is not None for t in times):
+                event_times = times
+        except Exception:
+            event_times = None
+    return event_times, bg_heads, bg_available
+
+def _bg_stats_for(pp, events, assignment, event_times, bg_heads):
+    """head_mode_bg_stats, soft-degrading (older pp -> None). Details are
+    dropped from the wire format (the counts drive the UI line)."""
+    fn = getattr(pp, "head_mode_bg_stats", None)
+    if fn is None or assignment is None:
+        return None
+    try:
+        st = fn(events, assignment, event_times=event_times,
+                bg_heads=bg_heads)
+        st.pop("details", None)
+        return st
+    except Exception:
+        return None
+
+def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_heads,
+                        ace_num_of_head, num_slots, layer_sets,
+                        event_times=None, bg_heads=None) -> dict:
     """A head-mode PROPOSED-loadout plan (optimize / layer-Belady): the
     swap-minimal FREE assignment that ignores the current physical load. The
-    user arranges spools to match before printing → read-only table."""
+    user arranges spools to match before printing → read-only table. With
+    event_times/bg_heads the optimizer prefers routing swap chains through
+    bg-enabled heads (background unloads instead of inline stalls)."""
     try:
-        assignment, swaps = pp.compute_head_mode_optimize(
-            events, feeder_heads, ace_head, ace_num, num_slots,
-            layer_color_sets=layer_sets)
+        try:
+            assignment, swaps = pp.compute_head_mode_optimize(
+                events, feeder_heads, ace_heads, ace_num_of_head, num_slots,
+                layer_color_sets=layer_sets,
+                event_times=event_times, bg_heads=bg_heads)
+        except TypeError:
+            assignment, swaps = pp.compute_head_mode_optimize(
+                events, feeder_heads, ace_heads, ace_num_of_head, num_slots,
+                layer_color_sets=layer_sets)
     except Exception:
         assignment, swaps = None, None
     if assignment is None:
@@ -273,19 +349,32 @@ def _head_proposal_plan(pp, events, slicer_colors, feeder_heads, ace_head,
             mapping.append({"t": t, "kind": e["kind"], "head": e.get("head"),
                             "ace": e.get("ace"), "slot": e.get("slot"),
                             "tier": e.get("tier")})
-    return {"feasible": feasible, "swaps": swaps, "mapping": mapping}
+    _kind_rank = {"pin": 0, "ace": 1}
+    mapping.sort(key=lambda m: (
+        _kind_rank.get(m.get("kind"), 2),
+        m.get("ace") if m.get("ace") is not None else 99,
+        m.get("slot") if m.get("slot") is not None else 99,
+        m.get("head") if m.get("head") is not None else 99,
+        m.get("t", 0)))
+    out = {"feasible": feasible, "swaps": swaps, "mapping": mapping}
+    bg = _bg_stats_for(pp, events, assignment, event_times, bg_heads)
+    if bg is not None:
+        out["bg"] = bg
+    return out
 
 def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
-                      slicer_types, ace_head, feeders, ace_slots, plan_proxy,
+                      slicer_types, head_ctx, ace_slots, plan_proxy,
                       fuzzy=DEFAULT_FUZZY) -> dict:
     """The head-mode preflight preview: THREE plans, mirroring multi:
       loadout  - match against the currently-loaded feeders + ACE slots (editable)
-      optimize - swap-minimal proposed loadout (free, Belady on the ACE head)
+      optimize - swap-minimal proposed loadout (free, Belady per ACE head)
       layer    - same with layer-only swaps (Belady-/layer-optimal)
     Plus the colour grids at the top (available targets + slicer colours).
     """
-    targets = head_mode_targets(pp, feeders, ace_slots)
-
+    feeders = (head_ctx or {}).get("feeders") or []
+    ace_heads, ace_head_of_ace, ace_num_of_head, feeder_heads = \
+        head_maps(head_ctx)
+    targets = head_mode_targets(pp, feeders, ace_slots, ace_head_of_ace)
     try:
         result = pp.plan_loadout(plan_proxy) or {}
     except Exception:
@@ -299,8 +388,11 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
     lcs = (result.get("layer_info") or {}).get("layer_color_sets") or []
     layer_sets = [set(s) for s in lcs] if lcs else None
 
+    event_times, bg_heads, bg_available = _bg_context(
+        pp, head_ctx, plan_proxy, events)
+
     layout = pp.compute_head_mode_layout(
-        slicer_colors, slicer_types, feeders, ace_slots, ace_head,
+        slicer_colors, slicer_types, feeders, ace_slots, ace_head_of_ace,
         fuzzy_max_distance=fuzzy)
     assignment = layout["assignment"]
     loadout_mapping = []
@@ -314,20 +406,26 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
             "swaps": pp.head_mode_swap_count(events, assignment),
             "mapping": loadout_mapping},
     }
+    bg_loadout = _bg_stats_for(pp, events, assignment, event_times, bg_heads)
+    if bg_loadout is not None:
+        plans["loadout"]["bg"] = bg_loadout
 
-    feeder_heads = [h for h in range(4) if h != ace_head]
-    ace_num = min((s["ace"] for s in ace_slots), default=0)
     num_slots = 4
     plans["optimize"] = _head_proposal_plan(
-        pp, events, slicer_colors, feeder_heads, ace_head, ace_num,
-        num_slots, None)
+        pp, events, slicer_colors, feeder_heads, ace_heads, ace_num_of_head,
+        num_slots, None, event_times=event_times, bg_heads=bg_heads)
     plans["layer"] = _head_proposal_plan(
-        pp, events, slicer_colors, feeder_heads, ace_head, ace_num,
-        num_slots, layer_sets)
+        pp, events, slicer_colors, feeder_heads, ace_heads, ace_num_of_head,
+        num_slots, layer_sets, event_times=event_times, bg_heads=bg_heads)
 
     return {
         "token": token, "filename": safe_name, "size": upload_size,
-        "head_mode": True, "ace_head": ace_head,
+        "head_mode": True, "ace_head": (ace_heads[0] if ace_heads else 3),
+        "ace_heads": ace_heads,
+        "bg_swap": {"available": bg_available, "enabled_heads": bg_heads,
+                    "have_times": event_times is not None,
+                    "min_window_min": getattr(
+                        pp, "BG_UNLOAD_MIN_WINDOW_MIN", 3)},
         "slicer_colors": [
             {"t": t, "hex": (slicer_colors[t] or "").lower(),
              "name": pp.approx_color_name(slicer_colors[t]) or "",
@@ -356,8 +454,7 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
         ensure_head_mode_support(pp)
         return head_mode_preview(
             pp, token, filename, size, slicer_colors, slicer_types,
-            int(head_ctx.get("ace_head", 3) or 3),
-            head_ctx.get("feeders") or [], live_slots, plan_proxy, fuzzy=fuzzy)
+            head_ctx, live_slots, plan_proxy, fuzzy=fuzzy)
 
     missing_mats = pp.check_material_availability(slicer_types, live_slots)
 
@@ -391,7 +488,6 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
         mapping = mapping_from_info(info)
         proxy_remapped = pp.apply_remap(plan_proxy, remap) if remap else plan_proxy
         result = pp.plan_loadout(proxy_remapped, num_aces=num_aces) or {}
-
         out["events"] = list(result.get("events") or [])
         for mode in ("slicer", "optimize", "layer"):
             out["plans"][mode] = build_one_plan(
@@ -430,7 +526,6 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
     num_aces = max(num_aces, max((s["ace"] for s in live_slots), default=0) + 1)
 
     if mode != "head":
-
         missing_mats = pp.check_material_availability(slicer_types, live_slots)
         if missing_mats:
             raise RuntimeError(
@@ -438,9 +533,10 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
 
     if mode == "head":
         ensure_head_mode_support(pp)
-        ace_head = int((head_ctx or {}).get("ace_head", 3) or 3)
-        feeders  = (head_ctx or {}).get("feeders") or []
-        targets = head_mode_targets(pp, feeders, live_slots)
+        feeders = (head_ctx or {}).get("feeders") or []
+        ace_heads, ace_head_of_ace, ace_num_of_head, feeder_heads = \
+            head_maps(head_ctx)
+        targets = head_mode_targets(pp, feeders, live_slots, ace_head_of_ace)
         if head_plan in ("optimize", "layer"):
             set_stage(head_plan, 1.0)
             hm_result = pp.plan_loadout_from_file(str(src_path), num_aces) or {}
@@ -450,38 +546,53 @@ def rewrite_pipeline(pp, *, src_path, tmp_a, tmp_b, slicer_colors, slicer_types,
                 lcs = (hm_result.get("layer_info") or {}).get(
                     "layer_color_sets") or []
                 hm_layer_sets = [set(s) for s in lcs] if lcs else None
-            feeder_heads = [h for h in range(4) if h != ace_head]
-            ace_num = min((s["ace"] for s in live_slots), default=0)
-            assignment, _hm_swaps = pp.compute_head_mode_optimize(
-                hm_events, feeder_heads, ace_head, ace_num, 4,
-                layer_color_sets=hm_layer_sets)
+            hm_times = None
+            parse_tf = getattr(pp, "parse_toolchanges_with_times_from_file",
+                               None)
+            if parse_tf is not None:
+                try:
+                    ev_t, times = parse_tf(str(src_path))
+                    if (list(ev_t) == hm_events
+                            and any(t is not None for t in times)):
+                        hm_times = times
+                except Exception:
+                    hm_times = None
+            hm_bg_heads = [int(h) for h in
+                           ((head_ctx or {}).get("bg_heads") or [])]
+            try:
+                assignment, _hm_swaps = pp.compute_head_mode_optimize(
+                    hm_events, feeder_heads, ace_heads, ace_num_of_head, 4,
+                    layer_color_sets=hm_layer_sets,
+                    event_times=hm_times, bg_heads=hm_bg_heads)
+            except TypeError:
+                assignment, _hm_swaps = pp.compute_head_mode_optimize(
+                    hm_events, feeder_heads, ace_heads, ace_num_of_head, 4,
+                    layer_color_sets=hm_layer_sets)
             if assignment is None:
                 raise RuntimeError(
                     "no feasible head-mode loadout for %s plan" % head_plan)
         elif head_assignment:
-            assignment = assignment_from_target_ids(
-                head_assignment, targets, ace_head)
+            assignment = assignment_from_target_ids(head_assignment, targets)
         else:
             layout = pp.compute_head_mode_layout(
                 slicer_colors, slicer_types, feeders, live_slots,
-                ace_head, fuzzy_max_distance=fuzzy)
+                ace_head_of_ace, fuzzy_max_distance=fuzzy)
             assignment = layout["assignment"]
 
         set_stage("rewrite", 10.0)
         pp.rewrite_head_mode_to_file(
-            str(src_path), str(tmp_a), assignment, ace_head,
+            str(src_path), str(tmp_a), assignment, None,
             stage_cb(10.0, 60.0))
         cur, nxt = tmp_a, tmp_b
 
         set_stage("inject_auto_load", 70.0)
         pp.inject_auto_load_to_file(
-            str(cur), str(nxt), stage_cb(70.0, 12.0), {ace_head})
+            str(cur), str(nxt), stage_cb(70.0, 12.0), set(ace_heads))
         cur, nxt = nxt, cur
         return str(cur)
 
     if mode == "slicer":
         if remap_override is not None:
-
             remap = {}
             for k, v in remap_override.items():
                 try:

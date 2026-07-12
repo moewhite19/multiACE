@@ -72,7 +72,9 @@ def rewrite(gcode):
                     filtered_lines.append(line)
             i += 1
             continue
-        m_s = re.match(r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)$', line)
+        m_s = re.match(
+            r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)(?:\s+\S+=\S+)*\s*$',
+            line)
         if m_s:
             head = int(m_s.group(1))
             ace = int(m_s.group(2))
@@ -120,6 +122,53 @@ def parse_toolchanges(gcode):
         if mb:
             yield int(mb.group(1))
 
+def parse_toolchanges_with_times(gcode):
+    """parse_toolchanges + the slicer's remaining print time per event: the
+    last M73 R=<minutes> seen BEFORE each toolchange. Mirrors plan_loadout's
+    body-split so the sequence aligns 1:1 with its 'events' (verify with a
+    list compare before trusting the times). Returns (events, times); times
+    entries are float minutes or None (no M73 yet / no M73 in the file)."""
+    lines = gcode.splitlines()
+    has_change = any(_TC_CHANGE_RE.match(l.strip()) for l in lines)
+    return _toolchanges_with_times(lines, has_change)
+
+def parse_toolchanges_with_times_from_file(in_path):
+    """File variant of parse_toolchanges_with_times (streaming, two cheap
+    line passes - the rewrite pipeline works on multi-MB files)."""
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
+        has_change = any(_TC_CHANGE_RE.match(l.strip()) for l in fin)
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
+        return _toolchanges_with_times(fin, has_change)
+
+_TC_CHANGE_RE = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*(\d+)')
+_TC_BARE_RE = re.compile(r'^T(\d{1,2})\b')
+_TC_M73_RE = re.compile(r'^M73\b.*?\bR(\d+(?:\.\d+)?)')
+
+def _toolchanges_with_times(lines_iter, has_change):
+    events = []
+    times = []
+    last_r = None
+    for line in lines_iter:
+        s = line.strip()
+        if not s:
+            continue
+        mr = _TC_M73_RE.match(s)
+        if mr:
+            last_r = float(mr.group(1))
+            continue
+        mc = _TC_CHANGE_RE.match(s)
+        if mc:
+            events.append(int(mc.group(1)))
+            times.append(last_r)
+            continue
+        if has_change or s.startswith(';'):
+            continue
+        mb = _TC_BARE_RE.match(s)
+        if mb:
+            events.append(int(mb.group(1)))
+            times.append(last_r)
+    return events, times
+
 def lookup_live_slots(host, port=80, path='/multiace/api/state', timeout=5.0):
     """Query the printer's multiACE web for current slot occupation.
 
@@ -147,7 +196,6 @@ def lookup_live_slots(host, port=80, path='/multiace/api/state', timeout=5.0):
         for slot in ace.get('slots', []) or []:
             if slot.get('state') == 'empty':
                 continue
-
             if 'source' in slot and slot['source'] not in ('rfid', 'override'):
                 continue
             color = (slot.get('color') or '').strip().lower()
@@ -436,7 +484,6 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
         for t in list(pending):
             tm = t_meta[t]
             t_mat = (tm.get('mat') or '').strip().lower()
-
             candidates = [sm for sm in already
                           if not t_mat or not sm['mat']
                           or sm['mat'] == t_mat]
@@ -476,34 +523,35 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
     return remap, info, used
 
 def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
-                             ace_slots, ace_head, fuzzy_max_distance=None):
-    """Head-mode layout: ONE ACE-driven head (`ace_head`) prints every colour
-    that isn't pinned, multiplexed via slot-swaps on its ACE; the other (feeder)
-    heads are PINNED to a single fixed colour each (no swap).
+                             ace_slots, ace_head_of_ace, fuzzy_max_distance=None):
+    """Head-mode layout: K ACE-driven heads each print colours multiplexed via
+    slot-swaps on THEIR OWN ACE (each ACE head is wired to exactly one ACE); the
+    feeder heads are PINNED to a single fixed colour each (no swap).
 
-    This is the "pinned heads + one swap head" primitive - the same shape a
+    This is the "pinned heads + N swap heads" primitive - the same shape a
     future multi+manual matcher needs (a manual head = a pinned head).
 
     Args:
-      slicer_colors:  {t: 'rrggbb'}   slicer tool colour per used T.
-      slicer_types:   {t: material}   slicer material per T (material-strict).
-      pinned_heads:   [{'head': int, 'material': str,
-                        'color': 'rrggbb' | '#rrggbb'}]
-                      the feeder heads' loaded identity; a slicer colour that
-                      matches one (material-strict) pins to that head.
-      ace_slots:      [{'ace','slot','material','color'}] - the slots the ACE
-                      head's ACE can swap between (e.g. ACE 0).
-      ace_head:       the ACE-driven head index.
+      slicer_colors:    {t: 'rrggbb'}   slicer tool colour per used T.
+      slicer_types:     {t: material}   slicer material per T (material-strict).
+      pinned_heads:     [{'head': int, 'material': str,
+                          'color': 'rrggbb' | '#rrggbb'}]
+                        the feeder heads' loaded identity; a slicer colour that
+                        matches one (material-strict) pins to that head.
+      ace_slots:        [{'ace','slot','material','color'}] - all loaded slots.
+      ace_head_of_ace:  {ace_index: head} - which ACE head each ACE feeds. Only
+                        slots on a wired ACE are usable; the matched slot's head
+                        is looked up here.
 
     Returns dict with:
       'assignment': {t: entry}, entry one of
           {'kind':'pin', 'head':H,        'tier':str}
-          {'kind':'ace', 'head':ace_head, 'ace':a, 'slot':s, 'tier':str}
+          {'kind':'ace', 'head':H, 'ace':a, 'slot':s, 'tier':str}
           {'kind':'none','tier':'no_slot'}      (no feeder AND no ACE slot)
       'feasible':   bool (no 'none' assignments)
       'infeasible': [t,...]
       'pinned':     sorted feeder heads actually used
-      'ace_head':   ace_head
+      'ace_heads':  sorted ACE head indices
     """
     pins = {}
     for p in (pinned_heads or []):
@@ -511,6 +559,8 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
             pins[int(p['head'])] = p
         except (KeyError, TypeError, ValueError):
             continue
+
+    head_of_ace = {int(a): int(h) for a, h in (ace_head_of_ace or {}).items()}
 
     assignment = {}
     pinned_t = set()
@@ -533,10 +583,11 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
             assignment[t] = {'kind': 'pin', 'head': match['head'], 'tier': tier}
             pinned_t.add(t)
 
+    usable_slots = [s for s in (ace_slots or []) if int(s['ace']) in head_of_ace]
     rest_colors = {t: slicer_colors[t] for t in slicer_colors if t not in pinned_t}
     rest_types = {t: (slicer_types.get(t) or '') for t in rest_colors}
     _remap, info, _used = match_colors_to_slots(
-        rest_colors, ace_slots, num_heads=4,
+        rest_colors, usable_slots, num_heads=4,
         filament_types=rest_types, strict_color=False,
         fuzzy_max_distance=fuzzy_max_distance)
     for t, entry in info.items():
@@ -544,7 +595,7 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
         if s is None:
             assignment[t] = {'kind': 'none', 'tier': entry.get('tier', 'no_slot')}
         else:
-            assignment[t] = {'kind': 'ace', 'head': ace_head,
+            assignment[t] = {'kind': 'ace', 'head': head_of_ace[int(s['ace'])],
                              'ace': s['ace'], 'slot': s['slot'],
                              'tier': entry.get('tier')}
 
@@ -556,104 +607,182 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
         'feasible': not infeasible,
         'infeasible': infeasible,
         'pinned': pinned_used,
-        'ace_head': ace_head,
+        'ace_heads': sorted(set(head_of_ace.values())),
     }
 
 def head_mode_swap_count(events, assignment):
-    """Swaps the ACE head performs for a head-mode `assignment` over the slicer
+    """Swaps the ACE heads perform for a head-mode `assignment` over the slicer
     toolchange sequence `events`. Pinned colours never swap (they print on their
-    own feeder head); only (ace,slot) changes on ACE-assigned colours count. The
-    first ACE load counts as a swap (the initial combiner load)."""
-    cur = None
+    own feeder head); only (ace,slot) changes on ACE-assigned colours count, per
+    ACE head. The first load on each ACE head counts as a swap."""
+    cur = {}
     swaps = 0
     for t in events:
         e = assignment.get(t)
         if not e or e.get('kind') != 'ace':
             continue
+        head = e.get('head')
         key = (e['ace'], e['slot'])
-        if cur != key:
+        if cur.get(head) != key:
             swaps += 1
-            cur = key
+            cur[head] = key
     return swaps
 
-def compute_head_mode_optimize(events, feeder_heads, ace_head, ace_num,
-                               num_slots, layer_color_sets=None, max_colors=12):
+def head_mode_bg_stats(events, assignment, event_times=None, bg_heads=None):
+    """Background-unload balance of a head-mode assignment: for every unload
+    the rewrite WOULD stamp (same conditions as rewrite_head_mode_to_file -
+    a released ACE head whose next arrival needs a different slot), classify
+    the parked window:
+      ok       - window >= BG_UNLOAD_MIN_WINDOW_MIN on a bg-enabled head
+      small    - window known but too small (rewrite skips the stamp)
+      unknown  - no M73 time info (stamped; engine abort = safety net)
+      disabled - head not bg-enabled (no open dock declared)
+    event_times = per-event remaining minutes (parse_toolchanges_with_times),
+    bg_heads = bg-enabled head indices. Returns {'unloads','bg_ok','bg_small',
+    'bg_unknown','bg_disabled','saved_s','details':[{head,window,verdict}]}."""
+    bg_set = set(bg_heads or [])
+    stats = {'unloads': 0, 'bg_ok': 0, 'bg_small': 0, 'bg_unknown': 0,
+             'bg_disabled': 0, 'saved_s': 0, 'details': []}
+    n_ev = len(events)
+    have_t = bool(event_times) and len(event_times) == n_ev
+    for i in range(1, n_ev):
+        cur_e = assignment.get(events[i])
+        rel_e = assignment.get(events[i - 1])
+        if not cur_e or cur_e.get('kind') not in ('pin', 'ace'):
+            continue
+        if not rel_e or rel_e.get('kind') != 'ace':
+            continue
+        if events[i - 1] == events[i] or rel_e.get('head') == cur_e.get('head'):
+            continue
+        loaded_now = (rel_e['ace'], rel_e['slot'])
+        nxt = None
+        nxt_j = None
+        for j in range(i + 1, n_ev):
+            e2 = assignment.get(events[j])
+            if (e2 and e2.get('kind') == 'ace'
+                    and e2.get('head') == rel_e['head']):
+                nxt = (e2['ace'], e2['slot'])
+                nxt_j = j
+                break
+        if nxt is None or nxt == loaded_now:
+            continue
+        stats['unloads'] += 1
+        head = rel_e['head']
+        r_now = event_times[i] if have_t else None
+        r_nxt = event_times[nxt_j] if have_t else None
+        window = (r_now - r_nxt) if (r_now is not None
+                                     and r_nxt is not None) else None
+        if head not in bg_set:
+            verdict = 'disabled'
+            stats['bg_disabled'] += 1
+        elif window is None:
+            verdict = 'unknown'
+            stats['bg_unknown'] += 1
+        elif window < BG_UNLOAD_MIN_WINDOW_MIN:
+            verdict = 'small'
+            stats['bg_small'] += 1
+        else:
+            verdict = 'ok'
+            stats['bg_ok'] += 1
+        stats['details'].append(
+            {'head': head, 'window': window, 'verdict': verdict})
+    stats['saved_s'] = stats['bg_ok'] * BG_UNLOAD_INLINE_SAVING_S
+    return stats
+
+def compute_head_mode_optimize(events, feeder_heads, ace_heads, ace_num_of_head,
+                               num_slots, layer_color_sets=None, max_colors=12,
+                               event_times=None, bg_heads=None):
     """Head-mode loadout OPTIMIZER - the swap-minimal PROPOSED loadout that
     IGNORES the current physical load (plan 'optimize' + plan 'layer'/Belady).
 
-    Cache model for the combiner hardware: the ACE head is a SINGLE active
-    filament drawn from `num_slots` pre-loaded slots, and each feeder head holds
-    one fixed colour:
-      * F feeder "heads", capacity 1   -> a pinned colour, NEVER swaps.
-      * 1 ACE head, capacity num_slots -> swaps when its active colour changes;
-        the <=num_slots distinct ACE colours sit pre-loaded in its slots so any
-        switch is an automated combiner swap (no manual reload).
+    Cache model for the combiner hardware: each ACE head is a SINGLE active
+    filament drawn from `num_slots` pre-loaded slots of ITS OWN ACE, and each
+    feeder head holds one fixed colour:
+      * F feeder "heads", capacity 1     -> a pinned colour, NEVER swaps.
+      * K ACE heads, capacity num_slots  -> each swaps when ITS active colour
+        changes; the <=num_slots distinct colours of that head sit pre-loaded in
+        its ACE's slots so any switch is an automated combiner swap.
     This mirrors the multi optimizer (compute_swap_aware_layout) but with an
-    asymmetric F-feeders + 1-ACE-head bin model; swaps are only ever charged on
-    the ACE head. Brute-force over (F+1)^N (N = distinct colours, capped at
-    `max_colors`; F+1 is small, so this stays well inside the multi 4^12 bound).
+    asymmetric F-feeders + K-ACE-heads bin model; swaps are charged per ACE head.
+    Brute-force over (F+K)^N (N = distinct colours, capped at `max_colors`).
 
     layer_color_sets (plan 'layer'/Belady): reject any assignment that routes
-    2+ colours of a single layer through the ACE head -> the ACE only ever swaps
-    at a layer boundary (Belady-/layer-optimal, like the multi 'layer' plan).
+    2+ colours of a single layer through the SAME ACE head -> each ACE head only
+    ever swaps at a layer boundary (Belady-/layer-optimal).
 
     Args:
-      events:        toolchange sequence (slicer T-indices in print order).
-      feeder_heads:  list of physical non-ACE head indices available to pin.
-      ace_head:      the ACE-driven head index.
-      ace_num:       the ACE unit number the ACE head feeds from (combiner ACE).
-      num_slots:     the ACE's slot capacity (pre-loadable colours, e.g. 4).
+      events:           toolchange sequence (slicer T-indices in print order).
+      feeder_heads:     list of physical feeder (non-ACE) head indices to pin.
+      ace_heads:        list of ACE-driven head indices (each a swap bin).
+      ace_num_of_head:  {head: ace_index} - the ACE each ACE head feeds from.
+      num_slots:        per-ACE slot capacity (pre-loadable colours, e.g. 4).
       layer_color_sets: per-layer colour sets; when given, layer-only swap mode.
-      max_colors:    distinct-colour cap before bailing (brute-force guard).
+      max_colors:       distinct-colour cap before bailing (brute-force guard).
+      event_times:      per-event remaining minutes (parse_toolchanges_with_
+                        times), for the bg-aware cost below. Optional.
+      bg_heads:         bg-enabled (open-dock) head indices. Optional.
+
+    Bg-aware cost (when event_times + bg_heads given): a swap whose unload
+    can run in the BACKGROUND (released head, parked window >=
+    BG_UNLOAD_MIN_WINDOW_MIN, head bg-enabled) costs BG_SWAP_COST_BG_S,
+    every other swap BG_SWAP_COST_INLINE_S; the loadout with the lowest
+    total print-stall cost wins (ties: fewer swaps, then fewer feeders).
+    Without bg info every swap is inline and the ordering reduces to the
+    old (swaps, pins) - byte-identical results.
 
     Returns (assignment, swaps) in the SAME format as compute_head_mode_layout
     (so head_mode_swap_count + rewrite_head_mode_to_file are reused unchanged):
       assignment[t] = {'kind':'pin','head':H,'tier':'optimize'}
-                    | {'kind':'ace','head':ace_head,'ace':ace_num,'slot':s,
-                       'tier':'optimize'}
-    or (None, None) when infeasible (>F+num_slots distinct colours, too many
-    colours to brute-force, or a layer needs >1 ACE colour in layer mode)."""
+                    | {'kind':'ace','head':H,'ace':a,'slot':s,'tier':'optimize'}
+    or (None, None) when infeasible (too many colours for F + K*num_slots, too
+    many colours to brute-force, or a layer needs >1 colour on one ACE head)."""
     from itertools import product
 
     colors_list = sorted(set(events))
     n = len(colors_list)
-    F = len(feeder_heads)
+    feeders_sorted = sorted(feeder_heads)
+    ace_sorted = sorted(ace_heads)
+    F = len(feeders_sorted)
+    K = len(ace_sorted)
     S = int(num_slots)
     if n == 0:
         return {}, 0
-    if F <= 0 and S <= 0:
+    if F <= 0 and K <= 0:
         return None, None
     if n > max_colors:
         return None, None
 
-    ACE = F
-    best_c2h = None
+    best_c2b = None
     best_key = None
-    for combo in product(range(F + 1), repeat=n):
+    for combo in product(range(F + K), repeat=n):
         feeder_count = [0] * F
-        ace_colors = 0
+        ace_count = [0] * K
         ok = True
-        for h in combo:
-            if h == ACE:
-                ace_colors += 1
-            else:
-                feeder_count[h] += 1
-                if feeder_count[h] > 1:
+        for b in combo:
+            if b < F:
+                feeder_count[b] += 1
+                if feeder_count[b] > 1:
                     ok = False
                     break
-        if not ok or ace_colors > S:
+            else:
+                ace_count[b - F] += 1
+                if ace_count[b - F] > S:
+                    ok = False
+                    break
+        if not ok:
             continue
 
-        c2h = {colors_list[i]: combo[i] for i in range(n)}
+        c2b = {colors_list[i]: combo[i] for i in range(n)}
 
         if layer_color_sets is not None:
             conflict = False
             for lset in layer_color_sets:
-                ace_in_layer = 0
+                per_ace = {}
                 for c in lset:
-                    if c2h.get(c) == ACE:
-                        ace_in_layer += 1
-                        if ace_in_layer > 1:
+                    b = c2b.get(c)
+                    if b is not None and b >= F:
+                        per_ace[b] = per_ace.get(b, 0) + 1
+                        if per_ace[b] > 1:
                             conflict = True
                             break
                 if conflict:
@@ -661,79 +790,190 @@ def compute_head_mode_optimize(events, feeder_heads, ace_head, ace_num,
             if conflict:
                 continue
 
-        cur = None
+        have_t = bool(event_times) and len(event_times) == len(events)
+        bg_set = set(bg_heads or [])
+        cur = {}
+        released_r = {}
+        prev_bin = None
         swaps = 0
-        for t in events:
-            if c2h[t] != ACE:
+        bg_ok = 0
+        for i, t in enumerate(events):
+            b = c2b[t]
+            r_now = event_times[i] if have_t else None
+            if prev_bin is not None and prev_bin != b:
+                released_r.setdefault(prev_bin, r_now)
+            prev_bin = b
+            if b < F:
                 continue
-            if cur != t:
+            if cur.get(b) != t:
                 swaps += 1
-                cur = t
+                if cur.get(b) is not None:
+                    head = ace_sorted[b - F]
+                    rr = released_r.get(b)
+                    if (head in bg_set and rr is not None
+                            and r_now is not None
+                            and rr - r_now >= BG_UNLOAD_MIN_WINDOW_MIN):
+                        bg_ok += 1
+                cur[b] = t
+            released_r.pop(b, None)
 
-        pins = sum(1 for h in combo if h != ACE)
-
-        key = (swaps, pins)
+        pins = sum(1 for b in combo if b < F)
+        cost = ((swaps - bg_ok) * BG_SWAP_COST_INLINE_S
+                + bg_ok * BG_SWAP_COST_BG_S)
+        key = (cost, swaps, pins)
         if best_key is None or key < best_key:
             best_key = key
-            best_c2h = c2h
+            best_c2b = c2b
 
-    if best_c2h is None:
+    if best_c2b is None:
         return None, None
 
-    feeders_sorted = sorted(feeder_heads)
     feeder_bin_to_head = {}
     next_feeder = 0
     ace_color_to_slot = {}
-    next_slot = 0
+    ace_next_slot = {}
     assignment = {}
     for t in events:
         if t in assignment:
             continue
-        h = best_c2h[t]
-        if h == ACE:
-            slot = ace_color_to_slot.get(t)
+        b = best_c2b[t]
+        if b >= F:
+            head = ace_sorted[b - F]
+            slot = ace_color_to_slot.get((head, t))
             if slot is None:
-                slot = next_slot
-                ace_color_to_slot[t] = slot
-                next_slot += 1
-            assignment[t] = {'kind': 'ace', 'head': ace_head,
-                             'ace': ace_num, 'slot': slot, 'tier': 'optimize'}
+                slot = ace_next_slot.get(head, 0)
+                ace_color_to_slot[(head, t)] = slot
+                ace_next_slot[head] = slot + 1
+            assignment[t] = {'kind': 'ace', 'head': head,
+                             'ace': int(ace_num_of_head.get(head, head)),
+                             'slot': slot, 'tier': 'optimize'}
         else:
-            head = feeder_bin_to_head.get(h)
+            head = feeder_bin_to_head.get(b)
             if head is None:
                 head = feeders_sorted[next_feeder]
-                feeder_bin_to_head[h] = head
+                feeder_bin_to_head[b] = head
                 next_feeder += 1
             assignment[t] = {'kind': 'pin', 'head': head, 'tier': 'optimize'}
 
     return assignment, head_mode_swap_count(events, assignment)
 
-def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head,
+ANTI_OOZE_NO_UNRETRACT = 1.0
+
+BG_UNLOAD_MIN_WINDOW_MIN = 1
+
+BG_SWAP_COST_INLINE_S = 210
+BG_SWAP_COST_BG_S = 30
+BG_UNLOAD_INLINE_SAVING_S = BG_SWAP_COST_INLINE_S - BG_SWAP_COST_BG_S
+
+_UNRETRACT_RE = re.compile(
+    r'^G[01]\s+(?:F[0-9.]+\s+)?E([0-9.]+)(?:\s+F[0-9.]+)?\s*$')
+
+def _scan_post_t_unretracts(in_path):
+    """Map line_no of each bare T<n> line in the ORIGINAL file -> the explicit
+    toolchange un-retract value that follows it (float), or None when none
+    appears before the first extruding move (= the profile refills distributed
+    in the wipe; SnOrca layer 0). The rewrite mirrors this value in the swap's
+    ANTI_OOZE stamp: the swap's end-retract must equal exactly what the slicer
+    pushes back, or the wipe starts lean (cushion too big) / the un-retract
+    blobs into a fuller nozzle (cushion too small, eb775cf3)."""
+    bare_t = re.compile(r'^T(\d{1,2})\s*$')
+    result = {}
+    open_t = None
+    dist = 0
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
+        for line_no, line in enumerate(fin):
+            stripped = line.strip()
+            if bare_t.match(stripped):
+                open_t = line_no
+                dist = 0
+                continue
+            if open_t is None:
+                continue
+            dist += 1
+            m = _UNRETRACT_RE.match(stripped)
+            if m:
+                try:
+                    result[open_t] = float(m.group(1))
+                except ValueError:
+                    pass
+                open_t = None
+            elif _is_extruding_move(stripped) or dist > 300:
+                open_t = None
+    return result
+
+def _fmt_anti_ooze(v):
+    s = ('%.2f' % v).rstrip('0').rstrip('.')
+    return s or '0'
+
+def _scan_body_tools(in_path):
+    """Body toolchange sequence (bare T values after the first Change-Tool
+    marker), for the background-unload look-ahead: when a head is RELEASED
+    and its NEXT arrival needs a different (ace,slot), the rewrite stamps
+    ACE_BG_UNLOAD HEAD=<h> QUIET=1 so the unload runs while other heads
+    print. Same in_body semantics as the main rewrite loop.
+
+    Returns (tools, times, line_nos): per body T also the slicer's
+    remaining print time at that point (last M73 R=<minutes> BEFORE the
+    T; None when the file carries no M73) and the raw 0-based line number
+    of the T line - the same numbering _scan_post_t_unretracts keys on,
+    so the bg-swap stamp can look up the FUTURE arrival's un-retract
+    (its ANTI_OOZE contract, S35)."""
+    change_t = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
+    bare_t = re.compile(r'^T(\d{1,2})\s*$')
+    m73_r = re.compile(r'^M73\b.*?\bR(\d+(?:\.\d+)?)')
+    tools = []
+    times = []
+    line_nos = []
+    last_r = None
+    in_body = False
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
+        for line_no, line in enumerate(fin):
+            stripped = line.rstrip('\r\n')
+            mr = m73_r.match(stripped)
+            if mr:
+                last_r = float(mr.group(1))
+                continue
+            if not in_body and change_t.match(stripped):
+                in_body = True
+                continue
+            m = bare_t.match(stripped)
+            if m and in_body:
+                tools.append(int(m.group(1)))
+                times.append(last_r)
+                line_nos.append(line_no)
+    return tools, times, line_nos
+
+def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                               progress=None):
     """Streaming head-mode rewrite of the ORIGINAL slicer gcode. Each slicer
     T<n> is rewritten per `assignment` (compute_head_mode_layout):
       - 'pin' -> T<pin_head>                       (feeder head, no swap)
-      - 'ace' -> T<ace_head> + ACE_SWAP_HEAD HEAD=ace_head ACE=a SLOT=s
-                 (deduped on consecutive same (ace,slot))
+      - 'ace' -> T<entry head> + ACE_SWAP_HEAD HEAD=<head> ACE=a SLOT=s
+                 (deduped per ACE head on consecutive same (ace,slot))
+    Each 'ace' entry carries its OWN ACE head (one ACE per head), so the swap is
+    emitted for that head and the loaded-slot state is tracked per head.
     M104/M109 T<n> and the pre-body tool selection are remapped to the assigned
     physical head (no swap). SM_PRINT_PREEXTRUDE_FILAMENT for an ACE colour is
-    dropped (the swap purges); for a pinned colour it is remapped to the head.
-    No apply_remap step is needed - the assignment IS the remap.
-    Returns (active_swaps, skipped_swaps)."""
+    DROPPED (a real swap flushes anyway; per-swap primes stacked ooze drops on
+    the tower and their SKIP_POS_RESTORE coupling knocked docked heads off,
+    HW 2026-07-04); instead each ACE head gets ONE forced prime at its first
+    body use, and the initial tool gets its prime from the auto-load block
+    (inject_auto_load_to_file). For a pinned colour the line is remapped to the
+    head (stock, un-forced; first one FORCE=1). No apply_remap step is needed -
+    the assignment IS the remap. (`ace_head` is unused, kept for signature
+    compatibility.) Returns (active_swaps, skipped_swaps)."""
     def head_of(n):
         e = assignment.get(n)
         if not e:
             return None
-        if e.get('kind') == 'pin':
+        if e.get('kind') in ('pin', 'ace'):
             return e.get('head')
-        if e.get('kind') == 'ace':
-            return ace_head
         return None
 
-    def ace_slot_of(n):
+    def ace_entry_of(n):
         e = assignment.get(n)
         if e and e.get('kind') == 'ace':
-            return (e['ace'], e['slot'])
+            return (e['head'], e['ace'], e['slot'])
         return None
 
     m104_re    = re.compile(r'^M10[49]\b')
@@ -748,16 +988,21 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head,
         return re.sub(r'T(\d{1,2})', repl, line)
 
     in_body = False
-    cur = None
+    cur = {}
     active = 0
     skipped = 0
+    primed_ace = set()
+    primed_pin = set()
+    post_t_unret = _scan_post_t_unretracts(in_path)
+    body_tools, body_times, body_lines = _scan_body_tools(in_path)
+    bt_idx = 0
     total = os.path.getsize(in_path) or 1
     seen = 0
     last_pr = 0
 
     with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
          open(out_path, 'w', encoding='utf-8') as fout:
-        for line in fin:
+        for line_no, line in enumerate(fin):
             seen += len(line.encode('utf-8', errors='ignore'))
             stripped = line.rstrip('\r\n')
 
@@ -769,12 +1014,19 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head,
             mp = preextr_re.match(stripped)
             if mp:
                 n = int(mp.group(1))
-                if ace_slot_of(n) is not None:
+                ae = ace_entry_of(n)
+                if ae is not None:
                     last_pr = _emit_progress(progress, seen, total, last_pr)
                     continue
                 h = head_of(n)
-                fout.write('SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d\n' % h
-                           if h is not None else line)
+                if h is None:
+                    fout.write(line)
+                elif h not in primed_pin:
+                    primed_pin.add(h)
+                    fout.write(
+                        'SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d FORCE=1\n' % h)
+                else:
+                    fout.write('SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d\n' % h)
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
@@ -787,22 +1039,77 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head,
                 h = head_of(n)
                 if h is None:
                     fout.write(line)
+                    if (in_body and bt_idx < len(body_tools)
+                            and body_tools[bt_idx] == n):
+                        bt_idx += 1
                     last_pr = _emit_progress(progress, seen, total, last_pr)
                     continue
                 fout.write('T%d\n' % h)
-                if in_body:
-                    slot = ace_slot_of(n)
-                    if slot is not None:
-                        if cur == slot:
-                            fout.write('; ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
-                                       '  ; skipped (already loaded)\n'
-                                       % (ace_head, slot[0], slot[1]))
-                            skipped += 1
-                        else:
-                            fout.write('ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d\n'
-                                       % (ace_head, slot[0], slot[1]))
-                            cur = slot
-                            active += 1
+                if (in_body and bt_idx < len(body_tools)
+                        and body_tools[bt_idx] == n):
+                    if bt_idx > 0:
+                        rel_tool = body_tools[bt_idx - 1]
+                        ae_rel = ace_entry_of(rel_tool)
+                        if (ae_rel is not None and rel_tool != n
+                                and ae_rel[0] != head_of(n)):
+                            loaded_now = (ae_rel[1], ae_rel[2])
+                            nxt = None
+                            nxt_j = None
+                            for j in range(bt_idx + 1, len(body_tools)):
+                                e2 = ace_entry_of(body_tools[j])
+                                if e2 is not None and e2[0] == ae_rel[0]:
+                                    nxt = (e2[1], e2[2])
+                                    nxt_j = j
+                                    break
+                            if nxt is not None and nxt != loaded_now:
+                                r_now = body_times[bt_idx]
+                                r_nxt = body_times[nxt_j]
+                                window = None
+                                if r_now is not None and r_nxt is not None:
+                                    window = r_now - r_nxt
+                                if (window is not None
+                                        and window < BG_UNLOAD_MIN_WINDOW_MIN):
+                                    fout.write(
+                                        '; multiACE bg-swap HEAD=%d '
+                                        'skipped: parked window ~%dmin < '
+                                        '%dmin\n'
+                                        % (ae_rel[0], int(window),
+                                           BG_UNLOAD_MIN_WINDOW_MIN))
+                                else:
+                                    ao = post_t_unret.get(
+                                        body_lines[nxt_j])
+                                    if ao is None:
+                                        ao = ANTI_OOZE_NO_UNRETRACT
+                                    fout.write(
+                                        'ACE_BG_SWAP HEAD=%d ACE=%d '
+                                        'SLOT=%d ANTI_OOZE=%s QUIET=1\n'
+                                        % (ae_rel[0], nxt[0], nxt[1],
+                                           _fmt_anti_ooze(ao)))
+                    bt_idx += 1
+                ae = ace_entry_of(n)
+                if not in_body:
+                    if ae is not None:
+                        primed_ace.add(ae[0])
+                elif ae is not None:
+                    head, a, s = ae
+                    if cur.get(head) == (a, s):
+                        fout.write('; ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
+                                   '  ; skipped (already loaded)\n'
+                                   % (head, a, s))
+                        skipped += 1
+                    else:
+                        v = post_t_unret.get(line_no)
+                        if v is None:
+                            v = ANTI_OOZE_NO_UNRETRACT
+                        fout.write('ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d'
+                                   ' ANTI_OOZE=%s\n'
+                                   % (head, a, s, _fmt_anti_ooze(v)))
+                        cur[head] = (a, s)
+                        active += 1
+                    if head not in primed_ace:
+                        primed_ace.add(head)
+                        fout.write('SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d '
+                                   'FORCE=1\n' % head)
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
@@ -1885,7 +2192,6 @@ def inject_auto_load(gcode):
             continue
         cleaned.append(ln)
     lines = cleaned
-
     inject_idx = _structural_inject_idx(lines)
 
     if inject_idx is None:
@@ -1926,19 +2232,26 @@ def inject_auto_load(gcode):
             if head not in initial:
 
                 j = i + 1
-                while j < len(lines) and not lines[j].strip():
-                    j += 1
+                while j < len(lines):
+                    sj = lines[j].strip()
+                    if sj == '' or sj.startswith(';') or sj.startswith('ACE_BG_'):
+                        j += 1
+                        continue
+                    break
                 ace_m = None
                 if j < len(lines):
                     ace_m = re.match(
-                        r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)$',
+                        r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)'
+                        r'(?:\s+\S+=\S+)*\s*$',
                         lines[j].strip())
                 if ace_m and int(ace_m.group(1)) == head:
                     initial[head] = (int(ace_m.group(2)), int(ace_m.group(3)))
                 else:
                     initial[head] = (0, head)
             continue
-        m = re.match(r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)$', ls)
+        m = re.match(
+            r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)(?:\s+\S+=\S+)*\s*$',
+            ls)
         if m:
             head = int(m.group(1))
             used_heads.add(head)
@@ -2086,10 +2399,12 @@ def rewrite_to_file(in_path, out_path, progress=None):
     in-memory version's contract."""
     m104_re   = re.compile(r'^M10[49]\b')
     drop_pre  = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=([4-9]|1[0-5])\b')
+    low_pre   = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=([0-3])\b')
     change_t  = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
     bare_hi   = re.compile(r'^T([4-9]|1[0-5])\s*$')
     bare_lo   = re.compile(r'^T([0-3])\s*$')
-    swap_re   = re.compile(r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)$')
+    swap_re   = re.compile(
+        r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)(?:\s+\S+=\S+)*\s*$')
 
     def fix_m104(line):
         return re.sub(r'T([4-9]|1[0-5])',
@@ -2101,6 +2416,7 @@ def rewrite_to_file(in_path, out_path, progress=None):
     active = 0
     skipped = 0
     swapbacks = 0
+    primed = {}
 
     pending_head = None
     pending_blanks: list[str] = []
@@ -2157,9 +2473,15 @@ def rewrite_to_file(in_path, out_path, progress=None):
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
-            if drop_pre.match(stripped):
+            mdp = drop_pre.match(stripped)
+            if mdp:
                 if pending_head is not None:
                     flush_pending_unmatched(fout)
+                hpre = int(mdp.group(1)) % 4
+                if primed.get(hpre) != head_loaded.get(hpre):
+                    primed[hpre] = head_loaded.get(hpre)
+                    fout.write(
+                        'SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d FORCE=1\n' % hpre)
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
@@ -2188,6 +2510,18 @@ def rewrite_to_file(in_path, out_path, progress=None):
 
                 else:
                     flush_pending_unmatched(fout)
+
+            mlp = low_pre.match(stripped)
+            if mlp:
+                h = int(mlp.group(1))
+                if primed.get(h) != head_loaded.get(h):
+                    primed[h] = head_loaded.get(h)
+                    fout.write(
+                        'SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d FORCE=1\n' % h)
+                else:
+                    fout.write(line)
+                last_pr = _emit_progress(progress, seen, total, last_pr)
+                continue
 
             m = swap_re.match(stripped)
             if m:
@@ -2273,7 +2607,8 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
       4. First ACE_SWAP_HEAD HEAD= line."""
     preextr_re = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT\b')
     chg_re     = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*(\d+)')
-    swap_re    = re.compile(r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)$')
+    swap_re    = re.compile(
+        r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)(?:\s+\S+=\S+)*\s*$')
     bare_t_re  = re.compile(r'^T([0-3])\s*$')
     auto_load_re = re.compile(r'^;\s*multiACE auto-load:\s')
 
@@ -2281,7 +2616,6 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
     first_chg     = None
     first_preextr = None
     first_swap    = None
-
     first_ext     = None
     ext_boundary  = None
     last_boundary = None
@@ -2344,6 +2678,7 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
     initial: dict[int, tuple[int, int]] = {}
     used_heads: set[int] = set()
     pending_t_head: int | None = None
+    first_seen_head: int | None = None
 
     if anchor_line_no is not None:
         with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
@@ -2355,7 +2690,8 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
                 stripped = line.strip()
 
                 if pending_t_head is not None:
-                    if stripped == '':
+                    if (stripped == '' or stripped.startswith(';')
+                            or stripped.startswith('ACE_BG_')):
                         continue
                     m_s = swap_re.match(stripped)
                     if m_s and int(m_s.group(1)) == pending_t_head:
@@ -2374,6 +2710,8 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
                 if m_t:
                     head = int(m_t.group(1))
                     used_heads.add(head)
+                    if first_seen_head is None:
+                        first_seen_head = head
                     if head not in initial:
                         pending_t_head = head
                     continue
@@ -2382,6 +2720,8 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
                 if m_s:
                     head = int(m_s.group(1))
                     used_heads.add(head)
+                    if first_seen_head is None:
+                        first_seen_head = head
                     if head not in initial:
                         initial[head] = (int(m_s.group(2)), int(m_s.group(3)))
 
@@ -2405,6 +2745,10 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None):
             a, s = initial[h]
             inject_block.append(
                 'ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d\n' % (h, a, s))
+        if (only_heads is not None and first_seen_head is not None
+                and first_seen_head in initial):
+            inject_block.append('SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d '
+                                'FORCE=1\n' % first_seen_head)
         inject_block.append('; multiACE auto-load: end\n')
 
     seen = 0
@@ -2622,7 +2966,6 @@ def main():
               '(override with --aces N if needed)' % num_aces)
 
     if live_lookup_host is not None:
-
         if host_has_manual_head(live_lookup_host):
             print('ERROR: a toolhead is set to manual - live-lookup '
                   'colour matching is disabled (cannot place a hand-fed manual '

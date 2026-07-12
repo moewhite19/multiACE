@@ -134,10 +134,14 @@ createApp({
       active_device: null, device_count: 0,
       mode: "normal",
       ace_head: 3,
+      ace_heads: [],
+      head_feeder: {},
+      head_ace: {},
       dryer: null,
       swap_in_progress: false,
       aces: [], toolheads: [], wiring: [],
       save_variables: {},
+      bg_swap: {available: false, enabled_heads: [], busy: [], version: null},
     });
     const loadError = ref("");
     const notifications = ref([]);
@@ -199,16 +203,18 @@ createApp({
       state.device_count  = s.device_count ?? 0;
       state.mode          = s.mode || "normal";
       state.ace_head      = (typeof s.ace_head === "number") ? s.ace_head : 3;
-      if (!aceHeadInit && typeof s.ace_head === "number") {
-        aceHeadSel.value = s.ace_head;
-        aceHeadInit = true;
-      }
+      state.ace_heads     = Array.isArray(s.ace_heads) ? s.ace_heads : [];
+      state.head_feeder   = (s.head_feeder && typeof s.head_feeder === "object") ? s.head_feeder : {};
+      state.head_ace      = (s.head_ace && typeof s.head_ace === "object") ? s.head_ace : {};
       state.dryer         = s.dryer ?? null;
       state.swap_in_progress = !!s.swap_in_progress;
       state.aces          = Array.isArray(s.aces) ? s.aces : [];
       state.toolheads     = Array.isArray(s.toolheads) ? s.toolheads : [];
       state.wiring        = Array.isArray(s.wiring) ? s.wiring : [];
       state.save_variables = s.save_variables || {};
+      state.bg_swap       = (s.bg_swap && typeof s.bg_swap === "object")
+        ? s.bg_swap
+        : {available: false, enabled_heads: [], busy: [], version: null};
       if (typeof s.display_index_base === "number") {
         indexBase.value = s.display_index_base;
       }
@@ -544,9 +550,14 @@ createApp({
     // runout even though head_source is set. We just re-enable the load button.
     function needsReload(aceIdx, slotIdx) {
       if (state.printer_state !== 'paused') return false;
-      const th = state.toolheads.find(tt => tt.idx === slotIdx);
-      if (!th || !th.head_source_known) return false;
-      return th.ace === aceIdx && th.filament_at_extruder === false;
+      // The slot to reload is the one a paused head is SOURCED from
+      // (head_source ace/slot), not the toolhead whose index == the slot.
+      // In head mode a head loads from any slot of its wired ACE, so the old
+      // idx===slot lookup blinked "reload" under the wrong slot (slot==head).
+      return state.toolheads.some(th =>
+        th.head_source_known &&
+        th.ace === aceIdx && th.slot === slotIdx &&
+        th.filament_at_extruder === false);
     }
     function unloadHead(idx) {
       if (_blockIfPrinting()) return;
@@ -566,12 +577,99 @@ createApp({
       } catch (_) {}
       reloadState();
     }
+    async function setHeadFeeder(idx, enable) {
+      try {
+        await fetch(`${API}/head-feeder`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({head: idx, enable: !!enable}),
+        });
+      } catch (_) {}
+      reloadState();
+    }
+    // head mode: background-swap opt-in per head (= the HARDWARE declaration
+    // "this head's dock is open below"). Engine-persisted (ace__bg_heads),
+    // direct macro call like the language dropdown - no command queue entry.
+    function bgEnabledFor(idx) {
+      return (state.bg_swap.enabled_heads || []).some(h => Number(h) === Number(idx));
+    }
+    async function setBgHead(idx, enable) {
+      try {
+        await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_BG_SET_HEAD",
+                                args: {HEAD: idx, ENABLE: enable ? 1 : 0}}),
+        });
+      } catch (_) {}
+      reloadState();
+    }
+    async function setHeadAce(idx, ace) {
+      try {
+        await fetch(`${API}/head-ace`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({head: idx, ace: Number(ace)}),
+        });
+      } catch (_) {}
+      reloadState();
+    }
+    // head mode: connected ACEs as {value,label} for the per-head ACE dropdown.
+    const aceOptions = computed(() =>
+      (state.aces || []).map(a => ({
+        value: a.idx,
+        label: "ACE " + dispIdx(a.idx) + (a.protocol ? " (" + a.protocol.toUpperCase() + ")" : ""),
+      })));
+    // head mode: the ACE currently wired to a head (head_ace), defaulting to the
+    // head index.
+    function headAceOf(idx) {
+      const ha = state.head_ace || {};
+      const a = ha[idx] ?? ha[String(idx)];
+      return (a === undefined || a === null) ? idx : Number(a);
+    }
+    // head mode: ACE options for one head's dropdown - exclude ACEs already
+    // wired to ANOTHER ACE head (one ACE feeds exactly one head), but always
+    // keep this head's own current selection.
+    function aceOptionsForHead(idx) {
+      const taken = new Set();
+      for (const h of (state.ace_heads || [])) {
+        if (Number(h) === Number(idx)) continue;
+        taken.add(headAceOf(h));
+      }
+      const mine = headAceOf(idx);
+      return aceOptions.value.filter(o => o.value === mine || !taken.has(o.value));
+    }
+    // head mode: true when every wired ACE head is a right-side head (internal
+    // index >= 2, display 3/4) -> right-align the ACE grid so the cards start
+    // from the right, lining up with the right toolheads.
+    const aceHeadsRightSide = computed(() => {
+      const h = state.ace_heads || [];
+      return h.length > 0 && h.every(x => Number(x) >= 2);
+    });
+    // The ACE cards to render. In head mode: only ACEs wired to an ACE head
+    // (unused ones hidden), ordered by their head index so each ACE card lines
+    // up with its toolhead (T0..T3 left to right). Other modes: all ACEs as-is.
+    const visibleAces = computed(() => {
+      const aces = state.aces || [];
+      if (state.mode !== "head") return aces;
+      const byIdx = {};
+      for (const a of aces) byIdx[a.idx] = a;
+      const out = [];
+      const seen = new Set();
+      for (const h of [...(state.ace_heads || [])].sort((a, b) => a - b)) {
+        const ai = headAceOf(h);
+        if (byIdx[ai] && !seen.has(ai)) { out.push(byIdx[ai]); seen.add(ai); }
+      }
+      return out;
+    });
     function loadSlot(aceIdx, slotIdx) {
       if (_blockIfPrinting()) return;
       if (state.mode === "head") {
-        // head mode: the ACE's slots all feed the ONE ACE head (combiner).
-        // Loading a slot loads that head from this slot (swap if already loaded).
-        const h = state.ace_head;
+        // head mode: each ACE head is wired to exactly one ACE (head_ace), so
+        // this ACE's slots all feed the head whose head_ace points here. Loading
+        // a slot loads that head from this slot (swap if already loaded).
+        const h = aceHeadForAce(aceIdx);
+        if (h === null) return;
         const th = state.toolheads.find(tt => tt.idx === h);
         if (th && th.head_source_known) {
           enqueue("ACE_UNLOAD_HEAD", {HEAD: h});
@@ -592,12 +690,25 @@ createApp({
       if (_blockIfPrinting()) return;
       enqueue("ACE_LOAD_HEAD", {HEAD: h});
     }
-    // head mode: is this ACE slot the one currently loaded into the ACE head?
+    // head mode: the ACE head wired to this ACE (head_ace reverse lookup), or
+    // null if no ACE head uses it.
+    function aceHeadForAce(aceIdx) {
+      const heads = state.ace_heads || [];
+      const ha = state.head_ace || {};
+      for (const h of heads) {
+        const a = Number(ha[h] ?? ha[String(h)] ?? h);
+        if (a === aceIdx) return h;
+      }
+      return null;
+    }
+    // head mode: is this ACE slot the one currently loaded into its ACE head?
     // (used to disable that slot's Load button; other slots stay loadable=swap).
-    function slotLoadedInHead(slotIdx) {
+    function slotLoadedInHead(aceIdx, slotIdx) {
       if (state.mode !== "head") return false;
-      const th = state.toolheads.find(tt => tt.idx === state.ace_head);
-      return !!(th && th.head_source_known && th.slot === slotIdx);
+      const h = aceHeadForAce(aceIdx);
+      if (h === null) return false;
+      const th = state.toolheads.find(tt => tt.idx === h);
+      return !!(th && th.head_source_known && th.ace === aceIdx && th.slot === slotIdx);
     }
     // Default/fallback list; the live list + per-type subtypes are loaded
     // from /api/materials, which sources them from the firmware filament DB
@@ -659,6 +770,7 @@ createApp({
       show: false,
       ace: 0,
       slot: 0,
+      head: null,     // head mode: set when editing a feeder head (no ACE slot)
       material: "PLA",
       subtype: "Basic",
       vendor: "Generic",
@@ -687,6 +799,7 @@ createApp({
     });
     function openPicker(ace, slot) {
       _pickerOpening = true;
+      picker.head = null;
       picker.ace = ace.idx;
       picker.slot = slot.idx;
       picker.material = (slot.material || "PLA");
@@ -695,6 +808,23 @@ createApp({
       picker.color = slot.color || "#ffffff";
       picker.show = true;
       // Let the watchers' snap run again only after this open settles.
+      nextTick(() => { _pickerOpening = false; });
+    }
+    // head mode: edit a feeder head's filament identity (color/material). It has
+    // no ACE slot - the values go straight to the head's print_task_config via
+    // SET_PRINT_FILAMENT_CONFIG (same path the touchscreen uses; the heartbeat
+    // leaves feeder heads untouched). The RFID/load-after buttons hide because
+    // _pickerSlot() is null without an ACE slot.
+    function openHeadPicker(th) {
+      _pickerOpening = true;
+      picker.ace = null;
+      picker.slot = null;
+      picker.head = th.idx;
+      picker.material = (th.material || "PLA");
+      picker.subtype = th.subtype || "Basic";
+      picker.vendor = th.brand || "Generic";
+      picker.color = th.color || "#ffffff";
+      picker.show = true;
       nextTick(() => { _pickerOpening = false; });
     }
     function closePicker() { picker.show = false; }
@@ -780,6 +910,24 @@ createApp({
           && _ovColor(picker.color) === _ovColor(r.color);
     }
     async function savePicker(loadAfter) {
+      // Feeder head (no ACE slot): push the identity straight to the head's
+      // print_task_config via SET_PRINT_FILAMENT_CONFIG (same path the
+      // touchscreen uses). The heartbeat leaves feeder/manual heads untouched,
+      // so this sticks until the user changes it.
+      if (picker.head !== null && picker.head !== undefined) {
+        const dq = (s) => `"${String(s || "").replace(/"/g, "")}"`;
+        const hex = (picker.color || "#ffffff").replace("#", "");
+        enqueue("SET_PRINT_FILAMENT_CONFIG", {
+          CONFIG_EXTRUDER:     picker.head,
+          FILAMENT_TYPE:       dq(picker.material || "PLA"),
+          FILAMENT_COLOR_RGBA: hex.toUpperCase() + "FF",
+          VENDOR:              dq(picker.vendor || "Generic"),
+          FILAMENT_SUBTYPE:    dq(picker.subtype || ""),
+        });
+        closePicker();
+        reloadState();
+        return;
+      }
       const aceIdx = picker.ace;
       const slotIdx = picker.slot;
       if (_pickerMatchesRfid()) {
@@ -855,20 +1003,26 @@ createApp({
     const snapshots = ref([]);
     const selectedSnapshot = ref("");
     const snapshotPreview = computed(() => snapshots.value.find(s => s.name === selectedSnapshot.value));
+    // Head-mode snapshots are stored separately from multi - tag every snapshot
+    // call with the current mode so each shows/saves its own set.
+    function _snapMode() { return state.mode === "head" ? "head" : ""; }
+    function _snapQS() { return state.mode === "head" ? "?mode=head" : ""; }
     async function reloadSnapshots() {
       try {
-        const r = await fetch(`${API}/snapshots`);
+        const r = await fetch(`${API}/snapshots${_snapQS()}`);
         if (!r.ok) return;
         const j = await r.json();
         snapshots.value = j.snapshots || [];
       } catch (_) {}
     }
+    // Reload the right snapshot set (and drop a stale selection) on mode switch.
+    watch(() => state.mode, () => { selectedSnapshot.value = ""; reloadSnapshots(); });
     async function _doSaveSnapshot(name) {
       try {
         const r = await fetch(`${API}/snapshots`, {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({name}),
+          body: JSON.stringify({name, mode: _snapMode()}),
         });
         if (!r.ok) {
           setMacroLog(t("ui.log.snapshot_save_failed", {error: await r.text()}));
@@ -898,7 +1052,7 @@ createApp({
       if (!selectedSnapshot.value) return;
       if (!confirmSync(t("ui.dialog.delete_snapshot", {name: selectedSnapshot.value}))) return;
       try {
-        await fetch(`${API}/snapshots/${encodeURIComponent(selectedSnapshot.value)}`, {method: "DELETE"});
+        await fetch(`${API}/snapshots/${encodeURIComponent(selectedSnapshot.value)}${_snapQS()}`, {method: "DELETE"});
         selectedSnapshot.value = "";
         await reloadSnapshots();
       } catch (e) { setMacroLog(`${t("ui.common.error")}: ${e}`); }
@@ -908,7 +1062,7 @@ createApp({
       const name = selectedSnapshot.value;
       let plan;
       try {
-        const r = await fetch(`${API}/snapshots/${encodeURIComponent(name)}/apply`, {method: "POST"});
+        const r = await fetch(`${API}/snapshots/${encodeURIComponent(name)}/apply${_snapQS()}`, {method: "POST"});
         plan = await r.json();
       } catch (e) {
         setMacroLog(`${t("ui.common.error")}: ${e}`);
@@ -1052,10 +1206,6 @@ createApp({
     // actually starts (klippy down). Mode changes do NOT use this - crossing
     // 'normal' raises a backend reboot error that reaches the display too.
     const rebootNeeded = ref(false);
-    // head-mode ACE head picker (0-based). Default 3 (combiner head); seeded
-    // once from live state, then user-controlled.
-    const aceHeadSel = ref(3);
-    let aceHeadInit = false;
     function paramsToForm(params, perAceParams) {
       if (!params) return;
       const num  = (k) => params[k] != null ? Number(params[k]) : configForm[k];
@@ -1423,11 +1573,10 @@ createApp({
       } catch (e) { configLog.value = `${t("ui.common.error")}: ${e}`; }
     }
     async function setMode(m) {
-      // head mode carries the ACE head; allow re-applying head with a changed
-      // head even when already in head mode. multi<->head is a runtime flip
-      // (no reboot); only transitions crossing 'normal' need a Klipper restart.
-      const headChanged = (m === "head" && state.ace_head !== aceHeadSel.value);
-      if (state.mode === m && !headChanged) return;
+      // multi<->head is a runtime flip (no reboot); only transitions crossing
+      // 'normal' need a Klipper restart. In head mode each head is toggled to
+      // feeder individually (per-head feeder checkbox), no single ACE head.
+      if (state.mode === m) return;
       // Mode changes that cross 'normal' (stock<->ACE file swap) require all
       // toolheads unloaded - mirror the SET_ACE_MODE macro guard client-side so
       // the "unload first" rejection is visible in the web, not only in Fluidd's
@@ -1447,9 +1596,7 @@ createApp({
           return;
         }
       }
-      const args = (m === "head")
-        ? {MODE: "head", HEAD: aceHeadSel.value}
-        : {MODE: m};
+      const args = {MODE: m};
       confirm({
         title: t("ui.dialog.switch_mode_title", {mode: m}),
         message: t("ui.dialog.switch_mode_msg", {mode: m}),
@@ -1609,6 +1756,9 @@ createApp({
       open:    false,
       busy:    false,
       sending: "",
+      // Non-empty while "apply loadout" is writing slot-overrides / feeder
+      // identities (the plan key being applied).
+      applying: "",
       report:  null,
       error:   "",
       progress: null,
@@ -1624,6 +1774,11 @@ createApp({
       headOverrides: {},
       headSwaps: null,
       headDirty: false,
+      // Print-preference toggles (default off): inject SET_PRINT_PREFERENCES so
+      // an upload/SD start runs bed mesh / timelapse camera (stock only does
+      // these on the official start).
+      bedMesh: false,
+      camera:  false,
       // true when this report was produced in-browser (Pyodide worker) rather
       // than by the printer backend - selects the local rewrite+upload path.
       local: false,
@@ -1786,6 +1941,25 @@ createApp({
       const tg = _headTargetById(id);
       return (tg && tg.color) || "#444";
     }
+    function headTargetLabelById(id) {
+      const tg = _headTargetById(id);
+      return tg ? headTargetLabel(tg) : "";
+    }
+    // Custom dropdown for the head-mode target picker: native <option>s
+    // cannot render a colour chip NEXT to a label (only full-background
+    // fills, which were loud/uneven - Dirk 2026-07-10), so the open list is
+    // a small custom popup with chip + label per entry. One open at a time,
+    // keyed by the slicer-T; items pick on mousedown (fires before the
+    // button's blur closes the list).
+    const hmDropOpen = ref(null);
+    function hmDdToggle(tt) {
+      hmDropOpen.value = (hmDropOpen.value === tt) ? null : tt;
+    }
+    function hmDdClose() { hmDropOpen.value = null; }
+    function hmDdPick(tt, id) {
+      hmDropOpen.value = null;
+      onHeadTargetChange(tt, id);
+    }
     function onHeadTargetChange(tt, id) {
       const base = _headBaseTargetId(tt);
       if (id === base) delete preflight.headOverrides[tt];
@@ -1802,13 +1976,15 @@ createApp({
     }
     function headSwapCount(events, assignment) {
       // Port of backend head_mode_swap_count: only ACE-target (ace,slot)
-      // changes count; pinned feeder colours never swap.
-      let cur = null, swaps = 0;
+      // changes count, PER ACE head (each ACE head swaps independently);
+      // pinned feeder colours never swap.
+      const cur = {};
+      let swaps = 0;
       for (const tt of (events || [])) {
         const tg = _headTargetById(assignment[tt]);
         if (!tg || tg.kind !== "ace") continue;
         const key = tg.ace + "-" + tg.slot;
-        if (cur !== key) { swaps++; cur = key; }
+        if (cur[tg.head] !== key) { swaps++; cur[tg.head] = key; }
       }
       return swaps;
     }
@@ -1841,6 +2017,31 @@ createApp({
       const p = preflight.report && preflight.report.plans
               && preflight.report.plans[hp];
       return (p && p.swaps) || 0;
+    }
+    // Background-unload balance of a head-mode plan (server-computed;
+    // stale after loadout edits like the swap count - same stale marker).
+    function headPlanBg(hp) {
+      const p = preflight.report && preflight.report.plans
+              && preflight.report.plans[hp];
+      return (p && p.bg && p.bg.unloads > 0) ? p.bg : null;
+    }
+    function headPlanBgLabel(hp) {
+      const bg = headPlanBg(hp);
+      if (!bg) return "";
+      let s = t('ui.preflight.bg_label') + " " + bg.bg_ok + "/" + bg.unloads;
+      const min = Math.round((bg.saved_s || 0) / 60);
+      if (bg.bg_ok > 0 && min > 0) {
+        s += " (~" + min + " min " + t('ui.preflight.bg_saved') + ")";
+      }
+      // Why the rest does NOT qualify - the diagnosis Dirk was missing
+      // (">4 colours and still no benefit": short windows vs chain on a
+      // non-BG head vs missing M73 look different here).
+      const parts = [];
+      if (bg.bg_small)    parts.push(bg.bg_small + " " + t('ui.preflight.bg_too_short'));
+      if (bg.bg_disabled) parts.push(bg.bg_disabled + " " + t('ui.preflight.bg_not_enabled'));
+      if (bg.bg_unknown)  parts.push(bg.bg_unknown + " " + t('ui.preflight.bg_no_m73'));
+      if (parts.length) s += " · " + parts.join(", ");
+      return s;
     }
     function _headSlicerColor(tt) {
       return ((preflight.report && preflight.report.slicer_colors) || [])
@@ -2089,6 +2290,18 @@ createApp({
       };
       return map[stage] || stage || "";
     }
+    // Mirror of the backend _prepend_print_prefs for the in-browser path: the
+    // prefs prepend lives in main.py (the I/O shell), not the shared core, so
+    // the local worker path applies it here before upload.
+    function _prependPrintPrefs(text) {
+      if (!preflight.bedMesh && !preflight.camera) return text || "";
+      const line = "SET_PRINT_PREFERENCES BED_LEVEL=" + (preflight.bedMesh ? 1 : 0)
+        + " FLOW_CALIBRATE=0 TIME_LAPSE_CAMERA=" + (preflight.camera ? 1 : 0)
+        + " FORCE=1";
+      const body = (text || "").replace(
+        /^(\s*SET_PRINT_PREFERENCES\b.*)$/gim, "; multiACE disabled: $1");
+      return "; multiACE preflight: print preferences\n" + line + "\n" + body;
+    }
     async function startPreflightPrint(mode, headPlan) {
       if (preflight.busy || preflight.sending) return;
       const rep = preflight.report;
@@ -2140,7 +2353,7 @@ createApp({
         fd.append("root", "gcodes");
         fd.append("print", "true");
         fd.append("file",
-          new Blob([j.text || ""], {type: "application/octet-stream"}),
+          new Blob([_prependPrintPrefs(j.text)], {type: "application/octet-stream"}),
           rep.filename || preflightFile.name);
         const r = await fetch("/server/files/upload", {method: "POST", body: fd});
         const body = await r.json().catch(() => ({}));
@@ -2176,7 +2389,8 @@ createApp({
       const FIRST_POLL_MS  = 250;
       const POLL_MS        = 500;
       try {
-        const body = {token: rep.token, mode};
+        const body = {token: rep.token, mode,
+                      bed_mesh: !!preflight.bedMesh, camera: !!preflight.camera};
         if (mode === "slicer") {
           // Send the (possibly user-edited) slot assignment verbatim so the
           // print matches the preview exactly. Only entries differing from
@@ -2253,6 +2467,97 @@ createApp({
         if (preflight.progress) preflight.progress.running = false;
       }
     }
+
+    // "Loadout übernehmen": the user has physically rearranged the spools to
+    // match a proposed (optimize/layer) plan; write those identities onto the
+    // ACE slots (slot-override) and, in head mode, onto the pinned feeder heads
+    // (print_task_config). This only SETS filaments/colours - it does NOT start
+    // a print.
+    function _hex6(c) {
+      let s = String(c || "").trim().toLowerCase();
+      if (!s) return "";
+      if (s[0] !== "#") s = "#" + s;
+      if (s.length === 9) s = s.slice(0, 7); // #rrggbbaa -> #rrggbb
+      return s;
+    }
+    function _loadoutOps(mode, headPlan) {
+      // -> {overrides:[{ace,slot,material,color}], feeders:[{head,material,color}]}
+      const overrides = [], feeders = [];
+      const rep = preflight.report;
+      if (!rep) return {overrides, feeders};
+      if (mode === "head") {
+        const plan = rep.plans[headPlan];
+        if (!plan || !plan.mapping) return {overrides, feeders};
+        for (const m of plan.mapping) {
+          if (!m || m.kind === "none") continue;
+          const color = _hex6(headSlicerHex(m.t));
+          const mat = headSlicerMat(m.t);
+          const material = (mat === "?") ? "" : mat;
+          if (m.kind === "pin" && m.head !== null && m.head !== undefined) {
+            feeders.push({head: m.head, material, color});
+          } else if (m.kind === "ace" && m.ace !== null && m.ace !== undefined) {
+            overrides.push({ace: m.ace, slot: m.slot, material, color});
+          }
+        }
+      } else {
+        const plan = rep.plans[mode];
+        if (!plan || !plan.mapping) return {overrides, feeders};
+        for (const m of plan.mapping) {
+          if (!m || !m.slot) continue;
+          overrides.push({
+            ace: m.slot.ace, slot: m.slot.slot,
+            material: m.slot.material || "", color: _hex6(m.slot.color),
+          });
+        }
+      }
+      return {overrides, feeders};
+    }
+    async function applyLoadout(mode, headPlan) {
+      if (preflight.applying || preflight.sending) return;
+      const ops = _loadoutOps(mode, headPlan);
+      const total = ops.overrides.length + ops.feeders.length;
+      if (!total) return;
+      confirm({
+        title:   t("ui.preflight.apply_loadout"),
+        message: t("ui.preflight.apply_loadout_confirm", {count: total}),
+        okLabel: t("ui.preflight.apply_loadout"),
+        onOk: async () => {
+          preflight.applying = (mode === "head") ? (headPlan || "loadout") : mode;
+          try {
+            for (const o of ops.overrides) {
+              await fetch(`${API}/slot-override`, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({
+                  ace: o.ace, slot: o.slot, material: o.material,
+                  brand: "", subtype: "", color: o.color,
+                }),
+              });
+            }
+            for (const f of ops.feeders) {
+              const dq = (s) => `"${String(s || "").replace(/"/g, "")}"`;
+              const hex = (f.color || "#ffffff").replace("#", "");
+              enqueue("SET_PRINT_FILAMENT_CONFIG", {
+                CONFIG_EXTRUDER:     f.head,
+                FILAMENT_TYPE:       dq(f.material || "PLA"),
+                FILAMENT_COLOR_RGBA: hex.toUpperCase() + "FF",
+                VENDOR:              dq("Generic"),
+                FILAMENT_SUBTYPE:    dq(""),
+              });
+            }
+            if (ops.overrides.length) {
+              enqueue("MULTIACE_REFRESH_OVERRIDES", {}, {silent: true});
+            }
+            setMacroLog(t("ui.preflight.apply_loadout_done", {count: total}));
+            reloadState();
+          } catch (e) {
+            setMacroLog(`${t("ui.common.error")}: ${e}`);
+          } finally {
+            preflight.applying = "";
+          }
+        },
+      });
+    }
     let resizeObserver = null;
     onMounted(async () => {
       await loadLanguageList();
@@ -2319,20 +2624,21 @@ createApp({
       sourceLabel,
       tab, version, printerName, printerFw, connClass, connText, screenAvailable,
       state, loadError, run, macroLog,
-      slotTitle, switchAce, loadSlot, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, isToolheadOccupied, needsReload, toolheadOps,
+      slotTitle, switchAce, loadSlot, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, setHeadManual, setHeadFeeder, setHeadAce, aceOptionsForHead, headAceOf, visibleAces, openHeadPicker, isToolheadOccupied, needsReload, toolheadOps, bgEnabledFor, setBgHead,
       isPrinting,
       dryerCfg, dryStart, dryStop, dryOpenAce, toggleDryPanel, aceDrying,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
       config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,
-      aceHeadSel,
+      aceHeadsRightSide,
       loadConfig, saveConfigForm, saveConfigRaw, setMode,
-      preflight, closePreflight, startPreflightPrint, stageLabel,
+      preflight, closePreflight, startPreflightPrint, applyLoadout, stageLabel,
       tierLabel, tierWarn, rgbDec, sortedMapping,
       slotKey, textOn, slicerSlotOptions, slicerEffectiveSlot, onSlicerSlotChange,
       recalcSlicer, slicerSwapsDisplay,
       headTargets, headTargetOptions, headEffectiveTargetId, headTargetLabel,
-      headTargetColor, onHeadTargetChange, recalcHead, headSwapsDisplay,
-      headFeasible, headPlanFeasible, headPlanSwaps, headSlicerHex,
+      headTargetColor, headTargetLabelById, onHeadTargetChange, recalcHead, headSwapsDisplay,
+      hmDropOpen, hmDdToggle, hmDdClose, hmDdPick,
+      headFeasible, headPlanFeasible, headPlanSwaps, headPlanBg, headPlanBgLabel, headSlicerHex,
       headSlicerMat, headProposalLabel,
       updateState, updateCheck, updateApply,
       debugState, debugEnable, debugDisable,

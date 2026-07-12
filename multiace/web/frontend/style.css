@@ -139,8 +139,12 @@ h3 { margin: 1.2rem 0 .5rem 0; color: var(--muted); font-size: .85rem; font-weig
    (not max-width) so the card is the same size whether left- or right-aligned
    - justify-self:end would otherwise shrink it to content width on the right. */
 .ace-grid > .ace-card:only-child { grid-column: 1 / -1; width: min(500px, 100%); }
-/* head mode: ACE head on the right side (display head 3/4) -> right-align the card */
-.ace-grid > .ace-card.ace-right { justify-self: end; }
+/* head mode, all ACE heads on the right: right-align the card so it starts from
+   the right and lines up with the right toolheads. Keep the normal card size
+   (the only-child rule's grid-column:1/-1 + 500px width) and just push it to
+   the end of the row. */
+.ace-grid.ace-grid-right { justify-content: end; }
+.ace-grid.ace-grid-right > .ace-card:only-child { justify-self: end; }
 .ace-card { background: var(--card); padding: 1rem; border-radius: 6px;
             border: 1px solid var(--border); transition: border-color .15s; }
 .ace-card.primary   { border-color: var(--accent); }
@@ -325,6 +329,19 @@ button.slot.state-unknown { background: #333; color: #555; text-shadow: none; }
 .th-manual input { cursor: pointer; }
 .th-manual.disabled { opacity: .4; cursor: not-allowed; }
 .th-manual.disabled input { cursor: not-allowed; }
+/* feeder head: the title colour circle opens the filament picker on click */
+.toolhead-card .th-color.clickable { cursor: pointer; width: 18px; height: 18px; }
+.toolhead-card .th-color.clickable:hover { border-color: var(--accent); }
+.toolhead-card .th-color.empty { background:
+  repeating-conic-gradient(#555 0deg 90deg, var(--card) 90deg 180deg)
+  50% / 8px 8px; }
+.th-ace-row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; }
+.th-ace-row .th-ace-pick, .th-ace-row .th-manual { margin-top: .4rem; }
+.th-ace-pick { display: flex; align-items: center; gap: .35rem; margin-top: .4rem; font-size: .78rem; color: #aaa; }
+.th-ace-pick select { font-size: .78rem; padding: .15rem .3rem; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
+.th-ace-pick select option { background: var(--bg); color: var(--fg); }
+.th-ace-pick.disabled { opacity: .4; }
+.th-ace-pick.disabled select { cursor: not-allowed; }
 .toolhead-actions { display: flex; gap: .4rem; margin-top: .6rem; }
 .toolhead-actions button { flex: 1; padding: .35rem .9rem; border-radius: 4px; cursor: pointer; font-size: .8rem;
                             background: var(--card); color: var(--fg); border: 1px solid var(--border);
@@ -589,6 +606,30 @@ body { padding-bottom: 64px; }
 .preflight-dot { display: inline-block; width: 14px; height: 14px;
                  border-radius: 50%; border: 1px solid var(--border);
                  vertical-align: middle; margin-right: .3rem; }
+/* Head-mode target picker: custom dropdown with a colour chip NEXT to the
+   label - uniform card background for every ACE/feeder entry, in the
+   closed button and in the open list alike (native options can't render a
+   partial-colour chip). */
+.hm-dd { position: relative; display: inline-block; min-width: 200px; }
+.hm-dd-btn { display: flex; align-items: center; gap: .45rem; width: 100%;
+             background: var(--card); color: var(--fg);
+             border: 1px solid var(--border); border-radius: 4px;
+             padding: .3rem .5rem; cursor: pointer; font-size: .85rem;
+             text-align: left; }
+.hm-dd-chip { flex: 0 0 16px; width: 16px; height: 16px; border-radius: 3px;
+              border: 1px solid var(--border); }
+.hm-dd-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+               white-space: nowrap; }
+.hm-dd-caret { flex: 0 0 auto; opacity: .6; font-size: .7rem; }
+.hm-dd-list { position: absolute; z-index: 40; top: calc(100% + 2px);
+              left: 0; min-width: 100%; max-height: 260px; overflow-y: auto;
+              background: var(--card); border: 1px solid var(--border);
+              border-radius: 4px; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+.hm-dd-item { display: flex; align-items: center; gap: .45rem;
+              padding: .3rem .5rem; cursor: pointer; font-size: .85rem;
+              white-space: nowrap; }
+.hm-dd-item:hover { background: rgba(255,255,255,.08); }
+.hm-dd-item.sel { background: rgba(255,255,255,.14); }
 .preflight-plan { border: 1px solid var(--border); border-radius: 4px;
                   padding: .6rem .8rem; margin-top: .8rem; }
 .preflight-plan-head { display: flex; align-items: baseline; gap: .6rem;
@@ -610,6 +651,10 @@ body { padding-bottom: 64px; }
                           margin: 1rem 0 .2rem 0; cursor: pointer;
                           user-select: none; font-size: .9rem; color: var(--fg); }
 .preflight-prefs-toggle input { accent-color: var(--accent); cursor: pointer; }
+.preflight-prefs { display: flex; gap: 1.2rem; flex-wrap: wrap;
+                   margin: .2rem 0 .6rem 0; font-size: .85rem; color: var(--muted); }
+.preflight-prefs label { display: flex; align-items: center; gap: .35rem; cursor: pointer; }
+.preflight-prefs input { accent-color: var(--accent); cursor: pointer; }
 .preflight-progress { margin: 1rem 0 .4rem 0; }
 .preflight-progress-sticky {
     position: sticky; top: 0; z-index: 10;

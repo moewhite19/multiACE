@@ -63,7 +63,6 @@ class RunoutHelper:
         return 0
 
     def _runout_disp(self):
-
         ace = self.printer.lookup_object('ace', None)
         head = self.extruder_index
         if ace is not None and hasattr(ace, '_t'):
@@ -126,7 +125,6 @@ class RunoutHelper:
             logging.exception("Script running error")
         self.min_event_systime = self.reactor.monotonic() + self.event_delay
     def note_filament_present(self, is_filament_present, force=False):
-
         if is_filament_present == self.filament_present and force == False:
             return
         self.filament_present = is_filament_present
@@ -151,11 +149,12 @@ class RunoutHelper:
         is_printing = print_stats.state == "printing"
 
         if is_filament_present:
-
             ace = self.printer.lookup_object('ace', None)
             if ace is not None and self.extruder_index in getattr(ace, '_runout_suppress_heads', ()):
                 ace._runout_suppress_heads.discard(self.extruder_index)
                 logging.info("[multiACE] note_filament_present: head %d (re)loaded - clearing runout suppression" % self.extruder_index)
+            if ace is not None and self.extruder_index in getattr(ace, '_bg_left_empty', ()):
+                ace._bg_left_empty.discard(self.extruder_index)
             if not is_printing and self.insert_gcode is not None:
 
                 self.min_event_systime = self.reactor.NEVER
@@ -218,6 +217,24 @@ class RunoutHelper:
         print_stats = self.printer.lookup_object('print_stats', None)
         if print_stats is not None and print_stats.state in ["printing", "paused"]:
             if bool(self.sensor_enabled) and not bool(self.filament_present):
+                ace = self.printer.lookup_object('ace', None)
+                if ace is not None and self.extruder_index in getattr(
+                        ace, '_runout_suppress_heads', ()):
+                    logging.info(
+                        '[multiACE] CHECK_FILAMENT_RUNOUT: suppressed for '
+                        'head %d (recovery: empty head awaiting reload)'
+                        % self.extruder_index)
+                    return
+                if (ace is not None
+                        and getattr(ace, '_print_has_gcode_loads', False)
+                        and ace.head_uses_ace(self.extruder_index)
+                        and not ace._head_is_loaded(self.extruder_index)):
+                    logging.info(
+                        '[multiACE] CHECK_FILAMENT_RUNOUT: head %d is an '
+                        'unloaded ACE-driven head and this print carries '
+                        'multiACE loads - its load is ahead in the gcode, '
+                        'allowing RESUME' % self.extruder_index)
+                    return
                 raise gcmd.error(
                         message = self._runout_disp(),
                         action = 'pause',

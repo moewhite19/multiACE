@@ -69,7 +69,16 @@
       "snapshots": "Filament-Snapshots",
       "save_current": "Aktuellen speichern…",
       "snapshot_name_prompt": "Snapshot-Name (A-Z, 0-9, _-):",
-      "snapshot_select_or_new": "Auswählen / Neu"
+      "snapshot_select_or_new": "Auswählen / Neu",
+      "feeder_hint": "Feeder-Modus: dieser Kopf lädt/entlädt über seinen Stock-Seitenvorschub; der ACE rührt ihn nicht an.",
+      "feeder_unload_first": "Diesen Kopf erst entladen, um den Feeder-Modus zu ändern.",
+      "head_ace": "ACE",
+      "head_ace_hint": "Welche ACE diesen Kopf speist. Der Kopf kann nur die Slots dieser ACE laden/swappen.",
+      "head_ace_unload_first": "Diesen Kopf erst entladen, um seine ACE zu ändern.",
+      "set_filament": "Filament",
+      "feeder_set_filament": "Filamentfarbe/-material dieses Feeder-Kopfs setzen",
+      "bg": "BG",
+      "bg_hint": "Background-Swaps: erklärt das Dock dieses Kopfs als nach unten OFFEN (der Tipform-Purge fällt hindurch). Unloads laufen dann, während andere Köpfe drucken. Wird gespeichert."
     },
     "config": {
       "mode": "Modus",
@@ -135,7 +144,8 @@
       "debug_reboot_title": "Drucker rebooten?",
       "debug_reboot_msg": "Sendet /machine/reboot an Moonraker. Laufende Druckjobs werden abgebrochen.",
       "debug_reboot_sent": "Reboot-Befehl an Moonraker gesendet.",
-      "debug_reboot_failed": "Reboot fehlgeschlagen"
+      "debug_reboot_failed": "Reboot fehlgeschlagen",
+      "head_mode_hint": "Head-Modus: jeder Kopf ist standardmäßig ACE-gesteuert. Einzelne Köpfe im Dashboard auf „Feeder\" schalten, um sie ihrem Stock-Seitenvorschub zu übergeben."
     },
     "dialog": {
       "load_already_loaded_title": "T{slot} ist bereits geladen",
@@ -169,7 +179,8 @@
       "picker_read_rfid": "RFID einlesen",
       "picker_read_rfid_hint": "Material, Hersteller und Farbe vom RFID-Tag des Slots übernehmen",
       "picker_clear": "Löschen",
-      "picker_clear_hint": "Manuelle Filament-Angabe für diesen Slot entfernen"
+      "picker_clear_hint": "Manuelle Filament-Angabe für diesen Slot entfernen",
+      "picker_title_head": "Filament setzen — T{head}"
     },
     "notifications": {
       "title": "multiACE-Hinweise",
@@ -226,7 +237,16 @@
       "skip_calibration": "Bett-Leveling, Flow-Kalibrierung & Zeitraffer überspringen",
       "swaps_label": "Wechsel",
       "recalc": "Wechsel neu berechnen",
+      "apply_loadout": "Loadout übernehmen",
+      "applying": "Übernehme…",
+      "apply_loadout_confirm": "Ordne die Spulen gemäß dieser Anordnung um und übernimm sie dann. Setzt {count} Slot-/Kopf-Filament(e) & Farben - startet keinen Druck.",
+      "apply_loadout_done": "Loadout übernommen ({count} Slot-/Kopf-Filament(e) gesetzt)",
       "stale": "neu berechnen",
+      "bg_label": "BG-Swaps:",
+      "bg_saved": "gespart",
+      "bg_no_m73": "keine M73-Zeitdaten",
+      "bg_too_short": "Fenster zu kurz",
+      "bg_not_enabled": "auf Nicht-BG-Kopf",
       "not_feasible": "nicht möglich",
       "slicer": "Slicer",
       "printer": "Drucker",
@@ -242,7 +262,9 @@
       "head_plan_layer": "Belady / Layer (Loadout)",
       "head_go_loadout": "Mit aktuellem Loadout drucken",
       "head_go_optimize": "Vorgeschlagenes Loadout drucken",
-      "head_go_layer": "Belady-Loadout drucken"
+      "head_go_layer": "Belady-Loadout drucken",
+      "pref_bed_mesh": "Bett-Mesh",
+      "pref_camera": "Zeitraffer-Kamera"
     },
     "queue": {
       "send_all_tooltip": "Alle Queue-Befehle an den Drucker senden (UI darf danach geschlossen werden)",
@@ -253,6 +275,7 @@
   "msg": {
     "pause_swap_slot_empty": "[multiACE] Slot leer für Kopf {head} (ACE {ace} / Slot {slot}) - Filament einlegen, dann RESUME",
     "pause_swap_slot_empty_post": "[multiACE] Slot leer für Kopf {head} (ACE {ace} / Slot {slot}) nach Entladen - Filament einlegen, dann RESUME",
+    "pause_bg_pick_no_flow": "[multiACE] Pick-Check an Kopf {head}: kein Filamentfluss nach dem Hintergrund-Laden erkannt - Kopf/Duese pruefen, ggf. neu laden (Display/Web), dann RESUME",
     "pause_swap_unload_jam": "[multiACE] Entlade-Stau an Kopf {head} - ACE{ua}/Slot{us} entladen, ACE{la}/Slot{ls} laden, dann RESUME",
     "pause_swap_load_slip": "[multiACE] Ladeschlupf an Kopf {head} (ACE {ace} / Slot {slot}) - entladen, neu laden, dann RESUME",
     "pause_feed_load_jam": "[multiACE] Ladestau an Kopf {head}{loc} - über Display/Web neu laden, dann RESUME",
@@ -416,6 +439,7 @@
     "fa_test_failed_line": "[ACE_FA_TEST]     step={step} slot={slot} ({attempts} Versuche) → {msg}",
     "fa_test_more": "[ACE_FA_TEST]     ... {count} weitere",
     "fa_test_no_ack_header": "[ACE_FA_TEST]   NO_ACK (Firmware hat nie geantwortet):",
-    "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}"
+    "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}",
+    "unload_gate_empty": "[multiACE] Kopf {head}: ACE {ace} / Slot {slot} meldet LEER, obwohl der Toolhead noch Filament hält - vermutlich oberhalb des ACE-Gates leergelaufen oder gerissen. Die Maschine kann es nicht zurückziehen (das Ende ist aus den ACE-Zahnrädern): Kopf heizen, Bowden-Kupplung am Toolhead öffnen und das Filament von Hand herausziehen, dann den Slot neu bestücken."
   }
 }
