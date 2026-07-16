@@ -69,12 +69,12 @@
                 stroke-linecap="round"></path>
         </svg>
         <h3>{{ t('ui.dashboard.aces') }}</h3>
-        <p v-if="state.aces.length === 0 && !loadError" class="muted">
+        <p v-if="visibleAces.length === 0 && !loadError" class="muted">
           {{ t('ui.dashboard.no_aces') }}
         </p>
-        <div class="ace-grid">
-          <article v-for="ace in state.aces" :key="ace.idx" class="ace-card"
-                   :class="{primary: ace.idx === state.active_device, clickable: ace.idx !== state.active_device, 'ace-right': state.mode === 'head' && state.ace_head >= 2}"
+        <div class="ace-grid" :class="{'ace-grid-right': state.mode === 'head' && aceHeadsRightSide}">
+          <article v-for="ace in visibleAces" :key="ace.idx" class="ace-card"
+                   :class="{primary: ace.idx === state.active_device, clickable: ace.idx !== state.active_device}"
                    @click="ace.idx !== state.active_device && switchAce(ace.idx)">
             <h2>
               <span class="ace-name">ACE {{ dispIdx(ace.idx) }}
@@ -120,7 +120,7 @@
                 <button class="slot-load-btn"
                         :class="{reload: needsReload(ace.idx, slot.idx)}"
                         @click.stop="loadSlot(ace.idx, slot.idx)"
-                        :disabled="isPrinting || (state.mode === 'head' ? slotLoadedInHead(slot.idx) : (!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx)))"
+                        :disabled="isPrinting || (state.mode === 'head' ? slotLoadedInHead(ace.idx, slot.idx) : (!needsReload(ace.idx, slot.idx) && isToolheadOccupied(ace.idx, slot.idx)))"
                         :title="isPrinting ? t('ui.dashboard.blocked_printing') : (needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload_hint') : t('ui.dashboard.load'))">
                   {{ needsReload(ace.idx, slot.idx) ? t('ui.dashboard.reload') : t('ui.dashboard.load') }}
                 </button>
@@ -162,7 +162,12 @@
                    :class="{empty: !t_.module_exist, present: t_.head_source_known, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading'}">
             <h2>T{{ dispIdx(t_.idx) }}
               <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
-              <span class="th-color" v-if="t_.color && (t_.head_source_known || t_.manual || t_.feeder) && !toolheadOps[t_.idx]" :style="{background: t_.color}"></span>
+              <span class="th-color"
+                    v-if="(t_.color || t_.feeder) && (t_.head_source_known || t_.manual || t_.feeder) && !toolheadOps[t_.idx]"
+                    :class="{clickable: t_.feeder, empty: t_.feeder && !t_.color}"
+                    :style="t_.color ? {background: t_.color} : {}"
+                    @click="t_.feeder && openHeadPicker(t_)"
+                    :title="t_.feeder ? t('ui.dashboard.feeder_set_filament') : ''"></span>
             </h2>
             <p class="meta" v-if="toolheadOps[t_.idx]">
               <span class="muted">{{ toolheadOps[t_.idx] === 'loading' ? t('ui.dashboard.load') : t('ui.dashboard.unload') }}…</span>
@@ -204,7 +209,7 @@
                       :disabled="(!t_.head_source_known && !t_.filament_at_extruder) || isPrinting"
                       :title="isPrinting ? t('ui.dashboard.blocked_printing') : ''">{{ t('ui.dashboard.unload') }}</button>
             </div>
-            <label class="th-manual" v-if="t_.module_exist"
+            <label class="th-manual" v-if="t_.module_exist && state.mode !== 'head'"
                    :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
                    :title="(t_.head_source_known || t_.filament_at_extruder)
                      ? t('ui.dashboard.manual_unload_first')
@@ -214,11 +219,41 @@
                      @change="setHeadManual(t_.idx, $event.target.checked)">
               <span>{{ t('ui.dashboard.manual') }}</span>
             </label>
+            <label class="th-manual" v-if="t_.module_exist && state.mode === 'head'"
+                   :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
+                   :title="(t_.head_source_known || t_.filament_at_extruder)
+                     ? t('ui.dashboard.feeder_unload_first')
+                     : t('ui.dashboard.feeder_hint')">
+              <input type="checkbox" :checked="t_.feeder"
+                     :disabled="t_.head_source_known || t_.filament_at_extruder"
+                     @change="setHeadFeeder(t_.idx, $event.target.checked)">
+              <span>{{ t('ui.dashboard.feeder') }}</span>
+            </label>
+            <div class="th-ace-row" v-if="t_.module_exist && state.mode === 'head' && !t_.feeder && !t_.manual">
+              <label class="th-ace-pick"
+                     :class="{disabled: t_.head_source_known || t_.filament_at_extruder}"
+                     :title="(t_.head_source_known || t_.filament_at_extruder)
+                       ? t('ui.dashboard.head_ace_unload_first')
+                       : t('ui.dashboard.head_ace_hint')">
+                <span>{{ t('ui.dashboard.head_ace') }}</span>
+                <select :value="headAceOf(t_.idx)"
+                        :disabled="t_.head_source_known || t_.filament_at_extruder"
+                        @change="setHeadAce(t_.idx, $event.target.value)">
+                  <option v-for="o in aceOptionsForHead(t_.idx)" :key="o.value" :value="o.value">{{ o.label }}</option>
+                </select>
+              </label>
+              <label class="th-manual th-bg" v-if="state.bg_swap.available"
+                     :title="t('ui.dashboard.bg_hint')">
+                <input type="checkbox" :checked="bgEnabledFor(t_.idx)"
+                       @change="setBgHead(t_.idx, $event.target.checked)">
+                <span>{{ t('ui.dashboard.bg') }}</span>
+              </label>
+            </div>
           </article>
         </div>
       </div>
-      <h3 v-if="state.mode !== 'head'">{{ t('ui.dashboard.snapshots') }}</h3>
-      <div class="snapshot-row" v-if="state.mode !== 'head'">
+      <h3>{{ t('ui.dashboard.snapshots') }}</h3>
+      <div class="snapshot-row">
         <select v-model="selectedSnapshot">
           <option value="">- {{ t('ui.dashboard.snapshot_select_or_new') }} -</option>
           <option v-for="s in snapshots" :key="s.name" :value="s.name">
@@ -229,12 +264,17 @@
         <button @click="saveSnapshot" class="primary">{{ t('ui.dashboard.save_current') }}</button>
         <button @click="deleteSnapshot" :disabled="!selectedSnapshot" class="warn">×</button>
       </div>
-      <div v-if="snapshotPreview && state.mode !== 'head'" class="snapshot-preview">
+      <div v-if="snapshotPreview" class="snapshot-preview">
         <strong>{{ snapshotPreview.name }}</strong>
         <div class="snapshot-thds">
           <span v-for="t_ in snapshotPreview.toolheads" :key="t_.idx" class="snapshot-th"
                 :style="t_.color ? {background: t_.color} : {}">
-            T{{ dispIdx(t_.idx) }}: ACE {{ dispIdx(t_.ace) }}/{{ dispIdx(t_.slot) }}
+            <template v-if="t_.kind === 'feeder' || t_.ace == null">
+              T{{ dispIdx(t_.idx) }}: {{ t('ui.dashboard.feeder') }}
+            </template>
+            <template v-else>
+              T{{ dispIdx(t_.idx) }}: ACE {{ dispIdx(t_.ace) }}/{{ dispIdx(t_.slot) }}
+            </template>
             <em v-if="t_.material">{{ t_.material }}</em>
           </span>
         </div>
@@ -251,13 +291,8 @@
                 :key="m"
                 :class="{active: state.mode === m}"
                 @click="setMode(m)">{{ m }}</button>
-        <label class="ace-head-pick">
-          {{ t('ui.config.ace_head') }}
-          <select v-model.number="aceHeadSel">
-            <option v-for="h in [0,1,2,3]" :key="h" :value="h">{{ dispIdx(h) }}</option>
-          </select>
-        </label>
       </div>
+      <p v-if="state.mode === 'head'" class="muted small">{{ t('ui.config.head_mode_hint') }}</p>
       <h3>{{ t('ui.config.parameters') }}</h3>
       <div class="config-form">
         <div class="config-row">
@@ -549,7 +584,9 @@ reboot</pre>
   <div v-if="picker.show" class="overlay" @click.self="closePicker">
     <div class="dialog">
       <h3>
-        {{ t('ui.dialog.picker_title', {ace: dispIdx(picker.ace), slot: dispIdx(picker.slot)}) }}
+        {{ picker.head !== null && picker.head !== undefined
+             ? t('ui.dialog.picker_title_head', {head: dispIdx(picker.head)})
+             : t('ui.dialog.picker_title', {ace: dispIdx(picker.ace), slot: dispIdx(picker.slot)}) }}
         <button v-if="pickerHasRfid" class="rfid-btn" @click="readPickerRfid"
                 :style="pickerRfidStyle"
                 :title="t('ui.dialog.picker_read_rfid_hint')">
@@ -587,7 +624,8 @@ reboot</pre>
       <div class="row">
         <button @click="closePicker">{{ t('ui.common.cancel') }}</button>
         <button @click="savePicker(false)" class="primary">{{ t('ui.dialog.picker_save') }}</button>
-        <button @click="savePicker(true)" :disabled="isToolheadOccupied(picker.ace, picker.slot)">{{ t('ui.dialog.picker_load_after') }}</button>
+        <button v-if="picker.head === null || picker.head === undefined"
+                @click="savePicker(true)" :disabled="isToolheadOccupied(picker.ace, picker.slot)">{{ t('ui.dialog.picker_load_after') }}</button>
       </div>
     </div>
   </div>
@@ -626,6 +664,10 @@ reboot</pre>
         </div>
       </div>
       <template v-if="preflight.report">
+        <div class="preflight-prefs">
+          <label><input type="checkbox" v-model="preflight.bedMesh"> {{ t('ui.preflight.pref_bed_mesh') }}</label>
+          <label><input type="checkbox" v-model="preflight.camera"> {{ t('ui.preflight.pref_camera') }}</label>
+        </div>
         <template v-if="!preflight.report.head_mode">
         <h4>{{ t('ui.preflight.printer_loadout') }}</h4>
         <div class="preflight-grid">
@@ -738,6 +780,13 @@ reboot</pre>
                       @click="recalcSlicer">
                 {{ t('ui.preflight.recalc') }}
               </button>
+              <button v-if="mode !== 'slicer'"
+                      :disabled="preflight.sending !== '' || preflight.applying !== ''"
+                      @click="applyLoadout(mode)">
+                {{ preflight.applying === mode
+                     ? t('ui.preflight.applying')
+                     : t('ui.preflight.apply_loadout') }}
+              </button>
               <button class="primary"
                       :disabled="preflight.sending !== ''
                                  || (mode === 'slicer' && preflight.slicerDirty)"
@@ -754,7 +803,7 @@ reboot</pre>
         <template v-else>
           <h4>
             {{ t('ui.preflight.head_mode_title') }}
-            <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ dispIdx(preflight.report.ace_head) }}</span>
+            <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ (preflight.report.ace_heads && preflight.report.ace_heads.length ? preflight.report.ace_heads : [preflight.report.ace_head]).map(h => 'T' + dispIdx(h)).join(', ') }}</span>
           </h4>
 
           <h4>{{ t('ui.preflight.head_targets') }}</h4>
@@ -792,6 +841,7 @@ reboot</pre>
                 <h4>{{ t('ui.preflight.head_plan_' + hp) }}</h4>
                 <span v-if="headPlanFeasible(hp)" class="muted small">
                   {{ headPlanSwaps(hp) }} {{ t('ui.preflight.swaps_label') }}
+                  <span v-if="headPlanBg(hp)">· {{ headPlanBgLabel(hp) }}</span>
                   <span v-if="hp === 'loadout' && preflight.headDirty"
                         class="preflight-stale">· {{ t('ui.preflight.stale') }}</span>
                 </span>
@@ -814,19 +864,41 @@ reboot</pre>
                   <tr v-for="c in preflight.report.slicer_colors" :key="'hm-'+c.t"
                       :class="{warn: !headEffectiveTargetId(c.t)}">
                     <td>
-                      <select class="preflight-slot-select"
-                              :style="{background: headTargetColor(headEffectiveTargetId(c.t)),
-                                       color: textOn(headTargetColor(headEffectiveTargetId(c.t)))}"
-                              :value="headEffectiveTargetId(c.t)"
-                              @change="onHeadTargetChange(c.t, $event.target.value)">
-                        <option value="" style="background:#444;color:#fff">— {{ t('ui.preflight.not_feasible') }} —</option>
-                        <option v-for="tg in headTargetOptions(c.t)"
-                                :key="'hmo-'+c.t+'-'+tg.id"
-                                :value="tg.id"
-                                :style="{background: tg.color || '#444', color: textOn(tg.color)}">
-                          {{ headTargetLabel(tg) }}
-                        </option>
-                      </select>
+                      <!-- Custom dropdown: uniform background for every
+                           target (ACE + feeder alike), the filament colour
+                           as a chip NEXT to the label - in the closed button
+                           AND in the open list (native options can't render
+                           a partial-colour chip; Dirk 2026-07-10). Items
+                           pick on mousedown so the button's blur-close
+                           cannot swallow the click. -->
+                      <div class="hm-dd">
+                        <button type="button" class="hm-dd-btn"
+                                @click="hmDdToggle(c.t)"
+                                @keydown.esc="hmDdClose()"
+                                @blur="hmDdClose()">
+                          <span class="hm-dd-chip"
+                                :style="{background: headTargetColor(headEffectiveTargetId(c.t))}"></span>
+                          <span class="hm-dd-label">{{ headTargetLabelById(headEffectiveTargetId(c.t))
+                                || ('— ' + t('ui.preflight.not_feasible') + ' —') }}</span>
+                          <span class="hm-dd-caret">▾</span>
+                        </button>
+                        <div class="hm-dd-list" v-if="hmDropOpen === c.t">
+                          <div class="hm-dd-item"
+                               @mousedown.prevent="hmDdPick(c.t, '')">
+                            <span class="hm-dd-chip" style="background:#444"></span>
+                            <span>— {{ t('ui.preflight.not_feasible') }} —</span>
+                          </div>
+                          <div class="hm-dd-item"
+                               v-for="tg in headTargetOptions(c.t)"
+                               :key="'hmo-'+c.t+'-'+tg.id"
+                               :class="{sel: tg.id === headEffectiveTargetId(c.t)}"
+                               @mousedown.prevent="hmDdPick(c.t, tg.id)">
+                            <span class="hm-dd-chip"
+                                  :style="{background: tg.color || '#444'}"></span>
+                            <span>{{ headTargetLabel(tg) }}</span>
+                          </div>
+                        </div>
+                      </div>
                     </td>
                     <td>←</td>
                     <td>
@@ -871,6 +943,13 @@ reboot</pre>
                 <button v-if="hp === 'loadout' && preflight.headDirty"
                         @click="recalcHead">
                   {{ t('ui.preflight.recalc') }}
+                </button>
+                <button v-if="hp !== 'loadout' && headPlanFeasible(hp)"
+                        :disabled="preflight.sending !== '' || preflight.applying !== ''"
+                        @click="applyLoadout('head', hp)">
+                  {{ preflight.applying === hp
+                       ? t('ui.preflight.applying')
+                       : t('ui.preflight.apply_loadout') }}
                 </button>
                 <button class="primary"
                         :disabled="preflight.sending !== ''
