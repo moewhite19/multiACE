@@ -69,7 +69,16 @@
       "snapshots": "Filament Snapshots",
       "save_current": "Save current…",
       "snapshot_name_prompt": "Snapshot name (A-Z, 0-9, _-):",
-      "snapshot_select_or_new": "Select / New"
+      "snapshot_select_or_new": "Select / New",
+      "feeder_hint": "Feeder mode: this head loads/unloads via its stock side feeder; the ACE never touches it.",
+      "feeder_unload_first": "Unload this head first to change feeder mode.",
+      "head_ace": "ACE",
+      "head_ace_hint": "Which ACE feeds this head. The head can only load/swap this ACE’s slots.",
+      "head_ace_unload_first": "Unload this head first to change its ACE.",
+      "set_filament": "Filament",
+      "feeder_set_filament": "Set this feeder head’s filament colour/material",
+      "bg": "BG",
+      "bg_hint": "Background swaps: declares this head’s dock as OPEN below (the tip-form purge falls through it). Unloads then run while other heads print. Persisted."
     },
     "config": {
       "mode": "Mode",
@@ -135,7 +144,8 @@
       "debug_reboot_title": "Reboot the printer?",
       "debug_reboot_msg": "Sends /machine/reboot to Moonraker. Any running job is aborted.",
       "debug_reboot_sent": "Reboot command sent to Moonraker.",
-      "debug_reboot_failed": "Reboot failed"
+      "debug_reboot_failed": "Reboot failed",
+      "head_mode_hint": "Head mode: each head is ACE-driven by default. Toggle individual heads to \"Feeder\" on the dashboard to hand them to their stock side feeder."
     },
     "dialog": {
       "load_already_loaded_title": "T{slot} is already loaded",
@@ -169,7 +179,8 @@
       "picker_read_rfid": "Read RFID",
       "picker_read_rfid_hint": "Pull material, vendor and color from the slot's RFID tag",
       "picker_clear": "Clear",
-      "picker_clear_hint": "Remove the manual filament override for this slot"
+      "picker_clear_hint": "Remove the manual filament override for this slot",
+      "picker_title_head": "Set filament — T{head}"
     },
     "notifications": {
       "title": "multiACE alerts",
@@ -226,7 +237,16 @@
       "skip_calibration": "Skip bed leveling, flow calibration & timelapse",
       "swaps_label": "swaps",
       "recalc": "Recalculate swaps",
+      "apply_loadout": "Apply loadout",
+      "applying": "Applying…",
+      "apply_loadout_confirm": "Rearrange the spools to match this layout, then apply it. This sets {count} slot/head filament(s) & colours - it does not start a print.",
+      "apply_loadout_done": "Loadout applied ({count} slot/head filament(s) set)",
       "stale": "needs recalc",
+      "bg_label": "bg-swaps:",
+      "bg_saved": "saved",
+      "bg_no_m73": "no M73 time data",
+      "bg_too_short": "window(s) too short",
+      "bg_not_enabled": "on a non-BG head",
       "not_feasible": "not feasible",
       "slicer": "Slicer",
       "printer": "Printer",
@@ -242,7 +262,9 @@
       "head_plan_layer": "Belady / layer (loadout)",
       "head_go_loadout": "Print with current loadout",
       "head_go_optimize": "Print suggested loadout",
-      "head_go_layer": "Print Belady loadout"
+      "head_go_layer": "Print Belady loadout",
+      "pref_bed_mesh": "Bed mesh",
+      "pref_camera": "Timelapse camera"
     },
     "queue": {
       "send_all_tooltip": "Send all queued commands to the printer (UI can be closed afterwards)",
@@ -253,6 +275,7 @@
   "msg": {
     "pause_swap_slot_empty": "[multiACE] Slot empty for Head {head} (ACE {ace} / Slot {slot}) - load filament, then RESUME",
     "pause_swap_slot_empty_post": "[multiACE] Slot empty for Head {head} (ACE {ace} / Slot {slot}) after unload - load filament, then RESUME",
+    "pause_bg_pick_no_flow": "[multiACE] Pick check on Head {head}: no filament flow detected after the background load - check the head/nozzle, reload if needed (display/web), then RESUME",
     "pause_swap_unload_jam": "[multiACE] Unload jam on Head {head} - unload ACE{ua}/Slot{us}, load ACE{la}/Slot{ls}, then RESUME",
     "pause_swap_load_slip": "[multiACE] Load slip on Head {head} (ACE {ace} / Slot {slot}) - unload, reload, then RESUME",
     "pause_feed_load_jam": "[multiACE] Load jam on Head {head}{loc} - reload via display/web, then RESUME",
@@ -416,6 +439,7 @@
     "fa_test_failed_line": "[ACE_FA_TEST]     step={step} slot={slot} ({attempts} attempts) → {msg}",
     "fa_test_more": "[ACE_FA_TEST]     ... {count} more",
     "fa_test_no_ack_header": "[ACE_FA_TEST]   NO_ACK (firmware never responded):",
-    "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}"
+    "fa_test_no_ack_line": "[ACE_FA_TEST]     step={step} slot={slot}",
+    "unload_gate_empty": "[multiACE] Head {head}: ACE {ace} / Slot {slot} reports EMPTY while the toolhead still holds filament - it likely ran out or broke ABOVE the ACE gate. The machine cannot retract it (the tail is out of the ACE gears): heat the head, open the bowden coupling at the toolhead and pull the filament out by hand, then reload the slot."
   }
 }

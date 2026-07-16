@@ -8,40 +8,33 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 **Since the very first version I have been asked about this "occasionally", so I finally sat down and built it: ACE per head mode, which gives you 7 colors from a U1 with single ACE.**
 
-For now it works with one ACE only (either V1 or V2). I am setting up a sticky feedback thread in the Issues, and I would love to hear how it works out for you.
+**Now it got even better: 1-4 ACE 1 or ACE 2 units in per Head mode + Parked position background swaps**
 
-Just select head mode in config (tested with head 4 only, but selectable) and connect complete ACE with a 4in1 combiner to that head.
+**Please report how it works in the sticky issue**
+
+Note: swap orchestration is a first iteration, there is clear room for improvement, reserved for future versions. The hardware part ist still somewhat experimental, but i am looking for a better solution. Any ideas welcome.
+
+Just select head mode in config and connect complete ACE with a 4in1 combiner to that head. Activate BG to enable park position background swaps.
+
+
+
 Remaining Feeders work like Stock-Mode.
 
-## What's new in multiACE 0.99.2b "Persistent Pesterers" 
+## What's new in multiACE 0.99.5b "Persistent Pesterers" prerelease (comes without support for now)
+- Ace per Head mode up to 4 Aces / 7 Colors with U1 + just 1 ACE Pro
+- Parked position background swaps (per Head mode only, it is not possible in multi mode with Ace Hardware)
+- Ace per Head Preflight and Optimization Modes for Background swaps
+- Prepared for 1.5.1 Firmware
+- Many internal improvements
+
+## What's new in multiACE 0.99.3b "Persistent Pesterers" 
+- Assign Optimize Layout to ACE Slots / Auto replenish fix
 - Paxx 12-20  version available.
 - Ace per Head mode (1 ACE 1/2 only at the moment)  7 Colors with U1 + just 1 ACE Pro 
 - Ace per Head Preflight and Optimization Modes
 - Selectable Slots in multi and head preflight
 - Preflight is now computed on client pc (thanks @hfoi589 for initial js code)
 - Error corrections
-
-    ## Issues
-  - After flashing the bin over an older version, preflight in head mode may fail. Workaround: enable updates with touch /oem/.debug, then run the online update to 0.99.21b. Fixed in 12-20 reupload bin file.
-
-
-## What's new in multiACE 0.98.1b "Kindred Allies" Hotfix 1 (available via SSH or Online Update)
- 
-- Removed another Air-Print issue with ACE V2
-- RFID Filament Vendor now correctly imported.
-
-  ## Issues
-  - When manual (not normal) loading via the display, the ACE source can be assigned to the     wrong head, which can cause air printing. Will be fixed in Hotfix 2
-  - GUI Actions during print may stop FA, will be fixed
-
-## What's new in multiACE 0.98b "Kindred Allies" 
-
-- Manual Heads (for TPU usage) Preflight not supported atm.
-- Paxx 12-19  version available.
-- Matched to 1.4.1 Firmware routines.
-- Filament types synced from printer.
-- RFID Subtype is now displayed and set.
-- Error Corrections: Resume Bug, Filament runout an other problems solved.
 
 ## multiACE 
 
