@@ -44,7 +44,7 @@ Remaining Feeders work like Stock-Mode.
 
 > **Important Note:** Both the Snapmaker U1 and the Anycubic ACE Pro have their own quirks with filament loading/unloading, RFID detection (possibly related to tag sticker positioning), and occasional mechanical issues. Not every problem encountered is a multiACE issue - many are inherent to the underlying hardware. This is a beta release, not a production-ready solution. Whether these U1 and ACE Pro limitations can be resolved in the future remains to be seen.
 
-**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be - but it recovers to a pause if it fails, so you can solve the problem and continue. There is always room for improvement of course**
+**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be - but it recovers to a pause if it fails, so you can solve the problem and continue. There is always room for improvement of course, so please report errors**
 
 ## What is multiACE?
 
