@@ -44,7 +44,7 @@ Remaining Feeders work like Stock-Mode.
 
 > **Important Note:** Both the Snapmaker U1 and the Anycubic ACE Pro have their own quirks with filament loading/unloading, RFID detection (possibly related to tag sticker positioning), and occasional mechanical issues. Not every problem encountered is a multiACE issue - many are inherent to the underlying hardware. This is a beta release, not a production-ready solution. Whether these U1 and ACE Pro limitations can be resolved in the future remains to be seen.
 
-**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be - but it recovers to a pause if it fails, so you can solve the problem and continue.**
+**This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be - but it recovers to a pause if it fails, so you can solve the problem and continue. There is always room for improvement of course**
 
 ## What is multiACE?
 
@@ -126,7 +126,7 @@ Tip forming is one of several ACE/U1 load-unload quirks. The first approach here
 It doesn't produce as much poop as a cutter, that's an advantage.
 
 **Is it fast?**
-No. Tip forming instead of a cutter, plus the bowden length, retries, puts a single color swap at up to 3 minutes. And since swaps don't happen at the park position, every change adds directly to print time. That said, stock Snapmaker per-layer color changes aren't any faster and require manual intervention every time - here it's at least automated. Park-position swaps are an option for the future.
+No. Tip forming instead of a cutter, plus the bowden length, retries, puts a single color swap at up to 3 minutes. And since swaps don't happen at the park position, every change adds directly to print time. That said, stock Snapmaker per-layer color changes aren't any faster and require manual intervention every time - here it's at least automated. Park-position swaps are an experimental feature now and will speed up the process.
 
 **Does it work with ACE 2, AnkerMake Vivid, or other changers?**
 The Anycubic ACE 2 is supported as of 0.97b "Kindred Allies" - V1 (ACE Pro) and V2 (ACE 2) devices can run side by side. AnkerMake Vivid and other third-party changers are not supported. If you know another changer that is *proven* reliably better than the ACE Pro (and Klipper compatible), let me know - I've seen no trustworthy tests on the Vivid, and self-built machines are much pricier. multiACE aims for a solution anyone can set up.
@@ -150,7 +150,7 @@ Not automatically. Load failures trigger a pause (not a full abort), snapshot th
 Yes. `ACEF__Mode_Normal` switches to stock Snapmaker operation (no ACE code running). The uninstall script reverts everything with one command.
 
 **Will this work reliably?**
-No. Maybe yes. This is beta software, errors can and will show up. I've thoroughly tested it, but now it's up to you! Test and report errors - you're part of the team.
+This is beta software, errors can and will show up. I've thoroughly tested it, but now it's up to you! Test and report errors - you're part of the team.
 
 ## Hardware Setup
 
