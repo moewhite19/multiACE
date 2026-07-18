@@ -42,7 +42,7 @@ Remaining Feeders work like Stock-Mode.
 
 > ⚠️ **Beta Software** - This is a community-driven development project for enabling multiple Anycubic ACE Pro filament changers on Snapmaker printers. While carefully tested, it relies on community feedback and testing to mature. Use at your own risk. Please report issues and share your experience to help improve multiACE for everyone.
 
-> **Important Note:** Both the Snapmaker U1 and the Anycubic ACE Pro have their own quirks with filament loading/unloading, RFID detection (possibly related to tag sticker positioning), and occasional mechanical issues. Not every problem encountered is a multiACE issue - many are inherent to the underlying hardware. This is a beta release, not a production-ready solution. Whether these U1 and ACE Pro limitations can be resolved in the future remains to be seen.
+> **Important Note:** Both the Snapmaker U1 and the Anycubic ACE Pro have their own quirks with filament loading/unloading, RFID detection (possibly related to tag sticker positioning), and occasional mechanical issues. Some filaments like to stick in the toolhead after a few operations (Sunlu and Jayo). Not every problem encountered is a multiACE issue - many are inherent to the underlying hardware. This is a beta release, not a production-ready solution. Whether these U1 and ACE Pro limitations can be resolved in the future remains to be seen. 
 
 **This is NO AMS-like solution with 1000s of reliable swaps, and I don't think it ever will be. But it recovers to a pause if it fails. That does not not mean there is no room for improvements, so report errors and any ideas are welcome.**
 
