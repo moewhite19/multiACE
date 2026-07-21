@@ -1923,9 +1923,9 @@ class FilamentFeed:
                                             'TEMPERATURE_WAIT SENSOR="%s" MINIMUM=%d\r\n'
                                             % (self.toolhead.get_extruder().get_name(),
                                                filament_feed_temp))
-                                    self.gcode.run_script_from_command("M83\r\n")
-                                    self.gcode.run_script_from_command("G1 E%d F400\r\n" % probe_push)
-                                    self.toolhead.wait_moves()
+                                    # self.gcode.run_script_from_command("M83\r\n")
+                                    # self.gcode.run_script_from_command("G1 E%d F400\r\n" % probe_push)
+                                    # self.toolhead.wait_moves()
                                     pushed = True
                                 except:
                                     logging.info("[feed][unload] forward probe failed")
