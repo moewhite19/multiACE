@@ -61,6 +61,7 @@
       "manual_unload_first": "请先卸载此喷头再切换手动模式。",
       "swap_in_progress": "ACE 正在换料，请等待完成。",
       "dryer": "烘干",
+      "valve": "排湿阀",
       "duration": "时长",
       "aces": "ACE 设备",
       "toolheads": "工具头",

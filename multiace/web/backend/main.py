@@ -412,6 +412,7 @@ def _parse_state(status: dict) -> dict:
 
             "humidity":     a.get("humidity"),
             "dryer":        a.get("dryer_status") or {},
+            "valve_open":   a.get("valve_open", False),
             "feed_assist":  a.get("feed_assist", -1),
             "slots":        slots_out,
         })
@@ -524,6 +525,7 @@ def _parse_state(status: dict) -> dict:
         "language":           language,
         "display_index_base": idx_base,
         "dryer":              ace.get("dryer_status"),
+        "valve_open":         ace.get("valve_open", False),
         "swap_in_progress":   bool(ace.get("swap_in_progress", False)),
         "aces":               aces_out,
         "toolheads":          toolheads,

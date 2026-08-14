@@ -145,6 +145,7 @@
                   <strong>{{ ace.dryer.status }}</strong>
                   <span v-if="ace.dryer.target_temp"> · {{ ace.dryer.target_temp }} °C</span>
                   <span v-if="ace.dryer.remain_time"> · {{ Math.round(ace.dryer.remain_time / 60) }} min</span>
+                  <span v-if="ace.valve_open !== undefined"> · {{ t('ui.dashboard.valve') }}: {{ ace.valve_open ? '◉' : '○' }}</span>
                 </div>
               </div>
             </transition>

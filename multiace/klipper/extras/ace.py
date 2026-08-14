@@ -157,6 +157,8 @@ class MultiAce:
 
         self.feed_speed = config.getint('feed_speed', 50)
         self.retract_speed = config.getint('retract_speed', 50)
+        self.unload_async_retract = config.getboolean(
+            'unload_async_retract', False)
         self.retract_length = config.getint('retract_length', 100)
 
         self.feed_length = config.getint('feed_length', 0)
@@ -374,6 +376,7 @@ class MultiAce:
         self._fa_rearm_fails = {}
         self._fa_rearm_suspended = set()
         self._fa_intent_ts = {}
+        self._dryer_valve_open = {}
 
         self._v2_feed_check_check_length = config.getint(
             'v2_feed_check_check_length', 200, minval=3, maxval=254)
@@ -561,6 +564,9 @@ class MultiAce:
         self.gcode.register_command(
             'ACE_STOP_DRYING', self.cmd_ACE_STOP_DRYING,
             desc=self.cmd_ACE_STOP_DRYING_help)
+        self.gcode.register_command(
+            'ACE_VALVE_STATUS', self.cmd_ACE_VALVE_STATUS,
+            desc=self.cmd_ACE_VALVE_STATUS_help)
         self.gcode.register_command(
             'ACE_ENABLE_FEED_ASSIST', self.cmd_ACE_ENABLE_FEED_ASSIST,
             desc=self.cmd_ACE_ENABLE_FEED_ASSIST_help)
@@ -1932,6 +1938,15 @@ class MultiAce:
             return
         if not self.head_uses_ace(head_index):
             return
+        sensor = self.printer.lookup_object(
+            'filament_motion_sensor e%d_filament' % head_index, None)
+        if sensor is not None and not sensor.get_status(0).get(
+                'filament_detected', False):
+            logging.info(
+                '[multiACE] print-start: skipping FA for head %d - '
+                'filament not detected at toolhead (will be armed '
+                'by ACE_LOAD_HEAD after loading)' % head_index)
+            return
         target_ace = source['ace_index']
         target_slot = source['slot']
         if target_ace >= len(self._ace_devices):
@@ -1947,6 +1962,22 @@ class MultiAce:
         if self._active_device_index != target_ace:
             self._set_active_idx(target_ace)
         try:
+            # The pre-print ACE_LOAD_HEAD sequence drives every used head
+            # through FEED_ACT_LOAD, whose finally closes the FA gate and
+            # leaves _feed_assist_per_ace holding a stale slot that can equal
+            # target_slot. Left in place, _arm_fa_for short-circuits on
+            # prev_slot == slot (V1) or trusts the cache (V2) and never emits
+            # a real start_feed_assist, so the first print head runs with no
+            # assist. Drop the host-side cache for every ACE first so the arm
+            # below always sends a genuine start.
+            for _idx in list(self._feed_assist_per_ace.keys()):
+                if self._feed_assist_per_ace.get(_idx, -1) != -1:
+                    self._fa_trace(
+                        'print-start: clearing stale FA cache ACE %d slot %d '
+                        'before arming print head'
+                        % (_idx, self._feed_assist_per_ace[_idx]))
+                    self._feed_assist_per_ace[_idx] = -1
+            self._feed_assist_index = -1
             self._arm_fa_for(target_ace, target_slot)
             self.log_always(self._t('msg.print_start_fa_enabled',
                 ace=self._disp(target_ace), slot=self._disp(target_slot),
@@ -3044,9 +3075,9 @@ class MultiAce:
         if waited:
             self._fa_trace('command deferred until homing/probe finished')
 
-    def _arm_fa_for(self, idx, slot, from_recovery=False):
-        self._fa_trace('_arm_fa_for(idx=%d, slot=%d) called; gate=%s context=%s'
-                       % (idx, slot, self._auto_feed_enabled, self._fa_context))
+    def _arm_fa_for(self, idx, slot, from_recovery=False, force=False):
+        self._fa_trace('_arm_fa_for(idx=%d, slot=%d) called; gate=%s context=%s force=%s'
+                       % (idx, slot, self._auto_feed_enabled, self._fa_context, force))
         if not from_recovery:
             self._fa_rearm_reset(idx, slot)
 
@@ -3054,7 +3085,7 @@ class MultiAce:
             self._v2_active_rev_assist = False
             self._fa_trace('_v2_active_rev_assist cleared by _arm_fa_for')
 
-        if not self._auto_feed_enabled:
+        if not force and not self._auto_feed_enabled:
             logging.info(
                 '[multiACE] FA suppressed (gate off): idx=%d slot=%d' % (idx, slot))
             return
@@ -3735,7 +3766,32 @@ class MultiAce:
                 state['armed_since'] = None
                 state['armed_since_slot'] = None
                 _verify_to = self._fa_settle_after_stop + FA_ASSIST_VERIFY_MARGIN
+                _filament_present = True
+                if active_head is not None:
+                    try:
+                        _fs = self.printer.lookup_object(
+                            'filament_motion_sensor e%d_filament' % active_head,
+                            None)
+                        if _fs is not None:
+                            _filament_present = _fs.get_status(0).get(
+                                'filament_detected', False)
+                        if not _filament_present:
+                            _mod, _ch = self.EXTRUDER_MAP.get(
+                                active_head, (None, -1))
+                            if _mod is not None and _ch >= 0:
+                                _ff = self.printer.lookup_object(
+                                    'filament_feed %s' % _mod, None)
+                                if _ff is not None and _ch < len(
+                                        _ff.channel_state):
+                                    _st = _ff.channel_state[_ch]
+                                    if _st == 'preload_finish':
+                                        _filament_present = False
+                                    else:
+                                        _filament_present = True
+                    except Exception:
+                        _filament_present = True
                 if (target_slot is not None
+                        and _filament_present
                         and self._feed_assist_per_ace.get(idx, -1) == target_slot
                         and self._auto_feed_enabled
                         and self._fa_context == 'print'
@@ -3771,6 +3827,7 @@ class MultiAce:
                                     idx, last_idx, new_state))
                             self._clear_fa_cache_for(idx, last_idx)
                             if (target_slot == last_idx and self._auto_feed_enabled
+                                    and _filament_present
                                     and self._fa_context in ('print', 'load')
                                     and not _extrude_idle
                                     and not getattr(self, '_v2_active_rev_assist', False)
@@ -3785,6 +3842,7 @@ class MultiAce:
                 if (target_slot is not None
                         and active_head is not None
                         and self.head_uses_ace(active_head)
+                        and _filament_present
                         and self._feed_assist_per_ace.get(idx, -1) == -1
                         and self._auto_feed_enabled
                         and self._fa_context == 'print'
@@ -3876,8 +3934,11 @@ class MultiAce:
                     cdisp['cand_since'] = eventtime
                 held = eventtime - cdisp['cand_since']
                 want_mode = 2 if direction == 'fwd' else 3
+                _confirm = self._v2_assist_confirm_time
+                if getattr(self, '_v2_active_rev_assist', False):
+                    _confirm = 0.05
                 if (want_mode != cdisp['mode']
-                        and held >= self._v2_assist_confirm_time):
+                        and held >= _confirm):
                     cdisp['mode'] = want_mode
                     if getattr(self, '_v2_active_rev_assist', False):
                         self._v2_dispatch_mode_switch(
@@ -4362,6 +4423,11 @@ class MultiAce:
         self.send_request(
             request={"method": "drying", "params": {"temp": temperature, "fan_speed": 7000, "duration": duration}},
             callback=callback)
+        self.reactor.pause(self.reactor.monotonic() + 2.0)
+        self.send_request(
+            request={"method": "set_valve", "params": {"v1": 1, "v2": 1}},
+            callback=lambda self, response: None)
+        self._dryer_valve_open[self._active_device_index] = True
 
     cmd_ACE_STOP_DRYING_help = '[multiACE] Stop ACE Pro dryer. Usage: ACE_STOP_DRYING [ACE=N]'
 
@@ -4387,26 +4453,57 @@ class MultiAce:
 
         self.wait_ace_ready_on(ace_idx)
         self.send_request_to(ace_idx, {"method": "drying_stop"}, callback)
+        self._dryer_valve_open[ace_idx] = False
 
-    def _enable_feed_assist(self, index):
+    def _enable_feed_assist(self, index, force=False):
 
         if self._feed_assist_index != -1 and self._feed_assist_index != index:
             self.wait_ace_ready()
             self._retract(self._feed_assist_index, 5, 80)
         self.wait_ace_ready()
-        self._arm_fa_for(self._active_device_index, index)
+        self._arm_fa_for(self._active_device_index, index, force=force)
         self.wait_ace_ready()
         self.dwell(delay=0.7)
 
-    cmd_ACE_ENABLE_FEED_ASSIST_help = 'Enables ACE feed assist'
+    cmd_ACE_ENABLE_FEED_ASSIST_help = ('Enables ACE feed assist on the active device. '
+                                       'INDEX is optional; when omitted the current '
+                                       'toolhead slot is used.')
 
     def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
-        index = gcmd.get_int('INDEX')
+        index_str = gcmd.get('INDEX', None)
+
+        if index_str is not None:
+            index = gcmd.get_int('INDEX')
+        else:
+            try:
+                cur_ext = self.toolhead.get_extruder()
+                head = getattr(cur_ext, 'extruder_index',
+                               getattr(cur_ext, 'extruder_num', 0))
+            except Exception:
+                head = 0
+            src = self._head_source.get(head)
+            if src is not None and isinstance(src.get('slot'), int):
+                index = src['slot']
+            else:
+                raise gcmd.error(
+                    '[multiACE] Cannot auto-complete INDEX: head %d has '
+                    'no filament source (not loaded). Specify INDEX '
+                    'explicitly or load filament first.'
+                    % self._disp(head))
 
         if index < 0 or index >= 4:
             raise gcmd.error('Wrong index')
 
-        self._enable_feed_assist(index)
+        # Reject if the target head is in manual (feeder/TPU) mode
+        check_head = (self._head_for_ace(self._active_device_index)
+                      if getattr(self, '_ace_mode', 'multi') == 'head'
+                      else index)
+        if check_head is not None and self.head_is_manual(check_head):
+            raise gcmd.error(
+                '[multiACE] Cannot enable feed assist: head %d is '
+                'set to manual (TPU/bypass)' % self._disp(check_head))
+
+        self._enable_feed_assist(index, force=True)
 
     def _disable_feed_assist(self, index=-1):
 
@@ -4419,10 +4516,32 @@ class MultiAce:
         self._retract(rt_index, 5, 80)
         self.dwell(0.3)
 
-    cmd_ACE_DISABLE_FEED_ASSIST_help = 'Disables ACE feed assist'
+    cmd_ACE_DISABLE_FEED_ASSIST_help = ('Disables ACE feed assist. INDEX is optional; '
+                                        'when omitted the current toolhead slot is used.')
 
     def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
-        index = gcmd.get_int('INDEX', self._feed_assist_index)
+        index_str = gcmd.get('INDEX', None)
+
+        if index_str is not None:
+            index = gcmd.get_int('INDEX')
+        else:
+            try:
+                cur_ext = self.toolhead.get_extruder()
+                head = getattr(cur_ext, 'extruder_index',
+                               getattr(cur_ext, 'extruder_num', 0))
+            except Exception:
+                head = 0
+            src = self._head_source.get(head)
+            if src is not None and isinstance(src.get('slot'), int):
+                index = src['slot']
+            else:
+                index = self._feed_assist_index
+                if index < 0:
+                    raise gcmd.error(
+                        '[multiACE] Cannot auto-complete INDEX: head %d has '
+                        'no filament source (not loaded) and no active feed '
+                        'assist. Specify INDEX explicitly.'
+                        % self._disp(head))
 
         if index < 0 or index >= 4:
             raise gcmd.error('Wrong index')
@@ -5865,19 +5984,25 @@ class MultiAce:
             self._set_active_idx(target_ace)
 
         current_target_slot = self._feed_assist_per_ace.get(target_ace, -1)
-        if current_target_slot != target_slot:
+        # Always schedule the deferred start, even when the host cache already
+        # equals target_slot: the pre-print ACE_LOAD_HEAD sequence can leave a
+        # stale cache entry that matches, and _arm_fa_for's own V2 stale-cache
+        # check is the reliable arbiter of whether the device is really
+        # assisting. Skipping the start here on a cache match is what left the
+        # first print head without assist when the first tool was not the last
+        # one loaded.
+        if True:
 
             target_ace_local = target_ace
             target_slot_local = target_slot
             head_index_local = head_index
+            # Wait for the FA gate up to ~10 min (covers the whole pre-print
+            # load+level sequence); the stale-head check inside the timer is
+            # the normal exit long before this cap is ever reached.
+            gate_retry_state = {'count': 0, 'max': 6000}
             def _deferred_fa_start(eventtime):
-                if not self._auto_feed_enabled:
-                    self._fa_trace(
-                        '_on_extruder_change deferred start SUPPRESSED '
-                        '(gate closed): head=%d idx=%d slot=%d'
-                        % (head_index_local, target_ace_local, target_slot_local))
-                    return self.reactor.NEVER
-
+                # Bail out early if the active head has already moved on - no
+                # point waiting for the gate to open for a stale tool change.
                 try:
                     cur_ext = self.toolhead.get_extruder()
                     cur_head = getattr(cur_ext, 'extruder_index',
@@ -5890,6 +6015,53 @@ class MultiAce:
                         '(stale head): expected=%d actual=%s'
                         % (head_index_local, cur_head))
                     return self.reactor.NEVER
+
+                if not self._auto_feed_enabled:
+                    # print_stats:start fires when the sdcard starts reading the
+                    # file - BEFORE the pre-print load sequence. Each
+                    # FEED_ACT_LOAD then closes the gate again in its finally,
+                    # so by the time the start macro switches back to the first
+                    # used head the gate is closed and no further print-start
+                    # event will reopen it. If we are genuinely mid-print here,
+                    # that close was spurious: reopen the gate and arm now
+                    # instead of waiting forever.
+                    _printing = False
+                    try:
+                        _ps = self.printer.lookup_object('print_stats', None)
+                        if _ps is not None:
+                            _printing = (_ps.get_status(eventtime).get('state')
+                                         == 'printing')
+                    except Exception:
+                        _printing = False
+                    if _printing:
+                        self._fa_trace(
+                            '_on_extruder_change deferred start: gate closed '
+                            'but print_stats=printing (spurious close by load '
+                            'finally) - reopening gate for head=%d idx=%d '
+                            'slot=%d'
+                            % (head_index_local, target_ace_local,
+                               target_slot_local))
+                        self._auto_feed_enabled = True
+                        self._fa_context = 'print'
+                        # fall through to the arm below
+                    else:
+                        gate_retry_state['count'] += 1
+                        if gate_retry_state['count'] > gate_retry_state['max']:
+                            self._fa_trace(
+                                '_on_extruder_change deferred start ABANDONED '
+                                '(gate never opened, %d polls): head=%d idx=%d '
+                                'slot=%d'
+                                % (gate_retry_state['max'], head_index_local,
+                                   target_ace_local, target_slot_local))
+                            return self.reactor.NEVER
+                        if gate_retry_state['count'] in (1, 50, 200, 600):
+                            self._fa_trace(
+                                '_on_extruder_change deferred start: gate '
+                                'closed (pre-print, not printing yet), '
+                                'waiting, poll #%d: head=%d idx=%d slot=%d'
+                                % (gate_retry_state['count'], head_index_local,
+                                   target_ace_local, target_slot_local))
+                        return eventtime + 0.1
                 try:
                     self._arm_fa_for(target_ace_local, target_slot_local)
                 except Exception as e:
@@ -6237,6 +6409,40 @@ class MultiAce:
             logging.info('[multiACE] Load: switching to %s (was %s)' % (target_ext, active_ext))
             self.gcode.run_script_from_command('T%d A0' % head)
             self.toolhead.wait_moves()
+        else:
+            # Already on the target head: the T command above is skipped, so
+            # no 'extruder:activate_extruder' event fires and _on_extruder_change
+            # never runs - the feed assist would stay armed on whichever head
+            # was active before (e.g. the head grabbed at print start). Route
+            # the FA to this head explicitly so the load below feeds with the
+            # correct assist. _arm_fa_for is a no-op if the slot is genuinely
+            # already assisting, so this is safe when nothing changed.
+            src = self._head_source.get(head)
+            if src is not None and self.head_uses_ace(head):
+                _ace = src.get('ace_index')
+                _slot = src.get('slot')
+                # Arm unconditionally: the host FA cache may be stale from the
+                # load sequence and match _slot even though the device dropped
+                # assist, so a cache-match guard here would reintroduce the
+                # bug. _arm_fa_for's own checks keep a genuine re-arm idempotent.
+                if (isinstance(_ace, int) and isinstance(_slot, int)
+                        and 0 <= _ace < len(self._ace_devices)
+                        and self._connected_per_ace.get(_ace, False)):
+                    logging.info(
+                        '[multiACE] Load: head %d already active - arming FA '
+                        'on ACE %d slot %d (no extruder-change event fired)'
+                        % (head, _ace, _slot))
+                    # Open the gate for the load context first - otherwise the
+                    # arm below is suppressed while the previous head's load
+                    # finally left the gate closed.
+                    self._auto_feed_enabled = True
+                    self._fa_context = 'load'
+                    try:
+                        self._arm_fa_for(_ace, _slot)
+                    except Exception as fa_e:
+                        logging.info(
+                            '[multiACE] Load: FA arm on already-active head '
+                            'failed: %s' % fa_e)
 
         module, channel = self.EXTRUDER_MAP[head]
 
@@ -7595,6 +7801,21 @@ class MultiAce:
         v2 = bool(gcmd.get_int('V2', 0))
         self._v2_dispatch_and_wait(gcmd, idx, 'set_valve', {'v1': v1, 'v2': v2})
 
+    cmd_ACE_VALVE_STATUS_help = '[multiACE] Show tracked valve state per ACE'
+    def cmd_ACE_VALVE_STATUS(self, gcmd):
+        for i in sorted(self._dryer_valve_open.keys()):
+            ds = (self._info_per_ace.get(i, {}) or {}).get('dryer_status', {}) or {}
+            d_status = (ds.get('status') if isinstance(ds, dict) else '?')
+            target = int(ds.get('target_temp', 0) or 0)
+            remain = int(ds.get('remain_time', 0) or 0)
+            self.gcode.respond_raw(
+                '[multiACE] ACE %d valve=%s dryer=%s target=%d C remain=%d min' %
+                (i, 'open' if self._dryer_valve_open[i] else 'closed',
+                 d_status, target, remain))
+        if not self._dryer_valve_open:
+            self.gcode.respond_raw(
+                '[multiACE] No tracked valve state. Dryer has not been started.')
+
     cmd_A_FEEDCHECK_help = '[multiACE] V2 cmd 19 SET_FEED_CHECK. Usage: A_FEEDCHECK [ACE=0] [CHECK=254] [ERROR=254]  (default 254/254 = disabled; hakimio table: 100/90 gklib, 200/185 recommended, 200/196 aggressive, 254/254 disabled)'
     def cmd_A_FEEDCHECK(self, gcmd):
         idx = self._v2_resolve_ace(gcmd)
@@ -8785,6 +9006,7 @@ class MultiAce:
 
                 'humidity':     info.get('humidity'),
                 'dryer_status': info.get('dryer_status', {}),
+                'valve_open':   self._dryer_valve_open.get(i, False),
                 'gate_status':  self._gate_status_per_ace.get(i, []),
                 'feed_assist':  self._feed_assist_per_ace.get(i, -1),
                 'slots':        slots_out,
@@ -8795,6 +9017,7 @@ class MultiAce:
             'status': self._info['status'],
             'temp': self._info['temp'],
             'dryer_status': self._info['dryer_status'],
+            'valve_open':   self._dryer_valve_open.get(self._active_device_index, False),
             'gate_status': self.gate_status,
             'active_device': self._active_device_index,
             'device_count': len(self._ace_devices),

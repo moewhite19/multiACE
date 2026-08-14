@@ -63,6 +63,7 @@
       "manual_unload_first": "Unload this head first to change manual mode.",
       "swap_in_progress": "An ACE swap is in progress — please wait until it completes.",
       "dryer": "Dryer",
+      "valve": "Valve",
       "duration": "Duration",
       "aces": "ACEs",
       "toolheads": "Toolheads",
