@@ -1,0 +1,6 @@
+.idea/
+__pycache__/
+*.pyc
+upload_multiace.bat
+upload_multiace.py
+.gitattributes
