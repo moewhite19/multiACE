@@ -1947,6 +1947,12 @@ class MultiAce:
                 'filament not detected at toolhead (will be armed '
                 'by ACE_LOAD_HEAD after loading)' % head_index)
             return
+        if getattr(self, '_print_has_gcode_loads', False):
+            logging.info(
+                '[multiACE] print-start: print gcode auto-loads filament - '
+                'skipping pre-arm for head %d (FEED_ACT_LOAD will arm the '
+                'loaded head instead of leaving stale FA)' % head_index)
+            return
         target_ace = source['ace_index']
         target_slot = source['slot']
         if target_ace >= len(self._ace_devices):
