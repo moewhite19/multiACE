@@ -25,6 +25,12 @@ PRINTER_CFG="${HOME_DIR}/printer_data/config/printer.cfg"
 LOG_DIR="${HOME_DIR}/printer_data/logs"
 mkdir -p "$LOG_DIR" 2>/dev/null
 LOGFILE="${LOG_DIR}/multiace_install.log"
+# Dual-user log self-heal (same class as ace_mode_switch.log): a root SSH
+# install creates this file root-owned, the web self-update then runs as
+# lava and tee could not append -> the pipeline failed -> set -e killed
+# the update right after the first log line. Make the file appendable for
+# both users; never let a failed log write abort an install (see log()).
+( touch "$LOGFILE" && chmod 0666 "$LOGFILE" ) 2>/dev/null || true
 IS_ROOT=0
 if [ "$(id -u)" = "0" ]; then
     IS_ROOT=1
@@ -39,7 +45,9 @@ run_as_lava() {
     fi
 }
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [multiACE] $1" | tee -a "$LOGFILE"
+    _line="$(date '+%Y-%m-%d %H:%M:%S') [multiACE] $1"
+    echo "$_line"
+    { echo "$_line" >> "$LOGFILE"; } 2>/dev/null || true
 }
 log "=== multiACE Installation ==="
 log "Install from: $INSTALL_DIR"
@@ -51,6 +59,7 @@ for f in \
     "klipper/extras/filament_feed_ace.py" \
     "klipper/extras/filament_switch_sensor_ace.py" \
     "klipper/extras/ace_bg_swap.py" \
+    "klipper/extras/ace_tipform.py" \
     "klipper/kinematics/extruder_ace.py" \
     "config/extended/ace.cfg" \
     "config/extended/multiace/ace_mode_switch.sh" \
@@ -62,6 +71,18 @@ do
     fi
 done
 log "All source files found"
+# CONFIG_DIR is OURS to create - the klipper dirs are not. printer_data/
+# config/extended exists on a PAXX box (S49extended-config mirrors it) and
+# on any box that ran an earlier install, but NOT on clean stock firmware:
+# there the installer aborted with "Target directory not found" and the user
+# had to mkdir it by hand (forum report, stock 1.5.2, 2026-08-19). Our
+# include points straight at extended/ace.cfg, so the directory needs no
+# PAXX machinery behind it - creating it is enough.
+if [ ! -d "$CONFIG_DIR" ]; then
+    if mkdir -p "$CONFIG_DIR" 2>/dev/null; then
+        log "Created config directory: $CONFIG_DIR"
+    fi
+fi
 for d in "$EXTRAS_DIR" "$KINEMATICS_DIR" "$CONFIG_DIR"; do
     if [ ! -d "$d" ]; then
         log "ERROR: Target directory not found: $d"
@@ -69,6 +90,30 @@ for d in "$EXTRAS_DIR" "$KINEMATICS_DIR" "$CONFIG_DIR"; do
     fi
 done
 log "Target directories verified"
+# OVERLAY PERSISTENCE GATE. Root is an overlay whose upper layer lives at
+# /oem/overlay/upper, and the firmware WIPES that layer on every boot unless
+# /oem/.debug exists. Everything we write under /home/lava/klipper/ is in
+# that layer; ace.cfg is not (printer_data is persistent). So without the
+# flag an install looks perfect, survives until the next reboot, and then
+# Klipper halts with "Section 'ace' is not a valid config section" - the
+# config is still included but the extras are gone. Clean stock firmware
+# ships WITHOUT the flag (HW 2026-08-20, stock 1.5.2), so this bit people
+# who never had to think about it. Creating the flag only takes effect at
+# the NEXT boot, which is why we set it and say so rather than trying to
+# work around it.
+if [ ! -e /oem/.debug ]; then
+    if touch /oem/.debug 2>/dev/null; then
+        sync 2>/dev/null || true
+        OVERLAY_FLAG_CREATED=1
+        log "  NOTE: /oem/.debug was missing - created it."
+        log "        Without it the firmware wipes /home/lava/klipper on"
+        log "        every boot and multiACE would vanish after a reboot."
+    else
+        log "  WARNING: /oem/.debug is missing and could not be created"
+        log "           (run the installer as root). Without it this"
+        log "           install will NOT survive a reboot."
+    fi
+fi
 log "Backing up current files..."
 for f in "filament_feed.py" "filament_switch_sensor.py"; do
     if [ -f "$EXTRAS_DIR/$f" ] && [ ! -f "$EXTRAS_DIR/${f%.py}_pre_multiace.py" ]; then
@@ -97,7 +142,9 @@ cp "$INSTALL_DIR/klipper/extras/filament_switch_sensor_ace.py" "$EXTRAS_DIR/fila
 # ([ace_bg_swap]) - always shipped so opting in is a config-only step and a
 # stale copy can never shadow a new ace.py.
 cp "$INSTALL_DIR/klipper/extras/ace_bg_swap.py" "$EXTRAS_DIR/ace_bg_swap.py"
-chmod 644 "$EXTRAS_DIR/ace.py" "$EXTRAS_DIR/ace_protocol.py" "$EXTRAS_DIR/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v2.py" "$EXTRAS_DIR/filament_feed_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py" "$EXTRAS_DIR/ace_bg_swap.py"
+# Per-material tip-forming tables ([ace_tipform] section, inert on 'stock')
+cp "$INSTALL_DIR/klipper/extras/ace_tipform.py" "$EXTRAS_DIR/ace_tipform.py"
+chmod 644 "$EXTRAS_DIR/ace.py" "$EXTRAS_DIR/ace_protocol.py" "$EXTRAS_DIR/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v2.py" "$EXTRAS_DIR/filament_feed_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py" "$EXTRAS_DIR/ace_bg_swap.py" "$EXTRAS_DIR/ace_tipform.py"
 log "  Klipper extras installed"
 cp "$INSTALL_DIR/klipper/kinematics/extruder_ace.py" "$KINEMATICS_DIR/extruder_ace.py"
 chmod 644 "$KINEMATICS_DIR/extruder_ace.py"
@@ -127,6 +174,32 @@ if [ -f "$MCU_PY" ] && grep -qE '^TRSYNC_TIMEOUT = ' "$MCU_PY"; then
         log "  TRSYNC_TIMEOUT already >= ${TRSYNC_VALUE} (${TRSYNC_CUR}) - leaving stock untouched"
     fi
 fi
+# Same 0003/"Timer too close" family as the trsync raise above: pre-warm the
+# klipper page cache at every boot so the homing/probe window never takes a
+# cold page fault (see the script header for details). Needs root for
+# /etc/init.d; a lava-context web update skips it with a note (the previously
+# installed copy keeps running). Also run it ONCE right now so the current
+# session is warmed without a reboot.
+if [ -f "$INSTALL_DIR/deploy/S59multiace-prewarm" ]; then
+    if [ "$IS_ROOT" = "1" ]; then
+        cp "$INSTALL_DIR/deploy/S59multiace-prewarm" /etc/init.d/S59multiace-prewarm
+        sed -i 's/\r$//' /etc/init.d/S59multiace-prewarm
+        chmod 0755 /etc/init.d/S59multiace-prewarm
+        log "  Installed init script: /etc/init.d/S59multiace-prewarm (klipper page-cache prewarm)"
+        /etc/init.d/S59multiace-prewarm start >>"$LOGFILE" 2>&1 || true
+    else
+        log "  SKIP: S59multiace-prewarm install needs root (existing copy stays active)"
+    fi
+fi
+prune_cfg_backups() {
+    # Keep only the newest 3 timestamped ace.cfg backups - the names sort
+    # chronologically, so this needs no stat/find. Without it every install
+    # adds one forever (Dirk: the config already grows such a list).
+    ls -1 "$ACTIVE_CFG".bak.* 2>/dev/null | sort | head -n -3 | while read -r old_bak; do
+        rm -f "$old_bak" && log "  pruned old config backup: $old_bak"
+    done
+}
+
 NEW_CFG="$INSTALL_DIR/config/extended/ace.cfg"
 ACTIVE_CFG="$CONFIG_DIR/ace.cfg"
 MERGER="$INSTALL_DIR/tools/merge_ace_cfg.py"
@@ -137,6 +210,7 @@ elif [ -f "$ACTIVE_CFG" ] && [ -f "$MERGER" ]; then
     ts=$(date -u '+%Y%m%d-%H%M%S')
     backup="$ACTIVE_CFG.bak.$ts"
     cp "$ACTIVE_CFG" "$backup"
+    prune_cfg_backups
     tmp_out="$ACTIVE_CFG.merged.$$"
     if python3 "$MERGER" "$ACTIVE_CFG" "$NEW_CFG" "$tmp_out"; then
         mv "$tmp_out" "$ACTIVE_CFG"
@@ -154,6 +228,7 @@ else
         ts=$(date -u '+%Y%m%d-%H%M%S')
         backup="$ACTIVE_CFG.bak.$ts"
         cp "$ACTIVE_CFG" "$backup"
+        prune_cfg_backups
         log "  existing ace.cfg backed up to $backup"
     fi
     cp "$NEW_CFG" "$ACTIVE_CFG"
@@ -509,16 +584,29 @@ PYEOF
         "$INITD_SCRIPT" stop  >>"$LOGFILE" 2>&1 || true
         "$INITD_SCRIPT" start >>"$LOGFILE" 2>&1 || log "  WARN: start failed - see $LOGFILE"
         sleep 1
-        if "$INITD_SCRIPT" status 2>/dev/null | grep -q "running"; then
+        # Judge by the status EXIT CODE, not by grepping the text: the old
+        # `grep -q "running"` also matched "not running", so the installer
+        # reported "multiACE Web running" unconditionally - on 2026-08-05
+        # that green light hid an Errno-98 bind failure while the
+        # pre-update backend kept serving stale code all evening.
+        if "$INITD_SCRIPT" status >>"$LOGFILE" 2>&1; then
             log "  multiACE Web running"
             log "  -> http://<printer-ip>/multiace/"
         else
-            log "  WARN: multiACE Web not running - check $LOGFILE and $WEB_DEST/backend/"
+            log "  WARN: multiACE Web NOT healthy - check $LOGFILE and $WEB_DEST/backend/"
         fi
     else
         if pgrep -u lava -f 'uvicorn.*main:app' >/dev/null 2>&1; then
             pkill -TERM -u lava -f 'uvicorn.*main:app' 2>/dev/null || true
             log "  Sent SIGTERM to running uvicorn (restart needed for new code)"
+        fi
+        # A root-owned instance (S98 boot / web-update context) is out of
+        # lava's reach - the pkill above cannot touch it and the fresh code
+        # will NOT serve until a reboot. Say so instead of staying silent.
+        sleep 2
+        if netstat -tln 2>/dev/null | grep -q ':7126 '; then
+            log "  WARN: :7126 still served by an instance we cannot replace"
+            log "        (root-owned?) - new web code is NOT live until reboot"
         fi
         log "  Skipped service restart (non-root context) - reboot or use Web Restart"
     fi
@@ -553,4 +641,12 @@ fi
 log ""
 log "=== Installation complete ==="
 log "Please reboot the printer to activate multiACE."
+# Repeat the overlay note at the END too: the install output is long and a
+# line from the top scrolls away long before the user reads the result.
+if [ "${OVERLAY_FLAG_CREATED:-0}" = "1" ]; then
+    log ""
+    log "NOTE: /oem/.debug did not exist and was created by this install."
+    log "      It makes the Klipper-side files survive a reboot; it takes"
+    log "      effect from the next boot on. Reboot now."
+fi
 log ""
