@@ -980,13 +980,13 @@ class FilamentFeed:
             self.ace._active_device_index) if self.ace is not None else 80
 
         self.gcode.run_script_from_command("G1 E-5.5 F40\r\n")
-        self._ace_unwind_sync(ace_slot, 5.5, _retract_spd)
+        self._ace_unwind_sync(ace_slot, 8, 30)
         self.toolhead.wait_moves()
         if self.ace is not None:
             self.ace.wait_ace_ready()
 
         self.gcode.run_script_from_command("G1 E-37.5 F1500\r\n")
-        self._ace_unwind_sync(ace_slot, 107.5, _retract_spd)
+        self._ace_unwind_sync(ace_slot, 147.5, _retract_spd)
         self.toolhead.wait_moves()
         if self.ace is not None:
             self.ace.wait_ace_ready()

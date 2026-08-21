@@ -2566,6 +2566,7 @@ class MultiAce:
         if self._ace_mode in ('multi', 'head'):
 
             self._ghost_heads = set()
+            self._reset_fa_state_on_print_start()
             stale_heads = []
             ghost_heads = []
             manual_loaded_heads = []
@@ -2729,6 +2730,9 @@ class MultiAce:
             return
         source = self._head_source.get(head_index)
         if source is None:
+            logging.info(
+                '[multiACE] print-start: head %d has no source - skip '
+                '(no FA pre-arm)' % head_index)
             return
         if not self.head_uses_ace(head_index):
 
@@ -4584,6 +4588,45 @@ class MultiAce:
             self._feed_assist_index = -1
         if any_running:
             self.dwell(0.3)
+
+    def _reset_fa_state_on_print_start(self):
+        """At print start, clear any residual feed-assist state BOTH in the
+        ACE firmware and in the host cache. A power-cycle clears both, so a
+        non-rebooted printer can otherwise resume a stale FA (the ACE keeps
+        the last-used slot armed and starts feeding it on the next print).
+
+        Sends a real stop_feed_assist for every slot of every connected ACE
+        (V2 included - unlike _disable_feed_assist_all which keeps V2 armed),
+        then clears the host caches and the rollback-assist flag."""
+        if not self._ace_mode in ('multi', 'head'):
+            return
+        def _noop_cb(self, response):
+            pass
+        try:
+            for idx in sorted(self._connected_per_ace.keys()):
+                if not self._connected_per_ace.get(idx, False):
+                    continue
+                try:
+                    self.wait_ace_ready_on(idx)
+                except Exception:
+                    pass
+                for slot in range(4):
+                    try:
+                        self.send_request_to(idx, {
+                            'method': 'stop_feed_assist',
+                            'params': {'index': slot}}, _noop_cb)
+                    except Exception:
+                        pass
+                logging.info(
+                    '[multiACE] print-start: sent stop_feed_assist to all '
+                    'slots on ACE %d (clear residual firmware FA)' % idx)
+        except Exception as e:
+            logging.info('[multiACE] print-start FA reset error: %s' % e)
+        self._feed_assist_per_ace.clear()
+        self._feed_assist_index = -1
+        setattr(self, '_v2_active_rev_assist', False)
+        logging.info('[multiACE] print-start: cleared host FA caches and '
+                     'rev-assist flag (FA state reset)')
 
     def _v2_arm_fa_for_unload(self, head):
         """Arm V2 feed_assist on the slot mapped to `head` so the velocity

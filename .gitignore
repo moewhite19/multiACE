@@ -3,4 +3,6 @@ __pycache__/
 *.pyc
 upload_multiace.bat
 upload_multiace.py
+listen_logs.bat
+listen_logs.py
 .gitattributes
