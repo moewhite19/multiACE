@@ -920,7 +920,7 @@ class FilamentFeed:
         except Exception:
             pass
 
-    def _do_unload_tip_form(self, ch, filament_soft, rearm_fa=False):
+    def _do_unload_tip_form(self, ch, filament_soft):
         """Unload tip-form: extrude, fast retract, cooldown (tip solidifies),
         slow retract, final retract. The fast retract is followed by the V2
         velocity tracker; the slow and final retracts get a concurrent ACE
@@ -932,10 +932,10 @@ class FilamentFeed:
                 ace_slot = src['slot']
 
         if filament_soft:
-            push_len = 8
+            push_len = 18
             push_speed = 600
         else:
-            push_len = 18
+            push_len = 26
             push_speed = 400
 
         self.toolhead.wait_moves()
@@ -943,10 +943,13 @@ class FilamentFeed:
 
         self.gcode.run_script_from_command("G1 E%d F%d\r\n" % (push_len, push_speed))
         self.toolhead.wait_moves()
+        self.gcode.run_script_from_command("INNER_CUTOFF_BASE_DISCARD\r\n")
+        self.gcode.run_script_from_command("INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\r\n")
+        self.toolhead.wait_moves()
         if self.ace is not None and ace_slot is not None:
             try:
                 self.ace._disable_feed_assist_all()
-                self._ace_unwind_sync(ace_slot, 15, 100)
+                self._ace_unwind_sync(ace_slot, 16, 100)
                 self.ace.wait_ace_ready()
             except Exception:
                 pass
@@ -959,6 +962,7 @@ class FilamentFeed:
             except Exception:
                 pass
 
+        self.gcode.run_script_from_command("M106 S255\r\n")
         self.gcode.run_script_from_command("G1 E-27 F2700\r\n")
         self.toolhead.wait_moves()
 
@@ -972,30 +976,25 @@ class FilamentFeed:
                     cool_time = 10.0
         except Exception:
             pass
-        self.gcode.run_script_from_command("M106 S255\r\n")
+        self.gcode.run_script_from_command("INNER_CUTOFF_BASE_DISCARD\r\n")
+        self.gcode.run_script_from_command("INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\r\n")
         self.toolhead.wait_moves()
         self.reactor.pause(self.reactor.monotonic() + cool_time)
 
         _retract_spd = self.ace.get_retract_speed(
             self.ace._active_device_index) if self.ace is not None else 80
 
+        self._ace_unwind_sync(ace_slot, 6, 10)
         self.gcode.run_script_from_command("G1 E-5.5 F40\r\n")
-        self._ace_unwind_sync(ace_slot, 8, 30)
         self.toolhead.wait_moves()
         if self.ace is not None:
             self.ace.wait_ace_ready()
-
+        self.gcode.run_script_from_command("M107\r\n")
+        self._ace_unwind_sync(ace_slot, 127.5, _retract_spd)
         self.gcode.run_script_from_command("G1 E-37.5 F1500\r\n")
-        self._ace_unwind_sync(ace_slot, 147.5, _retract_spd)
         self.toolhead.wait_moves()
         if self.ace is not None:
             self.ace.wait_ace_ready()
-
-        if self.ace is not None:
-            try:
-                self.ace._disable_feed_assist_all()
-            except Exception:
-                pass
 
     def _do_feed(self, ch, action=None, stage=None, auto_mode=None):
         if ch < 0 or ch >= FEED_CHANNEL_NUMS or action == None:
@@ -2507,7 +2506,7 @@ class FilamentFeed:
                                     self.gcode.run_script_from_command("M109 S%d\r\n"
                                         % (max(filament_feed_temp_db, filament_unload_temp)))
                                     self.toolhead.wait_moves()
-                                    self._do_unload_tip_form(ch, filament_soft, rearm_fa=True)
+                                    self._do_unload_tip_form(ch, filament_soft)
                                     self.gcode.run_script_from_command("M104 S%d\r\n" % probe_temp)
                                 except:
                                     logging.info("[feed][unload] toolhead unload retry failed")
@@ -2829,7 +2828,7 @@ class FilamentFeed:
                                     self.gcode.run_script_from_command("M109 S%d\r\n"
                                         % (max(filament_feed_temp_db, filament_unload_temp)))
                                     self.toolhead.wait_moves()
-                                    self._do_unload_tip_form(ch, filament_soft, rearm_fa=True)
+                                    self._do_unload_tip_form(ch, filament_soft)
                                     self.gcode.run_script_from_command("M104 S%d\r\n" % probe_temp)
                                 except:
                                     logging.info("[feed][unload] toolhead unload retry failed")
