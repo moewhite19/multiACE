@@ -4617,9 +4617,14 @@ class MultiAce:
                             'params': {'index': slot}}, _noop_cb)
                     except Exception:
                         pass
+                try:
+                    self.wait_ace_ready_on(idx)
+                except Exception:
+                    pass
                 logging.info(
                     '[multiACE] print-start: sent stop_feed_assist to all '
-                    'slots on ACE %d (clear residual firmware FA)' % idx)
+                    'slots on ACE %d and waited (clear residual firmware FA)'
+                    % idx)
         except Exception as e:
             logging.info('[multiACE] print-start FA reset error: %s' % e)
         self._feed_assist_per_ace.clear()
@@ -6228,6 +6233,10 @@ class MultiAce:
                 self._feed_assist_per_ace[idx] = -1
                 if idx == self._active_device_index:
                     self._feed_assist_index = -1
+            setattr(self, '_v2_active_rev_assist', False)
+            self._fa_trace(
+                '_retract v2 cleared rev-assist flag on ACE %d slot %d '
+                '(post-retract state reset)' % (idx, index))
 
         self.wait_ace_ready_on(idx)
         self.send_request_to(
