@@ -2516,17 +2516,36 @@ class FilamentFeed:
                                         def _async_cb(self, response):
                                             pass
                                         self.ace.wait_ace_ready()
+                                        _aidx = self.ace._active_device_index
                                         self.ace.send_request_to(
-                                            self.ace._active_device_index,
+                                            _aidx,
                                             {"method": "unwind_filament",
                                              "params": {"index": _ace_slot,
                                                         "length": _rest,
                                                         "speed": _retract_speed}},
                                             _async_cb)
+                                        if self.ace._feed_assist_per_ace.get(
+                                                _aidx, -1) == _ace_slot:
+                                            self.ace._feed_assist_per_ace[_aidx] = -1
+                                            if _aidx == self.ace._active_device_index:
+                                                self.ace._feed_assist_index = -1
+                                        setattr(self.ace, '_v2_active_rev_assist', False)
+                                        _vst = self.ace._v2_velocity_state.get(_aidx)
+                                        if _vst is not None:
+                                            _vst['last_armed_slot'] = None
+                                            _vst['last_quantum'] = None
+                                            _vst['last_direction'] = None
+                                            _vst['print_disarm_since'] = None
+                                        _key = (_aidx, _ace_slot)
+                                        if _key in self.ace._v2_fa_rearm_pending:
+                                            self.ace._v2_fa_rearm_pending.discard(
+                                                _key)
                                         logging.info(
                                             "[feed][unload] long retract dispatched "
-                                            "async %dmm @%d (not waiting)"
-                                            % (_rest, _retract_speed))
+                                            "async %dmm @%d (not waiting) - cleared "
+                                            "host FA state for ACE %d slot %d"
+                                            % (_rest, _retract_speed, _aidx,
+                                               _ace_slot))
                                     else:
                                         self.ace._dwell_fan(True)
                                         self.ace.wait_ace_ready()
@@ -2838,17 +2857,36 @@ class FilamentFeed:
                                         def _async_cb(self, response):
                                             pass
                                         self.ace.wait_ace_ready()
+                                        _aidx = self.ace._active_device_index
                                         self.ace.send_request_to(
-                                            self.ace._active_device_index,
+                                            _aidx,
                                             {"method": "unwind_filament",
                                              "params": {"index": _ace_slot,
                                                         "length": _rest,
                                                         "speed": _retract_speed}},
                                             _async_cb)
+                                        if self.ace._feed_assist_per_ace.get(
+                                                _aidx, -1) == _ace_slot:
+                                            self.ace._feed_assist_per_ace[_aidx] = -1
+                                            if _aidx == self.ace._active_device_index:
+                                                self.ace._feed_assist_index = -1
+                                        setattr(self.ace, '_v2_active_rev_assist', False)
+                                        _vst = self.ace._v2_velocity_state.get(_aidx)
+                                        if _vst is not None:
+                                            _vst['last_armed_slot'] = None
+                                            _vst['last_quantum'] = None
+                                            _vst['last_direction'] = None
+                                            _vst['print_disarm_since'] = None
+                                        _key = (_aidx, _ace_slot)
+                                        if _key in self.ace._v2_fa_rearm_pending:
+                                            self.ace._v2_fa_rearm_pending.discard(
+                                                _key)
                                         logging.info(
                                             "[feed][unload] long retract dispatched "
-                                            "async %dmm @%d (not waiting)"
-                                            % (_rest, _retract_speed))
+                                            "async %dmm @%d (not waiting) - cleared "
+                                            "host FA state for ACE %d slot %d"
+                                            % (_rest, _retract_speed, _aidx,
+                                               _ace_slot))
                                     else:
                                         self.ace._dwell_fan(True)
                                         self.ace.wait_ace_ready()
