@@ -939,13 +939,12 @@ class FilamentFeed:
             push_speed = 400
 
         self.toolhead.wait_moves()
+        
+        self.gcode.run_script_from_command("MOVE_TO_DISCARD_FILAMENT_POSITION\r\n")
         self.gcode.run_script_from_command("M83\r\n")
-
         self.gcode.run_script_from_command("G1 E%d F%d\r\n" % (push_len, push_speed))
         self.toolhead.wait_moves()
-        self.gcode.run_script_from_command("INNER_CUTOFF_BASE_DISCARD\r\n")
-        self.gcode.run_script_from_command("INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\r\n")
-        self.toolhead.wait_moves()
+        
         if self.ace is not None and ace_slot is not None:
             try:
                 self.ace._disable_feed_assist_all()
@@ -953,7 +952,6 @@ class FilamentFeed:
                 self.ace.wait_ace_ready()
             except Exception:
                 pass
-        
         self.gcode.run_script_from_command("G1 E27 F400\r\n")
 
         if self.ace is not None:
