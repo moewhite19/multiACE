@@ -964,14 +964,14 @@ class FilamentFeed:
         self.gcode.run_script_from_command("G1 E-27 F2700\r\n")
         self.toolhead.wait_moves()
 
-        cool_time = 5.0
+        cool_time = 2.0
         try:
             ptc = self.printer.lookup_object('print_task_config', None)
             if ptc is not None:
                 ftype = str(ptc.get_status().get(
                     'filament_type', [])[self.filament_ch[ch]]).upper()
                 if ftype in ('PLA', 'TPU', 'PVA', 'SUPPORT'):
-                    cool_time = 10.0
+                    cool_time = 5.0
         except Exception:
             pass
         self.gcode.run_script_from_command("INNER_CUTOFF_BASE_DISCARD\r\n")
@@ -982,7 +982,7 @@ class FilamentFeed:
         _retract_spd = self.ace.get_retract_speed(
             self.ace._active_device_index) if self.ace is not None else 80
 
-        self._ace_unwind_sync(ace_slot, 6, 10)
+        self._ace_unwind_sync(ace_slot, 12, 6)
         self.gcode.run_script_from_command("G1 E-5.5 F40\r\n")
         self.toolhead.wait_moves()
         if self.ace is not None:

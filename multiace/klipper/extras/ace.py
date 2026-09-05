@@ -6244,6 +6244,17 @@ class MultiAce:
             request={"method": "unwind_filament", "params": {"index": index, "length": length, "speed": speed}},
             callback=callback)
         self.dwell(delay=(length / speed) + 0.1)
+        try:
+            self.wait_ace_ready_on(idx)
+            self.send_request_to(idx, {
+                'method': 'stop_feed_assist',
+                'params': {'index': index}}, callback)
+            self._fa_trace(
+                '_retract post-unwind stop_feed_assist on ACE %d slot %d '
+                '(close FA + reset ACE state)' % (idx, index))
+        except Exception as e:
+            logging.info(
+                '[multiACE] _retract post-unwind FA stop failed: %s' % e)
 
     def _first_loaded_slot_for_ace(self, ace_idx):
 
