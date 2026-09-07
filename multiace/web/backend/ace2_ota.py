@@ -20,6 +20,8 @@ Flash base 0x08024000; the MCU verifies the CRC over the region.
 
 import hashlib
 import io
+import json
+import os
 import re
 import struct
 import tarfile
@@ -48,10 +50,17 @@ KNOWN_FIRMWARE = {
     "1.1.31": {
         "crc": 0x91A8, "size": 71592,
         "swu": "ACE2_V1.1.31_20260306.swu",
-
         "md5": "79fb22e7914bae1dc75ac91b30739c19",
         "source": "ACE2_V1.1.31_20260306.bin",
         "tested": "2026-08-09 dry-run vs a live V1.1.31 unit (Dirk)",
+    },
+    "1.1.3O": {
+        "crc": 0x7444, "size": 71932,
+        "announce": "1.1.31",
+        "swu": "ACE2-Open.bin (firmware/apply_patch.py on the V1.1.31 base)",
+        "md5": "9f7b87836dccaf1154e0e491b07e64fe",
+        "source": "ACE2-Open.bin",
+        "tested": "pending - first HW flash",
     },
 }
 
@@ -73,6 +82,56 @@ def check_known(fw) -> None:
             "image MD5 does not match the tested %s build (got %s, "
             "expected %s) - wrong file?"
             % (fw.version, fw.image_md5, entry["md5"]))
+
+_UID_PATCH_MAGIC = bytes([0x61, 0xA5, 0x63, 0x5A, 0x65, 0xA5, 0x32, 0x5A])
+_UID_PATCH_SPEC = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "ace2_uid_patch.json")
+
+def apply_uid_patch(base_data: bytes) -> "FirmwareImage":
+    """Turn a stock V1.1.31 image into ACE2-Open (Simon-CR's UID
+    passthrough) in pure Python - no ARM toolchain. Faithful port of
+    firmware/apply_patch.py from github.com/Simon-CR/ace2-pro-firmware-
+    research (MIT, (c) 2026 Simon-CR); the spec ace2_uid_patch.json holds
+    ONLY Simon's assembled bytes + offsets, no Anycubic firmware - the
+    base image is supplied by the user's own upload.
+
+    Deterministic and self-verifying: the base md5/size and every hook
+    site are checked, so a wrong or already-patched base raises rather
+    than producing a bad image. Result is the 71932-byte image that
+    reports V1.1.3O; the returned FirmwareImage carries version '1.1.3O'
+    so check_known gates it against the tested entry (byte-exact)."""
+    try:
+        with open(_UID_PATCH_SPEC, "r", encoding="utf-8") as f:
+            spec = json.load(f)
+    except OSError as e:
+        raise FlashError("UID patch spec missing (%s) - reinstall the web "
+                         "backend" % e)
+    img = bytearray(base_data)
+    md5 = hashlib.md5(img).hexdigest()
+    if md5 != spec["base_md5"] or len(img) != spec["base_size"]:
+        raise FlashError(
+            "the uploaded image is not the exact V1.1.31 base this patch "
+            "targets (got %d bytes md5 %s, expected %d md5 %s). Upload the "
+            "stock ACE2 V1.1.31 package."
+            % (len(img), md5, spec["base_size"], spec["base_md5"]))
+    if bytes(img[-8:]) != _UID_PATCH_MAGIC:
+        raise FlashError("base image has no IAP magic trailer - not a "
+                         "flashable ACE2 image")
+    body = img[:-8]
+    body += bytes.fromhex(spec["appended_hex"])
+    for h in spec["hooks"]:
+        off = h["file_offset"]
+        expect = bytes.fromhex(h["expect_hex"])
+        if bytes(body[off:off + len(expect)]) != expect:
+            raise FlashError("patch hook site 0x%X unexpected (already "
+                             "patched, or wrong base)" % off)
+        body[off:off + len(expect)] = bytes.fromhex(h["replace_hex"])
+    for p in spec["pokes"]:
+        off = p["file_offset"]
+        pk = bytes.fromhex(p["bytes_hex"])
+        body[off:off + len(pk)] = pk
+    out = bytes(body) + _UID_PATCH_MAGIC
+    return FirmwareImage(out, "1.1.3O", crc16_kermit(out), "ACE2-Open (patched)")
 
 class FlashError(Exception):
     """Anything that ends the update - message is user-facing."""
@@ -103,7 +162,7 @@ def _field_string(field: int, text: str) -> bytes:
     return _field_bytes(field, text.encode())
 
 def encode_upgrade_request(size: int, image_crc: int, version: str) -> bytes:
-    return _field_uint32(1, size) + _field_uint32(2, image_crc)\
+    return _field_uint32(1, size) + _field_uint32(2, image_crc) \
         + _field_string(3, version)
 
 def encode_firmware_request(address: int, chunk: bytes) -> bytes:
@@ -222,9 +281,8 @@ class ACE2Transport:
                         buf = buf[n:]
                     else:
                         break
-                    if p and p["is_resp"] and p["cmd"] == cmd:
+                    if p and p["cmd"] == cmd:
                         results.append(p)
-
                 if results:
                     return results
             else:
@@ -312,7 +370,6 @@ def load_image(path: str, version: str, expected_md5=None,
         try:
             result = _extract_from_zip_swu(raw_bytes, swu_password)
         except RuntimeError as e:
-
             raise FlashError(f"cannot decrypt .swu: {e}")
         if result is None:
             raise FlashError(
@@ -404,7 +461,6 @@ def flash(port: str, fw, progress,
         if not (fw.version or '').strip():
             raise FlashError("a target version is required to flash "
                              "(it is announced to the ACE)")
-
         check_known(fw)
         if current is None:
             raise FlashError("ACE did not answer the version query - "
@@ -416,9 +472,11 @@ def flash(port: str, fw, progress,
         total = len(fw.data)
         n_chunks = (total + CHUNK_SIZE - 1) // CHUNK_SIZE
 
+        _entry = KNOWN_FIRMWARE.get(_norm_ver(fw.version)) or {}
+        announce_ver = _entry.get("announce", fw.version)
         _p(0.0, "announcing upgrade (size=%d crc=0x%04X version=%s)"
-           % (total, fw.image_crc, fw.version))
-        payload = encode_upgrade_request(total, fw.image_crc, fw.version)
+           % (total, fw.image_crc, announce_ver))
+        payload = encode_upgrade_request(total, fw.image_crc, announce_ver)
         results = transport.send_recv(CMD_IAP_UPGRADE, payload,
                                       timeout=T_START)
         if not results:

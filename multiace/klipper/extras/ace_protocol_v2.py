@@ -158,7 +158,6 @@ FEED_MODE_ROLLBACK_ASSIST = 3
 class AceProtocolV2(AceProtocol):
     NAME = 'v2'
     DEFAULT_BAUD = 230400
-
     EXTRA_USB_IDS = ()
     SERIAL_KWARGS = {
         'timeout': 0.1,
@@ -176,7 +175,7 @@ class AceProtocolV2(AceProtocol):
             vendor, product = cls._read_usb_ids(real_dev)
             if vendor is None:
                 continue
-            if (vendor == V2_VENDOR_ID and product in V2_PRODUCT_IDS)\
+            if (vendor == V2_VENDOR_ID and product in V2_PRODUCT_IDS) \
                     or (vendor, product) in cls.EXTRA_USB_IDS:
                 ace_devices.append(full_path)
         return ace_devices
@@ -462,8 +461,8 @@ class AceProtocolV2(AceProtocol):
                 'brand': '',
                 'color': color,
                 'rfid': 2 if ftype else 0,
+                'code': _fval(fields, 12, 0),
             }
-
             _tag = {}
             if 8 in fields:
                 _tag['diameter_mm'] = round(_fval(fields, 8, 0) / 100.0, 2)
@@ -478,8 +477,7 @@ class AceProtocolV2(AceProtocol):
                 _tag['field2'] = _fval(fields, 2, 0)
             if _tag:
                 ret['result']['tag'] = _tag
-
-            _extra = _unparsed_fields(fields, (1, 2, 3, 4, 5, 6, 7, 8, 9))
+            _extra = _unparsed_fields(fields, (1, 2, 3, 4, 5, 6, 7, 8, 9, 12))
             if _extra:
                 ret['result']['_unparsed'] = _extra
         elif cmd == Cmd.GET_FEED_INFO:
@@ -502,7 +500,6 @@ class AceProtocolV2(AceProtocol):
                 str(k): _fval(fields, k, 0) for k in fields
             }}
         elif cmd == Cmd.RFID_TEST:
-
             code = _fval(fields, 1, 0)
             if isinstance(code, int) and code != 0:
                 ret['code'] = code

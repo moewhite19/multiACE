@@ -60,6 +60,7 @@ for f in \
     "klipper/extras/filament_switch_sensor_ace.py" \
     "klipper/extras/ace_bg_swap.py" \
     "klipper/extras/ace_tipform.py" \
+    "klipper/extras/ace_rc522.py" \
     "klipper/kinematics/extruder_ace.py" \
     "config/extended/ace.cfg" \
     "config/extended/multiace/ace_mode_switch.sh" \
@@ -144,7 +145,10 @@ cp "$INSTALL_DIR/klipper/extras/filament_switch_sensor_ace.py" "$EXTRAS_DIR/fila
 cp "$INSTALL_DIR/klipper/extras/ace_bg_swap.py" "$EXTRAS_DIR/ace_bg_swap.py"
 # Per-material tip-forming tables ([ace_tipform] section, inert on 'stock')
 cp "$INSTALL_DIR/klipper/extras/ace_tipform.py" "$EXTRAS_DIR/ace_tipform.py"
-chmod 644 "$EXTRAS_DIR/ace.py" "$EXTRAS_DIR/ace_protocol.py" "$EXTRAS_DIR/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v2.py" "$EXTRAS_DIR/filament_feed_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py" "$EXTRAS_DIR/ace_bg_swap.py" "$EXTRAS_DIR/ace_tipform.py"
+# RC522 tag line (stage 1) - helper module imported lazily by ace.py; inert
+# without [ace] rc522: true.
+cp "$INSTALL_DIR/klipper/extras/ace_rc522.py" "$EXTRAS_DIR/ace_rc522.py"
+chmod 644 "$EXTRAS_DIR/ace.py" "$EXTRAS_DIR/ace_protocol.py" "$EXTRAS_DIR/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v2.py" "$EXTRAS_DIR/filament_feed_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py" "$EXTRAS_DIR/ace_bg_swap.py" "$EXTRAS_DIR/ace_tipform.py" "$EXTRAS_DIR/ace_rc522.py"
 log "  Klipper extras installed"
 cp "$INSTALL_DIR/klipper/kinematics/extruder_ace.py" "$KINEMATICS_DIR/extruder_ace.py"
 chmod 644 "$KINEMATICS_DIR/extruder_ace.py"

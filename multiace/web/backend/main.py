@@ -57,7 +57,6 @@ OVERRIDE_FILE = os.environ.get(
     "MULTIACE_OVERRIDE_FILE",
     "/home/lava/printer_data/config/extended/multiace/slot_overrides.json",
 )
-
 FILAMENT_PARAMS_PATHS = tuple(
     os.environ.get(
         "MULTIACE_FILAMENT_PARAMS",
@@ -66,11 +65,9 @@ FILAMENT_PARAMS_PATHS = tuple(
         "/usr/share/klipper/klippy/extras/filament_parameters.py",
     ).split(":")
 )
-
 _FIL_DB_META_KEYS = {
     "version", "hard_filaments_max_flow_k", "soft_filaments_max_flow_k",
 }
-
 DEFAULT_MATERIALS = [
     "PLA", "PLA-CF",
     "PETG", "PETG-CF", "PETG-HF",
@@ -113,7 +110,6 @@ async def _query_state_gated() -> dict:
     if _homing_active():
         if _LAST_STATUS and (now - _LAST_STATUS_TS) <= _STATUS_CACHE_TTL:
             return _LAST_STATUS
-
         deadline = now + _GATE_WAIT_MAX
         while _homing_active() and time.time() < deadline:
             await asyncio.sleep(0.05)
@@ -157,9 +153,7 @@ ACE_OBJECTS = [
     "print_task_config",
     "print_stats",
     "idle_timeout",
-
     "ace_bg_swap",
-
     "ace_tipform",
 ]
 
@@ -187,12 +181,19 @@ def _resolve_head_source(src: Any) -> tuple[int | None, int | None]:
         return (d, src.get("slot"))
     return (None, None)
 
-def _color_to_hex(c: Any) -> str | None:
-    """[r,g,b] (0-255) → '#rrggbb', or None for [0,0,0]/missing."""
+def _color_to_hex(c: Any, declared: bool = False) -> str | None:
+    """[r,g,b] (0-255) -> '#rrggbb', or None for missing.
+
+    All-zero is ambiguous: an EMPTY slot reports (0,0,0), a tag may
+    declare black. Stock's discriminator (ace._device_color_hex, S40)
+    decides by the TYPE: with a declared type the zeros are the tag's
+    black and are kept, without one they mean "nothing known". Callers
+    pass declared=bool(type). HW 2026-09-02: a tag written black showed
+    grey because this helper dropped every (0,0,0)."""
     if not isinstance(c, (list, tuple)) or len(c) < 3:
         return None
     r, g, b = int(c[0]), int(c[1]), int(c[2])
-    if r == 0 and g == 0 and b == 0:
+    if r == 0 and g == 0 and b == 0 and not declared:
         return None
     return f"#{r:02x}{g:02x}{b:02x}"
 
@@ -220,7 +221,6 @@ def _parse_state(status: dict) -> dict:
     head_source = ace.get("head_source", {}) or {}
     head_manual = ace.get("head_manual", {}) or {}
     head_feeder = ace.get("head_feeder", {}) or {}
-
     head_reader = ace.get("head_reader_spool", {}) or {}
     raw_aces = ace.get("aces", []) or []
 
@@ -247,7 +247,6 @@ def _parse_state(status: dict) -> dict:
         vendor = (ptc_vendors[n] or "").strip() if n < len(ptc_vendors) else ""
         return {
             "material": mat if mat != "NONE" else "",
-
             "sku":      sub if sub != "NONE" else "",
             "brand":    vendor if vendor != "NONE" else "",
             "color":    color_hex,
@@ -268,7 +267,6 @@ def _parse_state(status: dict) -> dict:
                 return True
         src = head_source.get(str(t)) or head_source.get(t)
         if isinstance(src, dict):
-
             if not (src.get("type") or "").strip():
                 return True
         return False
@@ -289,7 +287,6 @@ def _parse_state(status: dict) -> dict:
             continue
         if _head_in_op(t_idx):
             continue
-
         if _head_has_filament(t_idx) is False:
             continue
         loaded_by_source[(int(d_l), int(sl_l))] = t_idx
@@ -334,16 +331,17 @@ def _parse_state(status: dict) -> dict:
                     "brand":    sd.get("brand", ""),
                     "sku":      sd.get("sku", ""),
                     "subtype":  sd.get("subtype", ""),
-                    "color":    _color_to_hex(sd.get("color")),
+                    "color":    _color_to_hex(
+                        sd.get("color"),
+                        declared=bool((sd.get("material", "")
+                                       or sd.get("type", "")).strip())),
                 }
 
             override = _override_for(i, s)
             loaded_t = loaded_by_source.get((i, s))
-
             if override is not None:
                 ptc_overlay = {
                     "material": override.get("material", ""),
-
                     "sku":      "",
                     "brand":    override.get("brand", ""),
                     "color":    override.get("color") or None,
@@ -386,6 +384,8 @@ def _parse_state(status: dict) -> dict:
                     "subtype":   "",
                     "color":     None,
                     "color_rgb": None,
+                    "uid":       "",
+                    "tag_format": "",
                     "rfid_data": rfid_data,
                     "source":    "empty",
                 })
@@ -404,6 +404,8 @@ def _parse_state(status: dict) -> dict:
                         "subtype":   disp_subtype,
                         "color":     ptc_overlay["color"],
                         "color_rgb": None,
+                        "uid":       (sd.get("uid") or ""),
+                        "tag_format": (sd.get("tag_format") or ""),
                         "rfid_data": rfid_data,
                         "source":    source,
                     })
@@ -418,8 +420,13 @@ def _parse_state(status: dict) -> dict:
                         "brand":     sd.get("brand", ""),
                         "sku":       sd.get("sku", ""),
                         "subtype":   disp_subtype,
-                        "color":     _color_to_hex(sd.get("color")),
+                        "color":     _color_to_hex(
+                            sd.get("color"),
+                            declared=bool((sd.get("material", "")
+                                           or sd.get("type", "")).strip())),
                         "color_rgb": sd.get("color"),
+                        "uid":       (sd.get("uid") or ""),
+                        "tag_format": (sd.get("tag_format") or ""),
                         "rfid_data": rfid_data,
                         "source":    source,
                     })
@@ -429,6 +436,7 @@ def _parse_state(status: dict) -> dict:
             "protocol":     a.get("protocol", ""),
             "model":        a.get("model", ""),
             "firmware":     a.get("firmware", ""),
+            "open_fw":      str(a.get("firmware", "") or "").strip().upper().endswith("O"),
             "status":       a.get("status"),
             "temp":         a.get("temp"),
 
@@ -438,7 +446,6 @@ def _parse_state(status: dict) -> dict:
             "dryer":        a.get("dryer_status") or {},
             "valve_open":   a.get("valve_open", False),
             "feed_assist":  a.get("feed_assist", -1),
-
             "serial_path":  a.get("serial_path", ""),
             "fw_hold":      bool(a.get("fw_hold")),
             "slots":        slots_out,
@@ -455,7 +462,6 @@ def _parse_state(status: dict) -> dict:
 
         _src_raw = head_source.get(str(t)) or head_source.get(t)
         d_explicit, sl_explicit = _resolve_head_source(_src_raw)
-
         load_failed = bool(isinstance(_src_raw, dict)
                            and _src_raw.get("load_failed"))
         loaded = bool(feed.get("filament_detected"))
@@ -476,18 +482,15 @@ def _parse_state(status: dict) -> dict:
                     slot_obj = slots_arr[sl_explicit]
                     color = slot_obj.get("color")
                     material = slot_obj.get("material", "")
-
                     subtype = slot_obj.get("subtype", "")
                     sku = slot_obj.get("sku", "")
                     source = slot_obj.get("source")
         is_manual = bool(head_manual.get(str(t), head_manual.get(t, False)))
-
         op_mode = ace.get("mode", "multi")
         is_feeder = (op_mode == "head"
                      and bool(head_feeder.get(str(t), head_feeder.get(t, False)))
                      and not is_manual)
         if is_manual or is_feeder:
-
             d_explicit = sl_explicit = None
             ace_field = slot_field = None
             color = None
@@ -550,6 +553,8 @@ def _parse_state(status: dict) -> dict:
     language = sv_vars.get("ace__language", os.environ.get("MULTIACE_LANGUAGE", "en"))
     idx_base = _read_display_index_base()
     return {
+        'calibration':        ace.get('calibration') or {'state': 'idle'},
+        "unload_all_active":  bool(ace.get("unload_all_active", False)),
         "ace_status":         ace.get("status"),
         "ace_temp":           ace.get("temp"),
         "printer_state":      printer_state,
@@ -561,21 +566,22 @@ def _parse_state(status: dict) -> dict:
         "airprint_detection": bool(ace.get("airprint_detection", False)),
         "quad_replenish": bool(ace.get("quad_replenish", False)),
         "purge_matrix": bool(ace.get("purge_matrix", True)),
+        "pa_sync": bool(ace.get("pa_sync", True)),
+        "rc522": bool(ace.get("rc522", False)),
+        "tag_write_format": str(ace.get("tag_write_format") or "openspool"),
+        "tag_write_uid_sku": bool(ace.get("tag_write_uid_sku", True)),
+        "tag_op": dict(ace.get("tag_op") or {}),
+        "nozzle_keys": ace.get("nozzle_keys", []) or [],
         "quad_first": bool(ace.get("quad_first", False)),
-
         "auto_dry_masters":   ace.get("auto_dry_masters", []) or [],
-
         "spools": ace.get("spools", {}) or {},
         "spool_binding": ace.get("spool_binding", {}) or {},
-
         "head_tag_seen": ace.get("head_tag_seen", {}) or {},
         "spoolman_url": ace.get("spoolman_url", "") or "",
         "spoolman_auto": bool(ace.get("spoolman_auto", False)),
-
         "spool_mode": (ace.get("spool_mode")
                        or ("spoolman" if (ace.get("spoolman_url") or "")
                            else "local")),
-
         "spoollink": bool(ace.get("spoollink", False)),
         "spoollink_agent": bool(ace.get("spoollink_agent", False)),
         "ace_head":           int(ace.get("ace_head", 3) or 3),
@@ -591,20 +597,17 @@ def _parse_state(status: dict) -> dict:
         "toolheads":          toolheads,
         "wiring":             wiring,
         "save_variables":     sv_vars,
-
         "bg_swap": {
             "available":     bool(bg.get("version")),
             "version":       bg.get("version"),
             "enabled_heads": bg.get("enabled_heads", []) or [],
             "busy":          bg.get("busy", []) or [],
         },
-
         "tipform": {
             "available": bool(tf.get("mode")),
             "mode":      tf.get("mode"),
             "tables":    tf.get("tables", []) or [],
         },
-
         "preflight_inbox": _inbox_status(),
     }
 
@@ -648,6 +651,28 @@ async def _machine_nozzles() -> dict:
             out[i] = d
     return out
 
+async def _machine_nozzle_types() -> dict:
+    """{head: 'standard'|'high_flow'} from the extruder status objects.
+
+    Firmware 1.6.0 introduced the nozzle VOLUME TYPE next to the diameter
+    (per-extruder JSON, SET_NOZZLE_PROPERTIES, sts['nozzle_volume_type']) -
+    the supply side of the HF/standard axis that previously had no source
+    at all. Empty dict on pre-1.6.0 firmware (the field is simply absent) -
+    callers must treat missing as unknown, never as 'standard'."""
+    try:
+        objs = ["extruder"] + ["extruder%d" % i for i in range(1, 4)]
+        data = await _mr_get("/printer/objects/query?" + "&".join(objs))
+        st = data.get("result", {}).get("status", {})
+    except Exception as e:
+        logging.info("[multiace] nozzle type query failed (ignored): %s", e)
+        return {}
+    out = {}
+    for i, name in enumerate(objs):
+        vt = (st.get(name) or {}).get("nozzle_volume_type")
+        if isinstance(vt, str) and vt:
+            out[i] = vt
+    return out
+
 app = FastAPI(title="multiACE Web", version=VERSION)
 
 class MacroRequest(BaseModel):
@@ -660,13 +685,27 @@ class MacroBatchRequest(BaseModel):
 class ConfigUpdate(BaseModel):
     content: str
     restart_klipper: bool = False
-
     base_sha1: str | None = None
 
 class TipformUpdate(BaseModel):
     mode: str
     tables: dict[str, str]
     restart_klipper: bool = False
+
+class CalibrationStart(BaseModel):
+    ace: int
+    slot: int
+    head: int
+    scope: str = 'ace'
+
+class CalibrationAction(BaseModel):
+    action: str
+    length: int | None = None
+    session_id: int | None = None
+    ace: int | None = None
+    slot: int | None = None
+    head: int | None = None
+    scope: str | None = None
 
 class SnapshotSave(BaseModel):
     name: str
@@ -755,7 +794,6 @@ def _inbox_max_size() -> int:
     except (TypeError, ValueError):
         v = 256
     return max(1, min(v, 4096)) * 1024 * 1024
-
 _INBOX_PROCESSED_MARKERS = (b"; multiACE processed:", b"; multiACE auto-load:")
 
 def _inbox_paths():
@@ -851,7 +889,6 @@ async def _live_slots_async() -> list[dict]:
         for slot in ace.get("slots", []) or []:
             if slot.get("state") == "empty":
                 continue
-
             if slot.get("source") not in ("rfid", "override"):
                 continue
             out.append({
@@ -913,11 +950,13 @@ async def _head_mode_context() -> dict:
             continue
         feeders.append({"head": int(th["idx"]), "material": mat, "color": col})
     bgs = parsed.get("bg_swap") or {}
-
     return {"mode": mode, "ace_head": ace_head, "ace_heads": ace_heads,
             "head_ace": head_ace, "feeders": feeders,
             "head_nozzles": {str(h): d
                              for h, d in (await _machine_nozzles()).items()},
+            "head_nozzle_types": {str(h): v
+                                  for h, v in
+                                  (await _machine_nozzle_types()).items()},
             "pickup_cleaning": bool(parsed.get("pickup_cleaning")),
             "bg_available": bool(bgs.get("available")),
             "bg_heads": [int(h) for h in (bgs.get("enabled_heads") or [])]}
@@ -930,7 +969,6 @@ async def preflight(file: UploadFile = File(...)) -> dict:
         raise HTTPException(status_code=400, detail="invalid filename")
     if not safe_name.lower().endswith((".gcode", ".gco", ".g")):
         raise HTTPException(status_code=400, detail="not a g-code file")
-
     if await _any_head_manual():
         raise HTTPException(
             status_code=409,
@@ -966,7 +1004,7 @@ async def preflight(file: UploadFile = File(...)) -> dict:
     pp = _load_post_processor()
 
     with open(src_path, "r", encoding="utf-8", errors="replace") as f:
-        slicer_colors, slicer_types, num_aces, _used, plan_proxy, meta =\
+        slicer_colors, slicer_types, num_aces, _used, plan_proxy, meta = \
             preflight_core.parse_meta(pp, f)
 
     live_slots = await _live_slots_async()
@@ -982,10 +1020,8 @@ async def preflight(file: UploadFile = File(...)) -> dict:
             head_ctx=head_ctx, token=token, filename=safe_name, size=upload_size,
             fuzzy=_PREFLIGHT_FUZZY, meta=meta)
     except ValueError as e:
-
         raise HTTPException(status_code=409, detail=str(e))
     except RuntimeError as e:
-
         raise HTTPException(status_code=503, detail=str(e))
 
 _PREFLIGHT_JOBS: dict[str, dict] = {}
@@ -1008,33 +1044,112 @@ def _stage_progress(state: dict, base: float, span: float):
         state["ts"] = time.time()
     return cb
 
-def _print_prefs_line(bed_mesh: bool, camera: bool) -> str:
+_FLOW_CAL_LINE_RE = re.compile(r"^\s*SM_PRINT_FLOW_CALIBRATE\b", re.IGNORECASE)
+_AUTO_LOAD_END_RE = re.compile(r"^\s*;\s*multiACE auto-load: end\b")
+_BARE_T_RE = re.compile(r"^\s*T(\d+)\s*(?:;.*)?$")
+
+def _print_prefs_line(bed_mesh: bool, camera: bool,
+                      flow_cal: bool = False) -> str:
     """Build the SET_PRINT_PREFERENCES line for the chosen preflight toggles.
     FORCE=1 is required: the line is the first line of the uploaded file, which
     already runs with print_stats.state == 'printing', and stock rejects a
     non-forced preference change there (error 531). FORCE=1 bypasses that gate
     (print_task_config.cmd_SET_PRINT_PREFERENCES); it still runs before the
-    start/bed-leveling steps so the flags are set in time. Flow-calibrate/PA are
-    intentionally left off here (separate topic)."""
-    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=0 "
+    start/bed-leveling steps so the flags are set in time.
+
+    FLOW_CALIBRATE: stock's "flow calibration" is the per-head pressure-
+    advance measurement (flow_calibrator.FLOW_CALIBRATE). With the flag on,
+    stock also IGNORES every SET_PRESSURE_ADVANCE from the slicer while
+    printing (kinematics/extruder.py); with it off, the slicer's own line
+    (Snapmaker Orca ships ADVANCE=0.02 as a placeholder) is what prints.
+    The touchscreen start dialog is the only stock place that turns it on,
+    and a web-started print never sees that dialog - so a preflight print
+    ran at PA 0.02 whatever the user had calibrated (issue #115: rough
+    top surfaces, "overextrusion"). The start gcode's own
+    SM_PRINT_FLOW_CALIBRATE lines sit BEFORE our auto-load block (heads
+    still empty -> runout pause 523), which is why the flag used to be
+    forced off; _prepend_print_prefs moves the calibration behind the
+    block instead when the toggle is on."""
+    return ("SET_PRINT_PREFERENCES BED_LEVEL=%d FLOW_CALIBRATE=%d "
             "TIME_LAPSE_CAMERA=%d FORCE=1"
-            % (1 if bed_mesh else 0, 1 if camera else 0))
+            % (1 if bed_mesh else 0, 1 if flow_cal else 0,
+               1 if camera else 0))
+
+def _flow_cal_block(lines: list) -> tuple:
+    """(insert_index, block_lines) for the relocated flow calibration, or
+    (None, []) when the file has no auto-load block to anchor on (then the
+    slicer's lines stay where they are = stock placement).
+
+    One T<h> A0 + FLOW_CALIBRATE pair per PHYSICAL head the processed file
+    actually prints with (bare T lines), NOT the stock SM_PRINT_FLOW_
+    CALIBRATE wrapper: that wrapper skips heads stock believes unused, and
+    stock derives 'used' from the slicer header's per-LOGICAL-T grams via
+    its map table - which no longer matches the physical heads after our
+    remap (issue #115 file: head 0 printed but read as unused). The pair
+    is exactly what the wrapper runs internally (print_stats.py). Ends by
+    re-selecting the tool the start gcode had selected before the block,
+    mirroring stock's own re-select after its calibration, because the
+    prime line follows right after the block with the active tool."""
+    end_idx = None
+    initial = None
+    heads = set()
+    for i, line in enumerate(lines):
+        m = _BARE_T_RE.match(line)
+        if m:
+            h = int(m.group(1))
+            if 0 <= h <= 3:
+                heads.add(h)
+                if end_idx is None:
+                    initial = h
+            continue
+        if end_idx is None and _AUTO_LOAD_END_RE.match(line):
+            end_idx = i
+    if end_idx is None or not heads:
+        return None, []
+    if initial is None:
+        initial = min(heads)
+    block = ["; multiACE preflight: flow calibration (moved behind the "
+             "auto-load, heads loaded)\n"]
+    order = sorted(h for h in heads if h != initial) + \
+        ([initial] if initial in heads else [])
+    for h in order:
+        block.append("T%d A0\n" % h)
+        block.append("FLOW_CALIBRATE EXTRUDER=%d\n" % h)
+    block.append("T%d\n" % initial)
+    block.append("; multiACE preflight: flow calibration end\n")
+    return end_idx + 1, block
 
 def _prepend_print_prefs(in_path: str, out_path: str,
-                         bed_mesh: bool = False, camera: bool = False) -> None:
+                         bed_mesh: bool = False, camera: bool = False,
+                         flow_cal: bool = False) -> None:
     """Stream-copy in_path to out_path with the print-preference line
     prepended at the very top (before the start gcode's calibration).
     Any SET_PRINT_PREFERENCES the slicer already emits is commented out
-    so it can't override ours from further down the file."""
+    so it can't override ours from further down the file. With flow_cal
+    the slicer's SM_PRINT_FLOW_CALIBRATE lines are commented out and the
+    calibration is re-emitted behind the auto-load block (see
+    _flow_cal_block); the file is read twice for that (anchor + heads),
+    still streamed on the write side."""
+    ins_idx, block = None, []
+    if flow_cal:
+        with open(in_path, "r", encoding="utf-8", errors="replace") as src:
+            ins_idx, block = _flow_cal_block(src.readlines())
     with open(out_path, "w", encoding="utf-8", errors="replace") as out:
         out.write("; multiACE preflight: print preferences\n")
-        out.write(_print_prefs_line(bed_mesh, camera) + "\n")
+        out.write(_print_prefs_line(bed_mesh, camera, flow_cal) + "\n")
         with open(in_path, "r", encoding="utf-8", errors="replace") as src:
-            for line in src:
+            for i, line in enumerate(src):
+                if ins_idx is not None and i == ins_idx:
+                    out.writelines(block)
                 if line.lstrip().upper().startswith("SET_PRINT_PREFERENCES"):
                     out.write("; multiACE disabled: " + line.lstrip())
                     continue
+                if ins_idx is not None and _FLOW_CAL_LINE_RE.match(line):
+                    out.write("; multiACE moved: " + line.lstrip())
+                    continue
                 out.write(line)
+            if ins_idx is not None and ins_idx >= i + 1:
+                out.writelines(block)
 
 def _prune_old_jobs() -> None:
     now = time.time()
@@ -1055,7 +1170,8 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                                   camera: bool = False,
                                   remap_override: dict | None = None,
                                   head_assignment: dict | None = None,
-                                  head_plan: str = "loadout") -> None:
+                                  head_plan: str = "loadout",
+                                  flow_cal: bool = False) -> None:
     state = _PREFLIGHT_JOBS[job_id]
     pp = _load_post_processor()
     src = _PREFLIGHT_DIR / (token + ".gcode")
@@ -1070,7 +1186,7 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
         _set_stage(state, "analyze", 0.0)
 
         with open(src, "r", encoding="utf-8", errors="replace") as f:
-            slicer_colors, slicer_types, num_aces, _used, _plan, meta =\
+            slicer_colors, slicer_types, num_aces, _used, _plan, meta = \
                 preflight_core.parse_meta(pp, f)
 
         live_slots = await _live_slots_async()
@@ -1079,7 +1195,6 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
             head_ctx["mode"] = "head"
         else:
             head_ctx = {"mode": "multi"}
-
         if "pickup_cleaning" not in head_ctx:
             try:
                 head_ctx["pickup_cleaning"] = bool(_parse_state(
@@ -1100,10 +1215,11 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
         cur = Path(final)
         nxt = tmp_b if cur == tmp_a else tmp_a
 
-        if bed_mesh or camera:
+        if bed_mesh or camera or flow_cal:
             _set_stage(state, "print_prefs", 84.0)
             await asyncio.to_thread(
-                _prepend_print_prefs, str(cur), str(nxt), bed_mesh, camera)
+                _prepend_print_prefs, str(cur), str(nxt), bed_mesh, camera,
+                flow_cal)
             cur, nxt = nxt, cur
 
         _set_stage(state, "upload", 85.0)
@@ -1140,14 +1256,11 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
 class _PreflightPrint(BaseModel):
     token: str
     mode:  str
-
     bed_mesh: bool = False
     camera:   bool = False
-
+    flow_cal: bool = False
     remap: dict[str, int] | None = None
-
     head_assignment: dict[str, str] | None = None
-
     head_plan: str = "loadout"
 
 @app.post("/api/preflight/print")
@@ -1180,7 +1293,7 @@ async def preflight_print(req: _PreflightPrint) -> dict:
         "loadout", "optimize", "layer") else "loadout"
     asyncio.create_task(_run_preflight_pipeline(
         job_id, req.token, req.mode, safe_name, req.bed_mesh, req.camera,
-        req.remap, req.head_assignment, head_plan))
+        req.remap, req.head_assignment, head_plan, req.flow_cal))
     return {"job_id": job_id, "filename": safe_name, "mode": req.mode}
 
 @app.get("/api/preflight/print/status")
@@ -1410,7 +1523,6 @@ async def preflight_inbox_status() -> dict:
 
 @app.get("/api/preflight/inbox/file")
 async def preflight_inbox_file() -> Response:
-
     gpath, _ = _inbox_paths()
     st = _inbox_status()
     if not st["pending"]:
@@ -1497,7 +1609,6 @@ async def reboot() -> dict:
                             detail=f"moonraker reboot failed: {e}")
 
 FLUIDD_CAMERA_NAME = "multiACE"
-
 FLUIDD_CAMERA = {
     "name": FLUIDD_CAMERA_NAME,
     "location": "printer",
@@ -1529,7 +1640,7 @@ async def fluidd_camera() -> dict:
         listing = await _mr_get("/server/webcams/list")
         cams = (listing.get("result") or {}).get("webcams") or []
         for cam in cams:
-            if str(cam.get("name", "")).strip().lower()\
+            if str(cam.get("name", "")).strip().lower() \
                     == FLUIDD_CAMERA_NAME.lower():
                 return {"ok": True, "existed": True,
                         "stream_url": cam.get("stream_url", "")}
@@ -1572,7 +1683,6 @@ async def get_state() -> dict:
     try:
         status = await _query_state_gated()
     except httpx.HTTPStatusError as e:
-
         if e.response is not None and e.response.status_code == 503:
             return {"klippy": "disconnected"}
         return {"error": f"moonraker: {e}"}
@@ -1721,9 +1831,7 @@ async def import_spools(file: UploadFile = File(...),
 
 _spoolman_lock = asyncio.Lock()
 _spoolman_last: dict = {"ts": 0.0, "ok": None, "msg": "", "pulled": 0, "pushed": 0}
-
 _SPOOLMAN_TIMEOUT = 15.0
-
 _MR_SPOOL_GCODE_TIMEOUT = 180.0
 
 def _known_subtypes_for(material: str) -> list:
@@ -1771,7 +1879,6 @@ def _spoolman_subtype_guess(name: str, material: str) -> str:
     if not n:
         return ""
     for sub in _known_subtypes_for(m):
-
         if re.search(r"(?<!\w)%s(?!\w)" % re.escape(sub), n, re.IGNORECASE):
             return sub
     if not m:
@@ -1798,6 +1905,163 @@ def _card_canon(s: str) -> str:
     hand-entered '04:A3:...' must still match the same chip."""
     return str(s or "").replace(":", "").replace(" ", "").upper()
 
+def _spool_local_uids(row: dict) -> list:
+    """Card UIDs a LOCAL row carries in its code list (sku = 'SM123,04BF..'
+    since the hand assignment learns the slot's read UID, ace.py
+    2026-09-02): every comma-separated code that is plain hex of UID
+    length (4- or 7-byte chips) and not the SM<id>/bare-id link. These
+    are what Spoolman's card_uids must know as well."""
+    out = []
+    for code in str((row or {}).get("sku") or "").split(","):
+        c = _card_canon(code.strip().lstrip("#"))
+        if not c or c.startswith("SM") or c.isdigit():
+            continue
+        if len(c) not in (8, 14, 20):
+            continue
+        if any(ch not in "0123456789ABCDEF" for ch in c):
+            continue
+        if c not in out:
+            out.append(c)
+    return out
+
+_SM_CARD_FIELD = "card_uids"
+_sm_card_field_state = {"base": "", "ok": False}
+
+async def _spoolman_ensure_card_field(client, base: str) -> bool:
+    """card_uids is SpoolLink's field; on an instance without the mod the
+    extra key does not exist and a PATCH is refused - create it once
+    (text), like the PA field."""
+    if _sm_card_field_state["ok"] and _sm_card_field_state["base"] == base:
+        return True
+    try:
+        r = await client.get(f"{base}/api/v1/field/spool")
+        r.raise_for_status()
+        keys = {str(f.get("key")) for f in (r.json() or [])
+                if isinstance(f, dict)}
+        if _SM_CARD_FIELD not in keys:
+            r2 = await client.post(
+                f"{base}/api/v1/field/spool/{_SM_CARD_FIELD}",
+                json={"name": "Card UIDs", "field_type": "text"})
+            r2.raise_for_status()
+            _trace.info("spoolman: created extra field %s", _SM_CARD_FIELD)
+        _sm_card_field_state.update(base=base, ok=True)
+        return True
+    except httpx.HTTPError as e:
+        _trace.info("spoolman: card_uids field ensure failed: %s",
+                    str(e) or type(e).__name__)
+        return False
+
+async def _spoolman_card_uids_push_one(client, base: str, smid: str,
+                                       sp: dict, uids: list) -> bool:
+    """Add the given card UIDs to one SM spool's card_uids extra (merge,
+    never drop what is there - SpoolLink's own entries stay). Sends the
+    full extra dict, same reasoning as the PA push. The other direction
+    (adopt by card_uids) is the tag sweep."""
+    have = _spool_card_uids(sp)
+    missing = [u for u in uids if u not in have]
+    if not missing:
+        return True
+    if not await _spoolman_ensure_card_field(client, base):
+        return False
+    extra = dict(sp.get("extra") or {})
+    extra[_SM_CARD_FIELD] = json.dumps(",".join(have + missing))
+    try:
+        r = await client.patch(f"{base}/api/v1/spool/{smid}",
+                               json={"extra": extra})
+        r.raise_for_status()
+        sp["extra"] = extra
+        _trace.info("spoolman: card_uids += %s on SM%s",
+                    ",".join(missing), smid)
+        return True
+    except httpx.HTTPError as e:
+        _trace.info("spoolman: card_uids push SM%s failed: %s", smid,
+                    str(e) or type(e).__name__)
+        return False
+
+_SM_PA_FIELD = "pressure_advance_matrix"
+_sm_pa_field_state: dict = {"base": "", "ok": False}
+
+def _pa_norm(m) -> dict:
+    """{str key: round(float, 6)} with unparseable entries dropped - the
+    comparable form of a PA matrix (matches ace.py's round(...,6) store)."""
+    out = {}
+    if isinstance(m, dict):
+        for k, v in m.items():
+            try:
+                out[str(k)] = round(float(v), 6)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+def _spoolman_pa_extra(sp: dict) -> dict | None:
+    """The SM spool's PA matrix, tolerantly decoded. Spoolman text extra
+    fields hold JSON-string-encoded values (see _spool_card_uids), so the
+    raw value is usually '"{\\"0.4_standard\\": 0.222}"' - one loads yields
+    the inner JSON string, a second the dict. Accepts a bare dict / bare
+    JSON object too. None = no usable data."""
+    raw = (sp.get("extra") or {}).get(_SM_PA_FIELD)
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return _pa_norm(raw) or None
+    try:
+        v = json.loads(str(raw))
+        if isinstance(v, str):
+            v = json.loads(v) if v.strip() else None
+        return _pa_norm(v) or None
+    except (ValueError, TypeError):
+        return None
+
+async def _spoolman_ensure_pa_field(client, base: str) -> bool:
+    """Create the extra-field definition once if the instance lacks it
+    (a PATCH with an undefined extra key is refused). Cached per base for
+    the process lifetime; the mod may have created it already."""
+    if _sm_pa_field_state["ok"] and _sm_pa_field_state["base"] == base:
+        return True
+    try:
+        r = await client.get(f"{base}/api/v1/field/spool")
+        r.raise_for_status()
+        keys = {str(f.get("key")) for f in (r.json() or [])
+                if isinstance(f, dict)}
+        if _SM_PA_FIELD not in keys:
+            r2 = await client.post(
+                f"{base}/api/v1/field/spool/{_SM_PA_FIELD}",
+                json={"name": "Pressure Advance Matrix",
+                      "field_type": "text"})
+            r2.raise_for_status()
+            _trace.info("spoolman: created extra field %s", _SM_PA_FIELD)
+        _sm_pa_field_state.update(base=base, ok=True)
+        return True
+    except httpx.HTTPError as e:
+        _trace.info("spoolman: pa field ensure failed: %s",
+                    str(e) or type(e).__name__)
+        return False
+
+async def _spoolman_pa_push_one(client, base: str, smid: str, sp: dict,
+                                matrix: dict) -> bool:
+    """PATCH one SM spool's PA field to the local matrix. Sends the FULL
+    existing extra dict with only our key changed - whether Spoolman's
+    PATCH replaces or merges the extra object, card_uids etc. survive.
+    An empty matrix writes an empty text value (clears under either
+    semantics)."""
+    if not await _spoolman_ensure_pa_field(client, base):
+        return False
+    extra = dict(sp.get("extra") or {})
+    norm = _pa_norm(matrix)
+    extra[_SM_PA_FIELD] = json.dumps(
+        json.dumps(norm, sort_keys=True) if norm else "")
+    try:
+        r = await client.patch(f"{base}/api/v1/spool/{smid}",
+                               json={"extra": extra})
+        r.raise_for_status()
+        _trace.info("spoolman: pa pushed to SM%s (%d entr%s)", smid,
+                    len(norm), "y" if len(norm) == 1 else "ies")
+        return True
+    except httpx.HTTPError as e:
+        _trace.info("spoolman: pa push SM%s failed: %s", smid,
+                    str(e) or type(e).__name__)
+        return False
+
 def _spoolman_to_local(sp: dict, existing: dict | None,
                        tag_sku: str | None = None) -> dict:
     """One Spoolman spool -> our record. Spoolman leads for everything it
@@ -1816,7 +2080,6 @@ def _spoolman_to_local(sp: dict, existing: dict | None,
         "vendor": (ven.get("name") or "").strip(),
         "color": color.lstrip("#").upper()[:6],
         "label": (fil.get("name") or "").strip(),
-
         "used_mm": 0.0,
         "spoolman_synced_mm": 0.0,
     }
@@ -1833,7 +2096,6 @@ def _spoolman_to_local(sp: dict, existing: dict | None,
     except (TypeError, ValueError):
         pass
     ex = existing or {}
-
     _ex_sku = (ex.get("sku") or "").strip()
     _gen = "SM%s" % sp.get("id", "")
     if tag_sku and (not _ex_sku or _ex_sku == _gen):
@@ -1842,6 +2104,10 @@ def _spoolman_to_local(sp: dict, existing: dict | None,
         out["sku"] = _ex_sku or _gen
     out["subtype"] = ((ex.get("subtype") or "").strip()
                       or _spoolman_subtype_guess(out["label"], out["material"]))
+    if ex.get("pa_matrix") is None:
+        _pa = _spoolman_pa_extra(sp)
+        if _pa:
+            out["pa_matrix"] = _pa
     return out
 
 async def _spoolman_refresh_known(base: str, spools: dict,
@@ -1862,7 +2128,6 @@ async def _spoolman_refresh_known(base: str, spools: dict,
         return 0, "no linked spools"
 
     def _row_changed(new_row, ex):
-
         if ex is None:
             return True
         for k in ("material", "vendor", "color", "label"):
@@ -1882,6 +2147,9 @@ async def _spoolman_refresh_known(base: str, spools: dict,
                 return True
         except (TypeError, ValueError):
             return True
+        if (new_row.get("pa_matrix") is not None
+                and ex.get("pa_matrix") is None):
+            return True
         return False
 
     out, n = {}, 0
@@ -1896,8 +2164,15 @@ async def _spoolman_refresh_known(base: str, spools: dict,
             if not isinstance(sp, dict) or sp.get("archived"):
                 continue
             ex = (spools or {}).get(key)
+            try:
+                _luids = _spool_local_uids(ex or {})
+                if _luids:
+                    await _spoolman_card_uids_push_one(client, base, smid,
+                                                       sp, _luids)
+            except Exception as _e:
+                _trace.info("spoolman: card_uids push SM%s skipped: %s",
+                            smid, _e)
             entry = _spoolman_to_local(sp, ex)
-
             if not force and not _row_changed(entry, ex):
                 continue
             out[str(n)] = entry
@@ -1915,7 +2190,7 @@ _spoolman_cache: dict = {"ts": 0.0, "base": "", "rows": []}
 
 async def _spoolman_collection(base: str) -> list:
     now = time.time()
-    if _spoolman_cache["base"] == base\
+    if _spoolman_cache["base"] == base \
             and now - _spoolman_cache["ts"] < 10.0:
         return _spoolman_cache["rows"]
     async with httpx.AsyncClient(timeout=_SPOOLMAN_TIMEOUT) as client:
@@ -2059,7 +2334,6 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
     state = _parse_state(await _query_state_gated())
     base = (state.get("spoolman_url") or "").strip().rstrip("/")
     if not base or state.get("spool_mode") == "local":
-
         if strict:
             raise HTTPException(400, "no Spoolman URL configured"
                                 if not base else "spool mode is local")
@@ -2067,7 +2341,6 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
     binding = state.get("spool_binding") or {}
     adopted, errs = 0, []
     coll = None
-
     items: list = []
     for ace in state.get("aces") or []:
         for sl in ace.get("slots") or []:
@@ -2078,7 +2351,6 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
                           f"ACE_SPOOL_ASSIGN ACE={ace.get('idx')} "
                           f"SLOT={sl.get('idx')} ID={{lid}}",
                           True))
-
     for hk, code in (state.get("head_tag_seen") or {}).items():
         try:
             h = int(hk)
@@ -2094,11 +2366,9 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
             continue
         sku = sku_raw.lstrip("#").lower()
         m = re.fullmatch(r"(?:sm)?(\d+)" if bare_id_ok else r"sm(\d+)", sku)
-
         if not m and not (3 <= len(sku) <= 19):
             continue
         if not strict and _sweep_tried.get(key) == sku:
-
             continue
         tag_sku = None
         if m:
@@ -2109,14 +2379,12 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
                 if coll is None:
                     coll = await _spoolman_collection(base)
             except Exception as e:
-
                 errs.append(f"{key}: {str(e) or type(e).__name__}")
                 continue
             hits = [sp for sp in coll
                     if isinstance(sp, dict) and not sp.get("archived")
                     and uid in _spool_card_uids(sp)]
             if not hits:
-
                 continue
             if len(hits) > 1:
                 ids = ", ".join(f"#{sp.get('id')}" for sp in hits)
@@ -2138,18 +2406,40 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
                         key, smid_s, lid,
                         " via card_uid" if tag_sku else "")
         except HTTPException as e:
-
             errs.append(f"{key}: {e.detail}")
         except Exception as e:
-
             _sweep_tried.pop(key, None)
-
             errs.append(f"{key}: {str(e) or type(e).__name__}")
     return {"ok": not errs, "adopted": adopted, "errors": errs}
 
 _SPOOL_UNMATCHED_RE = re.compile(
     r"\[spool\] tag .+ matches no table entry")
+_SPOOL_LEARNED_RE = re.compile(r"spool #\d+: learned card UID")
 _sweep_kick_task: "asyncio.Task | None" = None
+_card_kick_task: "asyncio.Task | None" = None
+
+def _card_kick() -> None:
+    global _card_kick_task
+    if _card_kick_task is not None and not _card_kick_task.done():
+        return
+    _card_kick_task = asyncio.create_task(_card_kick_run())
+
+async def _card_kick_run() -> None:
+    await asyncio.sleep(2.0)
+    try:
+        state = _parse_state(await _query_state_gated())
+        base = (state.get("spoolman_url") or "").strip().rstrip("/")
+        if not base or state.get("spool_mode") == "local":
+            return
+        if _spoolman_lock.locked():
+            return
+        async with _spoolman_lock:
+            pulled, perr = await _spoolman_refresh_known(
+                base, state.get("spools") or {})
+        _trace.info("spoolman card_uids kick: pulled=%d%s", pulled,
+                    (" " + perr) if perr else "")
+    except Exception as e:
+        _trace.warning("spoolman card_uids kick failed: %s", e)
 
 def _sweep_kick() -> None:
     global _sweep_kick_task
@@ -2160,7 +2450,6 @@ def _sweep_kick() -> None:
 async def _sweep_kick_run() -> None:
     await asyncio.sleep(2.0)
     if _spoolman_lock.locked():
-
         return
     try:
         res = await _spoolman_sweep_tags()
@@ -2195,7 +2484,6 @@ async def acefw_upload(file: UploadFile = File(...)) -> dict:
     _acefw.update({"file": file.filename or "upload",
                    "size": len(data), "state": "idle",
                    "msg": "", "error": "", "result": None, "pct": None})
-
     guess = ""
     try:
         import ace2_ota
@@ -2206,22 +2494,25 @@ async def acefw_upload(file: UploadFile = File(...)) -> dict:
             "version_guess": guess}
 
 async def _acefw_run(ace: int, port: str, version: str,
-                     password, md5, dry_run: bool, force: bool) -> None:
+                     password, md5, dry_run: bool, force: bool,
+                     patch_to_open: bool = False) -> None:
     def _prog(pct, msg):
         _acefw["pct"] = pct
         _acefw["msg"] = str(msg)
     try:
         _acefw["state"] = "flashing"
-
         import ace2_ota
         upload = str(_ACEFW_DIR / "upload.bin")
         fw, image_error = None, ""
         try:
+            _load_ver = "" if patch_to_open else version
             fw = await asyncio.to_thread(
-                ace2_ota.load_image, upload, version, md5, password)
+                ace2_ota.load_image, upload, _load_ver, md5, password)
+            if patch_to_open:
+                _prog(None, "patching V1.1.31 -> ACE2-Open (UID passthrough)")
+                fw = await asyncio.to_thread(ace2_ota.apply_uid_patch, fw.data)
         except Exception as e:
             image_error = str(e)
-
             if not dry_run:
                 raise
         res = await asyncio.to_thread(
@@ -2237,7 +2528,6 @@ async def _acefw_run(ace: int, port: str, version: str,
                            {"script": f"ACE_FW_RESUME ACE={ace}"})
             _acefw["state"] = "error" if _acefw["error"] else "done"
         except Exception as e:
-
             _acefw["error"] = ((_acefw["error"] + "; ") if _acefw["error"]
                                else "") + f"resume failed: {e}"
             _acefw["state"] = "error"
@@ -2258,10 +2548,20 @@ async def acefw_flash(payload: dict | None = None) -> dict:
         raise HTTPException(400, "ace index required")
     dry_run = bool(p.get("dry_run"))
     version = str(p.get("version") or "").strip()
-
+    patch_to_open = bool(p.get("patch_to_open"))
+    if patch_to_open:
+        try:
+            import ace2_ota
+            _have = ace2_ota.KNOWN_FIRMWARE.get("1.1.3O") is not None \
+                and hasattr(ace2_ota, "apply_uid_patch")
+        except Exception:
+            _have = False
+        if not _have:
+            raise HTTPException(400, "the 1.1.3O patch target is not "
+                                     "available in this build")
+        version = "1.1.3O"
     if not version and not dry_run:
         raise HTTPException(400, "target version required (e.g. 1.1.31)")
-
     if version and not dry_run:
         try:
             import ace2_ota
@@ -2290,7 +2590,6 @@ async def acefw_flash(payload: dict | None = None) -> dict:
     except Exception as e:
         _acefw.update({"state": "error", "error": f"release failed: {e}"})
         raise HTTPException(500, f"ACE_FW_RELEASE failed: {e}")
-
     state2 = _parse_state(await _query_state_gated())
     entry2 = next((a for a in (state2.get("aces") or [])
                    if int(a.get("idx", -1)) == ace), None)
@@ -2305,7 +2604,8 @@ async def acefw_flash(payload: dict | None = None) -> dict:
         raise HTTPException(500, "release not confirmed by the printer")
     asyncio.create_task(_acefw_run(
         ace, port, version, p.get("password") or None,
-        p.get("md5") or None, dry_run, bool(p.get("force"))))
+        p.get("md5") or None, dry_run, bool(p.get("force")),
+        patch_to_open))
     return {"ok": True}
 
 @app.get("/api/acefw/status")
@@ -2316,29 +2616,73 @@ async def acefw_status() -> dict:
 async def acefw_versions() -> dict:
     """The tested-versions allowlist (Dirk: 'nur getestete Versionen') -
     the UI's version dropdown offers exactly these; the byte gate sits in
-    ace2_ota.flash via check_known."""
+    ace2_ota.flash via check_known. 1.1.3O is NOT offered as a direct
+    target (Dirk 2026-08-30): it is reached by uploading stock 1.1.31 and
+    ticking 'patch to ACE2-Open'. Its KNOWN_FIRMWARE entry stays - it is
+    the byte-exact gate for the patched image."""
     try:
         import ace2_ota
         return {"versions": [
             {"version": v, "size": e.get("size"),
              "crc": "0x%04X" % e["crc"], "source": e.get("source", ""),
-
              "swu": e.get("swu", "")}
-            for v, e in sorted(ace2_ota.KNOWN_FIRMWARE.items())]}
+            for v, e in sorted(ace2_ota.KNOWN_FIRMWARE.items())
+            if v != "1.1.3O"],
+            "patch_target": ("1.1.3O"
+                             if ace2_ota.KNOWN_FIRMWARE.get("1.1.3O")
+                             and hasattr(ace2_ota, "apply_uid_patch")
+                             else "")}
     except Exception as e:
         return {"versions": [], "error": str(e)}
+
+_sm_pa_pushed: dict = {}
+
+async def _spoolman_pa_maybe_push(client, base: str, smid: str,
+                                  local_pa) -> bool:
+    """Piggyback PA push for the consumption pusher: acts only when the
+    local matrix differs from what this process last saw/wrote in Spoolman
+    (RAM gate -> the periodic tick normally costs NOTHING). On a change:
+    one GET (also yields the extra dict the PATCH must carry), skip if
+    Spoolman already matches, else PATCH. Local leads."""
+    if not isinstance(local_pa, dict):
+        return False
+    want = _pa_norm(local_pa)
+    if _sm_pa_pushed.get(smid) == want:
+        return False
+    r = await client.get(f"{base}/api/v1/spool/{smid}")
+    r.raise_for_status()
+    sp = r.json()
+    if not isinstance(sp, dict):
+        return False
+    if (_spoolman_pa_extra(sp) or {}) == want:
+        _sm_pa_pushed[smid] = want
+        return False
+    ok = await _spoolman_pa_push_one(client, base, smid, sp, local_pa)
+    if ok:
+        _sm_pa_pushed[smid] = want
+    return ok
 
 async def _spoolman_push(base: str, spools: dict) -> tuple[int, list[str]]:
     """Report consumption per spool as LENGTH, so Spoolman applies its own
     density/diameter and our estimate never enters its database. The synced
     counter advances only after a 2xx, so a failure repeats the same amount
-    next time instead of losing or double-counting it."""
+    next time instead of losing or double-counting it.
+    Also the ONE home of the PA push (Dirk 2026-08-30: every sync moment
+    shall update): this runs on the periodic tick, pause, idle, print-end
+    AND the manual button - and never in SpoolLink mode (that branch
+    returns before pushing), which is exactly the mod-owns-the-field gate."""
     pushed, errs = 0, []
     async with httpx.AsyncClient(timeout=_SPOOLMAN_TIMEOUT) as client:
         for sp in (spools or {}).values():
             smid = str(sp.get("spoolman_id") or "").strip()
             if not smid:
                 continue
+            try:
+                await _spoolman_pa_maybe_push(client, base, smid,
+                                              sp.get("pa_matrix"))
+            except (httpx.HTTPError, ValueError) as e:
+                _trace.info("spoolman: pa push SM%s failed: %s", smid,
+                            str(e) or type(e).__name__)
             try:
                 used = float(sp.get("used_mm") or 0.0)
                 done = float(sp.get("spoolman_synced_mm") or 0.0)
@@ -2372,12 +2716,10 @@ async def _spoolman_sync(pull: bool = True, push: bool = True) -> dict:
         raise HTTPException(409, "a Spoolman sync is already running")
     async with _spoolman_lock:
         pushed, pulled, errs = 0, 0, []
-
         if push:
             pushed, errs = await _spoolman_push(base, state.get("spools") or {})
         if pull:
             state2 = _parse_state(await _query_state_gated()) if push else state
-
             pulled, _ = await _spoolman_refresh_known(
                 base, state2.get("spools") or {}, force=True)
         _spoolman_last.update({"ts": time.time(), "ok": not errs,
@@ -2424,7 +2766,6 @@ async def run_macro(req: MacroRequest) -> dict:
             parts.append(_gcode_kv(k, v))
     script = " ".join(parts)
     try:
-
         result = await _mr_post("/printer/gcode/script",
                                 {"script": script}, timeout=1800.0)
     except httpx.HTTPStatusError as e:
@@ -2443,6 +2784,123 @@ async def run_macro(req: MacroRequest) -> dict:
         raise HTTPException(status_code=502,
             detail='moonraker: %s' % (str(e) or type(e).__name__))
     return {"script": script, "result": result}
+
+def _raw_calibration(status: dict) -> dict:
+    ace = status.get('ace', {}) or {}
+    return ace.get('calibration') or {'state': 'idle', 'session_id': 0}
+
+async def _dispatch_calibration(script: str) -> dict:
+    try:
+        return await _mr_post('/printer/gcode/script', {'script': script},
+                              timeout=30.0)
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(
+            status_code=e.response.status_code if e.response is not None else 502,
+            detail=detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail='moonraker: %s' % e)
+
+@app.get('/api/calibration')
+async def get_calibration() -> dict:
+    try:
+        status = await _query_state_gated()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail='moonraker: %s' % e)
+    return _raw_calibration(status)
+
+@app.post('/api/calibration/start')
+async def start_calibration(payload: CalibrationStart) -> dict:
+    if not (0 <= payload.ace <= 3 and 0 <= payload.slot <= 3
+            and 0 <= payload.head <= 3):
+        raise HTTPException(400, 'ace, slot and head must be 0-3')
+    scope = (payload.scope or 'ace').strip().lower()
+    if scope not in ('ace', 'slot'):
+        raise HTTPException(400, 'scope must be ace or slot')
+    script = ('ACE_CALIBRATION_START ACE=%d SLOT=%d HEAD=%d SCOPE=%s'
+              % (payload.ace, payload.slot, payload.head, scope))
+    result = await _dispatch_calibration(script)
+    return {'ok': True, 'script': script, 'result': result}
+
+@app.post('/api/calibration/action')
+async def calibration_action(payload: CalibrationAction) -> dict:
+    action = (payload.action or '').strip().lower()
+    try:
+        status = await _query_state_gated()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail='moonraker: %s' % e)
+    current = _raw_calibration(status)
+    if (payload.session_id is not None
+            and int(current.get('session_id', 0)) != payload.session_id):
+        raise HTTPException(409, 'calibration session changed; reload state')
+    if action == 'feed':
+        script = 'ACE_CALIBRATION_FEED'
+    elif action == 'retract':
+        length = int(payload.length or 0)
+        if length < 5 or length > 500:
+            raise HTTPException(400, 'retract length must be 5-500 mm')
+        script = 'ACE_CALIBRATION_RETRACT LENGTH=%d' % length
+    elif action == 'feed_jog':
+        length = int(payload.length or 0)
+        if length < 5 or length > 500:
+            raise HTTPException(400, 'forward jog length must be 5-500 mm')
+        script = 'ACE_CALIBRATION_FEED_JOG LENGTH=%d' % length
+    elif action == 'mark_swap':
+        script = 'ACE_CALIBRATION_MARK MARK=swap'
+    elif action == 'return_park':
+        script = 'ACE_CALIBRATION_RETURN'
+    elif action == 'verify_start':
+        script = 'ACE_CALIBRATION_VERIFY ACTION=start'
+        route = (payload.ace, payload.slot, payload.head)
+        if any(value is not None for value in route):
+            if not all(value is not None for value in route):
+                raise HTTPException(400, 'verify route requires ace, slot and head')
+            if not all(0 <= int(value) <= 3 for value in route):
+                raise HTTPException(400, 'ace, slot and head must be 0-3')
+            scope = (payload.scope or 'ace').strip().lower()
+            if scope not in ('ace', 'slot'):
+                raise HTTPException(400, 'scope must be ace or slot')
+            script += ' ACE=%d SLOT=%d HEAD=%d SCOPE=%s' % (
+                payload.ace, payload.slot, payload.head, scope)
+    elif action == 'verify_continue':
+        script = 'ACE_CALIBRATION_VERIFY ACTION=continue'
+    elif action == 'verify_pause':
+        script = 'ACE_CALIBRATION_VERIFY ACTION=pause'
+    elif action == 'verify_resume':
+        script = 'ACE_CALIBRATION_VERIFY ACTION=resume'
+    elif action == 'verify_jog':
+        length = int(payload.length or 0)
+        if abs(length) not in (1, 2, 5, 10):
+            raise HTTPException(
+                400, 'verification jog must be +/-1, 2, 5, or 10 mm')
+        script = 'ACE_CALIBRATION_VERIFY ACTION=jog LENGTH=%d' % length
+    elif action == 'cancel':
+        script = 'ACE_CALIBRATION_CANCEL'
+    elif action == 'reset':
+        script = 'ACE_CALIBRATION_RESET'
+    else:
+        raise HTTPException(400, 'unknown calibration action')
+    result = await _dispatch_calibration(script)
+    return {'ok': True, 'script': script, 'result': result}
+
+@app.post('/api/calibration/unload-cancel')
+async def cancel_calibration_unload() -> dict:
+    """Cancel preparation out-of-band through a Klipper webhook.
+
+    This deliberately does not dispatch G-code: a cancellation submitted to
+    the G-code queue cannot run until the blocking unload has already ended.
+    """
+    try:
+        result = await _mr_post(
+            '/printer/multiace/calibration_unload_cancel', {}, timeout=5.0)
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        raise HTTPException(
+            status_code=e.response.status_code if e.response is not None else 502,
+            detail=detail)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail='moonraker: %s' % e)
+    return {'ok': True, 'result': result}
 
 def _extract_params(text: str) -> tuple[dict[str, str], dict[int, dict[str, str]]]:
     """Pull `key: value` pairs out of [ace] and per-ACE [ace N] sections.
@@ -2500,7 +2958,7 @@ def _load_tipform_module():
                 continue
             st = cand.stat()
             sig = (str(cand), st.st_mtime, st.st_size)
-            if _tipform_mod_cache["sig"] == sig\
+            if _tipform_mod_cache["sig"] == sig \
                     and _tipform_mod_cache["mod"] is not None:
                 return _tipform_mod_cache["mod"]
             spec = importlib.util.spec_from_file_location(
@@ -2618,17 +3076,14 @@ async def set_tipform(payload: TipformUpdate) -> dict:
         raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
     text = p.read_text(encoding="utf-8")
     backup = p.with_suffix(p.suffix + ".bak")
-    backup.write_text(text, encoding="utf-8")
-    p.write_text(_rewrite_tipform_section(text, mode, tables),
-                 encoding="utf-8")
+    _write_cfg_atomic(backup, text)
+    _write_cfg_atomic(p, _rewrite_tipform_section(text, mode, tables))
     restart: dict | None = None
     if payload.restart_klipper:
         try:
-
             restart = await _mr_post("/printer/firmware_restart", {})
         except httpx.HTTPError as e:
             restart = {"error": str(e)}
-
     reloaded = False
     if not payload.restart_klipper:
         try:
@@ -2649,6 +3104,24 @@ def _cfg_sha1(text: str) -> str:
     import hashlib
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
+def _write_cfg_atomic(path, text: str) -> None:
+    """Write `text` to `path` atomically: a sibling .tmp then os.replace.
+
+    os.replace needs write permission on the DIRECTORY, not on the target
+    file, so this succeeds even when ace.cfg is root-owned - the normal
+    state right after an SSH-as-root install (install_multiace.sh runs as
+    root, S18). An in-place p.write_text() opens the existing file for
+    truncation and needs write permission on the FILE, so it raises
+    PermissionError [Errno 13] -> HTTP 500 there (tipform apply / config
+    save). The replace also flips ownership to the writer (lava),
+    self-healing the file the same way the Klipper-side write-through
+    (_cfg_write_ace_option, S48) already does - which is why the error was
+    transient (any Klipper setter in between fixed it)."""
+    p = Path(path)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(str(tmp), str(p))
+
 @app.get("/api/config")
 async def get_config() -> dict:
     p = Path(MULTIACE_CFG_PATH)
@@ -2665,7 +3138,6 @@ async def update_config(payload: ConfigUpdate) -> dict:
     if not p.exists():
         raise HTTPException(404, f"config file not found: {MULTIACE_CFG_PATH}")
     if payload.base_sha1:
-
         cur = p.read_text(encoding="utf-8")
         cur_sha1 = _cfg_sha1(cur)
         if cur_sha1 != payload.base_sha1:
@@ -2675,13 +3147,12 @@ async def update_config(payload: ConfigUpdate) -> dict:
                 "content": cur,
             }))
     backup = p.with_suffix(p.suffix + ".bak")
-    backup.write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
-    p.write_text(payload.content, encoding="utf-8")
+    _write_cfg_atomic(backup, p.read_text(encoding="utf-8"))
+    _write_cfg_atomic(p, payload.content)
     new_sha1 = _cfg_sha1(payload.content)
     restart: dict | None = None
     if payload.restart_klipper:
         try:
-
             restart = await _mr_post("/printer/firmware_restart", {})
         except httpx.HTTPError as e:
             restart = {"error": str(e)}
@@ -2763,7 +3234,6 @@ async def screen_available() -> dict:
 _SNAP_NAME_RE = re.compile(r"^[A-Za-z0-9_\- ]{1,64}$")
 
 def _snap_dir(mode: str | None) -> Path:
-
     base = Path(SNAPSHOT_DIR)
     return base / "head" if (mode or "") == "head" else base
 
@@ -2811,7 +3281,6 @@ def _capture_snapshot(now_status: dict, mode: str | None = None) -> dict:
                 "sku":      (slot_obj or {}).get("sku", ""),
             })
         elif head_mode and t.get("feeder"):
-
             mat = (t.get("material") or "").strip()
             col = (t.get("color") or "")
             if not mat and not col:
@@ -3193,8 +3662,10 @@ def _is_error_gcode_response(text: str) -> bool:
     if not s:
         return False
     body = s[3:].strip() if s.startswith("// ") else s
-
     if body.startswith("[warn]") and "[multiACE]" in s:
+        return True
+    if ((body.startswith("[info]") or body.startswith("[done]"))
+            and "[multiACE]" in s):
         return True
     is_error = (
         body.startswith("!!")
@@ -3222,9 +3693,14 @@ def _record_notification(text: str) -> dict | None:
             break
 
     level = "error"
+    done = False
     if msg.startswith("[warn]"):
         level = "warn"
         msg = msg[len("[warn]"):].strip()
+    elif msg.startswith("[info]") or msg.startswith("[done]"):
+        level = "info"
+        done = msg.startswith("[done]")
+        msg = msg[len("[info]"):].strip()
 
     if msg.startswith("[multiACE] "):
         msg = msg[len("[multiACE] "):].strip()
@@ -3237,6 +3713,13 @@ def _record_notification(text: str) -> dict | None:
         "raw":   text.strip(),
         "level": level,
     }
+    if level == "info":
+        keep = [n for n in _notifications if n.get("level") != "info"]
+        _notifications.clear()
+        _notifications.extend(keep)
+        note["replaces_info"] = True
+        if done:
+            note["ttl"] = 8
     _notifications.append(note)
     _trace.info("notification %d captured: %s", note["id"], note["msg"])
     return note
@@ -3261,13 +3744,12 @@ async def _on_status_update(params: list) -> None:
         return
     prev, _print_state_last = _print_state_last, st
     if st == "paused" and prev == "printing":
-
         try:
             await _spoolman_push_now("pause")
         except Exception as e:
             _trace.warning("spoolman pause sync failed: %s", e)
         return
-    if st not in ("complete", "cancelled", "error")\
+    if st not in ("complete", "cancelled", "error") \
             or prev not in ("printing", "paused"):
         return
     try:
@@ -3301,7 +3783,6 @@ async def _spoolman_push_now(why: str, sl_pull: bool = True) -> None:
     right for a timed tick but not for a click-driven trigger (tab
     switch). Those callers pass False; the periodic tick keeps it."""
     if _spoolman_lock.locked():
-
         return
     state = _parse_state(await _query_state_gated())
     base = (state.get("spoolman_url") or "").strip().rstrip("/")
@@ -3312,7 +3793,6 @@ async def _spoolman_push_now(why: str, sl_pull: bool = True) -> None:
     if state.get("spool_mode") == "spoollink":
         if not sl_pull:
             return
-
         async with _spoolman_lock:
             pulled, perr = await _spoolman_refresh_known(
                 base, state.get("spools") or {})
@@ -3349,7 +3829,6 @@ async def _spoolman_push_if_idle(why: str) -> dict:
     try:
         await _spoolman_push_now(why, sl_pull=False)
     except Exception as e:
-
         _trace.info("spoolman %s push failed: %s", why, e)
         return {"ok": False, "pushed": False, "error": str(e)[:200]}
     return {"ok": True, "pushed": True}
@@ -3432,7 +3911,6 @@ async def _moonraker_log_listener() -> None:
                         "id": 1,
                     }))
                     _trace.info("moonraker WS identify sent")
-
                     await ws.send(json.dumps({
                         "jsonrpc": "2.0",
                         "method": "printer.objects.subscribe",
@@ -3448,7 +3926,6 @@ async def _moonraker_log_listener() -> None:
 
                     if debug_recv:
                         _trace.warning("moonraker WS recv #%d: %s", msg_count, str(raw)[:240])
-
                     if _homing_active():
                         continue
                     try:
@@ -3457,7 +3934,6 @@ async def _moonraker_log_listener() -> None:
                         continue
                     if (msg.get("id") == 2
                             and isinstance(msg.get("result"), dict)):
-
                         _st = (((msg["result"].get("status") or {})
                                 .get("print_stats") or {})
                                .get("state") or "")
@@ -3476,8 +3952,10 @@ async def _moonraker_log_listener() -> None:
                     text = params[0]
                     if (isinstance(text, str)
                             and _SPOOL_UNMATCHED_RE.search(text)):
-
                         _sweep_kick()
+                    if (isinstance(text, str)
+                            and _SPOOL_LEARNED_RE.search(text)):
+                        _card_kick()
                     rec = _record_notification(text)
                     if rec is not None:
                         _trace.warning("Klipper error captured: %s", rec["msg"])
@@ -3783,14 +4261,38 @@ def _load_filament_db() -> dict:
         except (OSError, SyntaxError):
             continue
         cfg = None
+        flat = None
         for node in tree.body:
-            if isinstance(node, ast.Assign) and any(
-                    isinstance(t, ast.Name)
-                    and t.id == "FILAMENT_PARA_CFG_DEFAULT"
-                    for t in node.targets):
-                cfg = node.value
-                break
+            if not isinstance(node, ast.Assign):
+                continue
+            for t in node.targets:
+                if not isinstance(t, ast.Name):
+                    continue
+                if t.id == "FILAMENT_PARA_CFG_DEFAULT":
+                    cfg = node.value
+                elif t.id == "FILAMENT_PARA_CFG_STANDARD_04_DEFAULT":
+                    flat = node.value
         if not isinstance(cfg, ast.Dict):
+            if isinstance(flat, ast.Dict):
+                db2: dict = {}
+                for k in flat.keys:
+                    if not (isinstance(k, ast.Constant)
+                            and isinstance(k.value, str)
+                            and k.value.endswith("_load_temp")):
+                        continue
+                    body = k.value[:-len("_load_temp")]
+                    if not body.startswith("generic_"):
+                        continue
+                    rest = body[len("generic_"):]
+                    mat, _, sub = rest.partition("_")
+                    if not mat:
+                        continue
+                    vendors = db2.setdefault(mat, {"Generic": []})
+                    if sub and sub != "generic"                             and sub not in vendors["Generic"]:
+                        vendors["Generic"].append(sub)
+                if db2:
+                    _FIL_DB_CACHE[path] = (mtime, db2)
+                    return db2
             continue
         db: dict = {}
         for k, v in zip(cfg.keys, cfg.values):
@@ -3858,12 +4360,13 @@ async def ws(websocket: WebSocket) -> None:
                             "msg":        n["msg"],
                             "raw":        n["raw"],
                             "level":      n["level"],
+                            "replaces_info": bool(n.get("replaces_info")),
+                            "ttl":        n.get("ttl") or 0,
                         })
                     except Exception:
                         return
                     last_seen_notif_id = n["id"]
             if now - last_ts >= 1.0 and not _homing_active():
-
                 try:
                     status = await _query_state()
                     payload = _parse_state(status)
@@ -3871,7 +4374,6 @@ async def ws(websocket: WebSocket) -> None:
                     payload["ts"] = now
                     await websocket.send_json(payload)
                 except httpx.HTTPStatusError as e:
-
                     if e.response is not None and e.response.status_code == 503:
                         await websocket.send_json(
                             {"type": "state", "klippy": "disconnected", "ts": now})

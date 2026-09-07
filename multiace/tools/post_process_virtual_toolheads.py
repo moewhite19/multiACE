@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 
 import sys, re, os, json
 import urllib.request, urllib.error
@@ -142,10 +142,50 @@ def parse_toolchanges_with_times_from_file(in_path):
 
 _TC_CHANGE_RE = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*(\d+)')
 _TC_BARE_RE = re.compile(r'^T(\d{1,2})\b')
+
+_TC_MATCH_RE = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
+_LAYER_BOUNDARY_RE = re.compile(r'^;\s*(?:LAYER_CHANGE|CHANGE_LAYER)\b')
+
+def _file_has_change_tool(in_path):
+    """Cheap pre-scan: does the file carry any '; Change Tool X -> Tool Y'
+    marker? Decides the body-start boundary shared by all three streaming
+    passes (rewrite head / rewrite multi / _scan_body_tools)."""
+    try:
+        with open(in_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                if _TC_MATCH_RE.match(line.lstrip()):
+                    return True
+    except OSError:
+        pass
+    return False
+
+def _body_start_re(in_path):
+    """The line predicate that marks the body start: the tool-change marker
+    when the file has one, else the first layer-change marker (A1)."""
+    return _TC_MATCH_RE if _file_has_change_tool(in_path) else _LAYER_BOUNDARY_RE
+
+def file_body_detectable(in_path):
+    """True if the print body can be found by EITHER the tool-change marker
+    or a layer-change marker. A multi-colour file where NEITHER exists
+    yields zero swaps by any path (A1's fallback included) - the preflight
+    should refuse it loudly rather than ship a file that silently prints
+    one colour (A2). Public: called via the post_process module from
+    preflight_core. An all-pinned head-mode print is NOT caught here: it has
+    layer markers, so its body is detectable; its zero ACE swaps are
+    legitimate."""
+    try:
+        with open(in_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                s = line.lstrip()
+                if _TC_MATCH_RE.match(s) or _LAYER_BOUNDARY_RE.match(s):
+                    return True
+    except OSError:
+        pass
+    return False
+
 _TC_M73_RE = re.compile(r'^M73\b.*?\bR(\d+(?:\.\d+)?)')
 
 def _toolchanges_with_times(lines_iter, has_change):
-
     events = []
     times = []
     last_r = None
@@ -197,7 +237,6 @@ def lookup_live_slots(host, port=80, path='/multiace/api/state', timeout=5.0):
         for slot in ace.get('slots', []) or []:
             if slot.get('state') == 'empty':
                 continue
-
             if 'source' in slot and slot['source'] not in ('rfid', 'override'):
                 continue
             color = (slot.get('color') or '').strip().lower()
@@ -516,7 +555,6 @@ def match_colors_to_slots(color_names, live_slots, num_heads=4,
         for t in list(pending):
             tm = t_meta[t]
             t_mat = (tm.get('mat') or '').strip().lower()
-
             allowed = nozzle_groups.get(t) if nozzle_groups else None
             candidates = [sm for sm in already
                           if (not t_mat or not sm['mat']
@@ -607,7 +645,6 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
         if not c:
             continue
         mat = (slicer_types.get(t) or '').strip().lower()
-
         allowed = nozzle_groups.get(t) if nozzle_groups else None
         cands = []
         for head, p in pins.items():
@@ -627,7 +664,6 @@ def compute_head_mode_layout(slicer_colors, slicer_types, pinned_heads,
     usable_slots = [s for s in (ace_slots or []) if int(s['ace']) in head_of_ace]
     rest_colors = {t: slicer_colors[t] for t in slicer_colors if t not in pinned_t}
     rest_types = {t: (slicer_types.get(t) or '') for t in rest_colors}
-
     _remap, info, _used = match_colors_to_slots(
         rest_colors, usable_slots, num_heads=4,
         filament_types=rest_types, strict_color=False,
@@ -884,7 +920,6 @@ def compute_head_mode_optimize(events, feeder_heads, ace_heads, ace_num_of_head,
                             and r_now is not None
                             and rr - r_now >= BG_UNLOAD_MIN_WINDOW_MIN):
                         bg_ok += 1
-
                     if flush_matrix is not None:
                         p_t = cur.get(b)
                         if (0 <= p_t < len(flush_matrix)
@@ -894,7 +929,6 @@ def compute_head_mode_optimize(events, feeder_heads, ace_heads, ace_num_of_head,
             released_r.pop(b, None)
 
         pins = sum(1 for b in combo if b < F)
-
         cost = ((swaps - bg_ok) * BG_SWAP_COST_INLINE_S
                 + bg_ok * BG_SWAP_COST_BG_S)
         if objective == 'color' and flush_matrix is not None:
@@ -945,7 +979,7 @@ BG_SWAP_COST_INLINE_S = 210
 BG_SWAP_COST_BG_S = 30
 BG_UNLOAD_INLINE_SAVING_S = BG_SWAP_COST_INLINE_S - BG_SWAP_COST_BG_S
 
-BG_INITIAL_LOAD = False
+BG_INITIAL_LOAD = True
 
 PP_FORMAT_VERSION = 4
 
@@ -990,7 +1024,6 @@ def scan_cooling_standbys(in_path, head_of_tool):
     without the collision comes out byte-identical.
     """
     danger = set()
-
     cold_setters = {}
     target = {}
     active = None
@@ -1020,7 +1053,6 @@ def scan_cooling_standbys(in_path, head_of_tool):
                 if 0 < val < STANDBY_MIN_EXTRUDE_C:
                     cold_setters.setdefault(h, []).append(no)
                 else:
-
                     cold_setters[h] = []
                 continue
             if code[:2] in ('G0', 'G1') and active is not None:
@@ -1033,14 +1065,12 @@ def scan_cooling_standbys(in_path, head_of_tool):
                 except ValueError:
                     continue
                 tg = target.get(active)
-
                 if tg is not None and 0 < tg < STANDBY_MIN_EXTRUDE_C:
                     danger.update(cold_setters.get(active, ()))
     return danger
 
 PURGE_MATRIX_ENABLE = True
 FILAMENT_MM3_PER_MM = 2.405
-
 PURGE_MATRIX_TOPUP_FRAC = 0.45
 PURGE_MATRIX_MIN_MM = 40.
 PURGE_MATRIX_MAX_MM = 150.
@@ -1138,7 +1168,6 @@ def _flush_matrix_build(raw, mult):
     n = int(round(len(vals) ** 0.5))
     if n < 2 or n * n != len(vals):
         return None
-
     if not mult or mult <= 0:
         mult = 1.0
     return [[vals[i * n + j] * mult for j in range(n)] for i in range(n)]
@@ -1217,6 +1246,7 @@ def _scan_body_tools(in_path):
     line_nos = []
     last_r = None
     in_body = False
+    body_start = _body_start_re(in_path)
     with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
         for line_no, line in enumerate(fin):
             stripped = line.rstrip('\r\n')
@@ -1224,7 +1254,7 @@ def _scan_body_tools(in_path):
             if mr:
                 last_r = float(mr.group(1))
                 continue
-            if not in_body and change_t.match(stripped):
+            if not in_body and body_start.match(stripped):
                 in_body = True
                 continue
             m = bare_t.match(stripped)
@@ -1279,7 +1309,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
         return re.sub(r'T(\d{1,2})', repl, line)
 
     in_body = False
-
+    body_start = _body_start_re(in_path)
     cooling_standbys = scan_cooling_standbys(in_path, head_of)
     cur = {}
     cur_tool = {}
@@ -1287,19 +1317,16 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
     skipped = 0
     primed_ace = set()
     primed_pin = set()
-
     post_t_unret = _scan_post_t_unretracts(in_path)
-
     flush_matrix = (parse_flush_matrix_raw_from_file(in_path)
                     if PURGE_MATRIX_ENABLE else None)
-
     body_tools, body_times, body_lines = _scan_body_tools(in_path)
     bt_idx = 0
     total = os.path.getsize(in_path) or 1
     seen = 0
     last_pr = 0
 
-    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin,\
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
          open(out_path, 'w', encoding='utf-8') as fout:
         for line_no, line in enumerate(fin):
             seen += len(line.encode('utf-8', errors='ignore'))
@@ -1320,14 +1347,12 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                 n = int(mp.group(1))
                 ae = ace_entry_of(n)
                 if ae is not None:
-
                     last_pr = _emit_progress(progress, seen, total, last_pr)
                     continue
                 h = head_of(n)
                 if h is None:
                     fout.write(line)
                 elif h not in primed_pin:
-
                     primed_pin.add(h)
                     fout.write(
                         'SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d FORCE=1\n' % h)
@@ -1336,7 +1361,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
-            if not in_body and change_t.match(stripped):
+            if not in_body and body_start.match(stripped):
                 in_body = True
 
             mt = bare_t.match(stripped)
@@ -1345,14 +1370,12 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                 h = head_of(n)
                 if h is None:
                     fout.write(line)
-
                     if (in_body and bt_idx < len(body_tools)
                             and body_tools[bt_idx] == n):
                         bt_idx += 1
                     last_pr = _emit_progress(progress, seen, total, last_pr)
                     continue
                 fout.write('T%d\n' % h)
-
                 if (in_body and bt_idx < len(body_tools)
                         and body_tools[bt_idx] == n):
                     if bt_idx > 0:
@@ -1370,7 +1393,6 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                     nxt_j = j
                                     break
                             if nxt is not None and nxt != loaded_now:
-
                                 r_now = body_times[bt_idx]
                                 r_nxt = body_times[nxt_j]
                                 window = None
@@ -1385,12 +1407,10 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                         % (ae_rel[0], int(window),
                                            BG_UNLOAD_MIN_WINDOW_MIN))
                                 else:
-
                                     ao = post_t_unret.get(
                                         body_lines[nxt_j])
                                     if ao is None:
                                         ao = ANTI_OOZE_NO_UNRETRACT
-
                                     _bgp = _matrix_purge_mm(
                                         flush_matrix, rel_tool,
                                         body_tools[nxt_j])
@@ -1404,7 +1424,6 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                     bt_idx += 1
                 ae = ace_entry_of(n)
                 if not in_body:
-
                     if ae is not None:
                         primed_ace.add(ae[0])
                 elif ae is not None:
@@ -1415,15 +1434,12 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                    % (head, a, s))
                         skipped += 1
                         cur_tool[head] = n
-
                         if pickup_cleaning:
                             fout.write('ACE_PICKUP_CLEAN HEAD=%d\n' % head)
                     else:
-
                         v = post_t_unret.get(line_no)
                         if v is None:
                             v = ANTI_OOZE_NO_UNRETRACT
-
                         _pp = _matrix_purge_mm(flush_matrix,
                                                cur_tool.get(head), n)
                         if _pp is not None:
@@ -1435,12 +1451,10 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         cur_tool[head] = n
                         active += 1
                     if head not in primed_ace:
-
                         primed_ace.add(head)
                         fout.write('SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d '
                                    'FORCE=1\n' % head)
                 elif pickup_cleaning:
-
                     fout.write('ACE_PICKUP_CLEAN HEAD=%d\n' % h)
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
@@ -1489,6 +1503,16 @@ def parse_nozzle_diameters(gcode):
     only because it omits that whole briefing line. Scoping the gate to
     FOrca therefore covers the entire exposed population while leaving
     the normal workflow provably untouched.
+
+    Version drift, re-checked per tree (S11): on 1.5.2 and 1.6.0 that
+    check sits behind 'if nozzle_diameter is not None', so a command
+    without NOZZLE_DIAMETER_LIST skips it - FOrca's omission of the whole
+    line still skips far more. 1.6.0 adds a second axis: the nozzle
+    VOLUME TYPE (standard/high_flow, per-extruder, exception_code 19 on
+    mismatch) with its own guard - gated on FILAMENT_VOLUME_TYPE being
+    present, plus a SnapmakerOrca-only branch that demands all-standard
+    when it is absent. FOrca's banner is not 'SnapmakerOrca', so neither
+    branch fires for it today.
 
     Empty dict when the line is absent - callers must then treat the
     diameters as UNKNOWN and skip the gate, never assume uniformity.
@@ -1576,7 +1600,6 @@ def nozzle_gate_groups(tool_dia, head_dia=None, num_heads=4):
             continue
         groups[t] = {h for h, have in head_dia.items()
                      if have and abs(have - want) < 0.001}
-
     every = set(head_dia)
     if all(v == every for v in groups.values()):
         return {}
@@ -1865,7 +1888,7 @@ def _suggest_layer_friendly_remap(layer_colors, num_aces):
     return new_t if any(v != k for k, v in new_t.items()) else None
 
 def compute_swap_aware_layout(events, num_aces, num_heads=4,
-                              layer_color_sets=None):
+                              layer_color_sets=None, allowed_heads=None):
     """Search head assignments per color (free distribution - colors
     are NOT bound to head=T%4) for the one that minimizes the runtime
     swap count.
@@ -1884,6 +1907,13 @@ def compute_swap_aware_layout(events, num_aces, num_heads=4,
             when provided, assignments that put 2+ colors on the same
             head within ANY single layer are rejected (= layer-only
             swap mode, no mid-layer changes).
+        allowed_heads: optional {T: set(heads)} from nozzle_gate_groups -
+            the MIXED-NOZZLE constraint. A filament is sliced at the line
+            width of one nozzle diameter and can only ever print on a head
+            carrying that diameter; without this the optimizer is free to
+            move it to a wrong-sized nozzle, which is a silently ruined
+            print. None/empty (uniform machine, unknown diameters) leaves
+            the search unconstrained, i.e. byte-identical to before.
 
     Returns:
         (color_to_head dict, swap_count) on success
@@ -1900,10 +1930,27 @@ def compute_swap_aware_layout(events, num_aces, num_heads=4,
     if n > 12:
         return None, None
 
+    allow = None
+    if allowed_heads:
+        allow = []
+        for c in colors_list:
+            hs = allowed_heads.get(c, None)
+            allow.append(None if hs is None else set(hs))
+        if all(a is None for a in allow):
+            allow = None
+
     best_assignment = None
     best_swaps = None
 
     for assignment in product(range(num_heads), repeat=n):
+        if allow is not None:
+            ok = True
+            for i, h in enumerate(assignment):
+                if allow[i] is not None and h not in allow[i]:
+                    ok = False
+                    break
+            if not ok:
+                continue
         head_count = [0] * num_heads
         for h in assignment:
             head_count[h] += 1
@@ -2634,7 +2681,6 @@ def inject_auto_load(gcode):
             continue
         cleaned.append(ln)
     lines = cleaned
-
     inject_idx = _structural_inject_idx(lines)
 
     if inject_idx is None:
@@ -2665,7 +2711,6 @@ def inject_auto_load(gcode):
     used_heads = set()
 
     body_start = inject_idx if inject_idx is not None else 0
-
     _in_old_block = False
     for i in range(0, body_start):
         ls_pre = lines[i].strip()
@@ -2692,7 +2737,6 @@ def inject_auto_load(gcode):
             if head not in initial:
 
                 j = i + 1
-
                 while j < len(lines):
                     sj = lines[j].strip()
                     if (sj == '' or sj.startswith(';')
@@ -2729,7 +2773,6 @@ def inject_auto_load(gcode):
     inject = ['', '; multiACE auto-load: load initial filaments']
     for head in sorted(initial):
         ace, slot = initial[head]
-
         inject.append('ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d INITIAL=1'
                       % (head, ace, slot))
     inject.append('; multiACE auto-load: end')
@@ -2834,7 +2877,7 @@ def apply_remap_to_file(in_path, out_path, remap, progress=None):
     total = os.path.getsize(in_path) or 1
     seen = 0
     last_pr = 0
-    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin,\
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
          open(out_path, 'w', encoding='utf-8') as fout:
         for line in fin:
             seen += len(line.encode('utf-8', errors='ignore'))
@@ -2866,7 +2909,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
     drop_pre  = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=([4-9]|1[0-5])\b')
     low_pre   = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT INDEX=([0-3])\b')
     change_t  = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*\d+')
-
     change_to = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*(\d+)')
     bare_hi   = re.compile(r'^T([4-9]|1[0-5])\s*$')
     bare_lo   = re.compile(r'^T([0-3])\s*$')
@@ -2879,18 +2921,15 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
                       line)
 
     in_body = False
+    body_start = _body_start_re(in_path)
     head_loaded = {0: (0, 0), 1: (0, 1), 2: (0, 2), 3: (0, 3)}
-
     head_slicer = {}
-
     flush_matrix = (parse_flush_matrix_raw_from_file(in_path)
                     if PURGE_MATRIX_ENABLE else None)
     active = 0
     skipped = 0
     swapbacks = 0
-
     cooling_standbys = scan_cooling_standbys(in_path, lambda n: n % 4)
-
     primed_first = set()
 
     post_t_unret = _scan_post_t_unretracts(in_path)
@@ -2902,7 +2941,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
     pending_head = None
     pending_line_no = None
     pending_blanks: list[str] = []
-
     pending_slicer = None
     pending_slicer_tool = None
 
@@ -2918,7 +2956,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
         guess from the wrong row."""
         if arriving_slicer is not None:
             return head_slicer.get(head), arriving_slicer
-
         prev = head_loaded.get(head)
         return ((prev[0] * 4 + head) if prev else None), arriving_virtual
 
@@ -2947,7 +2984,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
         for b in pending_blanks:
             fout.write(b)
         pending_blanks.clear()
-
         _pf, _pt = _purge_pair(head, head, arriving)
         if arriving is not None:
             head_slicer[head] = arriving
@@ -2961,7 +2997,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
             active += 1
             head_loaded[head] = initial_key
         elif pickup_cleaning:
-
             fout.write('ACE_PICKUP_CLEAN HEAD=%d\n' % head)
 
     def flush_pending_paired(fout):
@@ -2981,7 +3016,7 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
             fout.write(b)
         pending_blanks.clear()
 
-    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin,\
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
          open(out_path, 'w', encoding='utf-8') as fout:
         for _raw_no, line in enumerate(fin):
             seen += len(line.encode('utf-8', errors='ignore'))
@@ -3003,7 +3038,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
             if mdp:
                 if pending_head is not None:
                     flush_pending_unmatched(fout)
-
                 hpre = int(mdp.group(1)) % 4
                 if hpre not in primed_first:
                     primed_first.add(hpre)
@@ -3012,7 +3046,7 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
-            if not in_body and change_t.match(stripped):
+            if not in_body and body_start.match(stripped):
                 in_body = True
 
             _mct = change_to.match(stripped)
@@ -3073,7 +3107,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
                 ace = n // 4
                 fout.write('T%d\n' % head)
                 key = (ace, head)
-
                 _pf, _pt = _purge_pair(head, n, pending_slicer)
                 if pending_slicer is not None:
                     head_slicer[head] = pending_slicer
@@ -3097,7 +3130,6 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
             if m:
                 pending_head = int(m.group(1))
                 pending_line_no = _raw_no
-
                 pending_slicer_tool = pending_slicer
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
@@ -3148,7 +3180,6 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
       4. First ACE_SWAP_HEAD HEAD= line."""
     preextr_re = re.compile(r'^SM_PRINT_PREEXTRUDE_FILAMENT\b')
     chg_re     = re.compile(r'^;\s*Change Tool\s*\d+\s*->\s*Tool\s*(\d+)')
-
     swap_re    = re.compile(
         r'^ACE_SWAP_HEAD HEAD=(\d+) ACE=(\d+) SLOT=(\d+)(?:\s+\S+=\S+)*\s*$')
     bare_t_re  = re.compile(r'^T([0-3])\s*$')
@@ -3158,7 +3189,6 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
     first_chg     = None
     first_preextr = None
     first_swap    = None
-
     first_ext     = None
     ext_boundary  = None
     last_boundary = None
@@ -3224,7 +3254,6 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
     first_seen_head: int | None = None
 
     if anchor_line_no is not None:
-
         with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
             for line_no, line in enumerate(fin):
                 if line_no >= anchor_line_no:
@@ -3244,7 +3273,6 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
                 stripped = line.strip()
 
                 if pending_t_head is not None:
-
                     if (stripped == '' or stripped.startswith(';')
                             or stripped.startswith('ACE_BG_')
                             or stripped.startswith('ACE_SET_PURGE')):
@@ -3299,9 +3327,7 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
                             len(inject_heads))
         inject_block.append('; multiACE processed: format=%d\n'
                             % PP_FORMAT_VERSION)
-
         inject_block.append('ACE_SET_PURGE RESET=1\n')
-
         _bg_set = set(bg_heads or ())
         _use_bg = (BG_INITIAL_LOAD and only_heads is not None and bool(_bg_set))
         i = 0
@@ -3314,7 +3340,6 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
                 inject_block.append(
                     'ACE_BG_SWAP HEAD=%d ACE=%d SLOT=%d ANTI_OOZE=%s QUIET=1\n'
                     % (hb, ab, sb, _fmt_anti_ooze(ANTI_OOZE_NO_UNRETRACT)))
-
                 inject_block.append(
                     'ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d INITIAL=1\n'
                     % (h, a, s))
@@ -3327,7 +3352,6 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
                     'ACE_SWAP_HEAD HEAD=%d ACE=%d SLOT=%d INITIAL=1\n'
                     % (h, a, s))
                 i += 1
-
         if (only_heads is not None and first_seen_head is not None
                 and first_seen_head in initial):
             inject_block.append('SM_PRINT_PREEXTRUDE_FILAMENT INDEX=%d '
@@ -3337,7 +3361,7 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
     seen = 0
     last_pr = 0
     injected = False
-    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin,\
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
          open(out_path, 'w', encoding='utf-8') as fout:
         for line_no, line in enumerate(fin):
             seen += len(line.encode('utf-8', errors='ignore'))
@@ -3369,7 +3393,7 @@ def apply_layer_remap_to_file(in_path, out_path, layer_info, progress=None):
         total = os.path.getsize(in_path) or 1
         seen = 0
         last_pr = 0
-        with open(in_path, 'r', encoding='utf-8', errors='replace') as fin,\
+        with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
              open(out_path, 'w', encoding='utf-8') as fout:
             for line in fin:
                 seen += len(line.encode('utf-8', errors='ignore'))
@@ -3429,7 +3453,7 @@ def apply_layer_remap_to_file(in_path, out_path, layer_info, progress=None):
     total = os.path.getsize(in_path) or 1
     seen = 0
     last_pr = 0
-    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin,\
+    with open(in_path, 'r', encoding='utf-8', errors='replace') as fin, \
          open(out_path, 'w', encoding='utf-8') as fout:
         for line in fin:
             seen += len(line.encode('utf-8', errors='ignore'))
@@ -3549,7 +3573,6 @@ def main():
               '(override with --aces N if needed)' % num_aces)
 
     if live_lookup_host is not None:
-
         if host_has_manual_head(live_lookup_host):
             print('ERROR: a toolhead is set to manual - live-lookup '
                   'colour matching is disabled (cannot place a hand-fed manual '

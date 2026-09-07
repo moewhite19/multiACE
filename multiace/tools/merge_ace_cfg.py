@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 """Preserve user values from an existing ace.cfg when refreshing to a new
 ace.cfg.default shipped by a firmware update.
 
@@ -27,9 +27,7 @@ import re
 import sys
 
 SECTION_RE = re.compile(r'^\[\s*(ace(?:\s+\d+)?|ace_bg_swap|ace_tipform)\s*\]\s*$')
-
 PRESERVE_ALL_KEYS_SECTIONS = ('ace_tipform',)
-
 KEY_RE = re.compile(r'^([a-zA-Z_][a-zA-Z0-9_\-]*)\s*:\s*(.*)$')
 COMMENTED_KEY_RE = re.compile(r'^#\s*([a-zA-Z_][a-zA-Z0-9_\-]*)\s*:\s*(.*)$')
 
