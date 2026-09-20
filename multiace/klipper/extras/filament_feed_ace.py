@@ -765,14 +765,12 @@ class FilamentFeed:
 
         status = print_task_config.get_status()
         return filament_parameters.get_load_temp(
-            status['filament_vendor'][self.filament_ch[channel]],
-            status['filament_type'][self.filament_ch[channel]],
-            status['filament_sub_type'][self.filament_ch[channel]])
+                status['filament_vendor'][self.filament_ch[channel]],
+                status['filament_type'][self.filament_ch[channel]],
+                status['filament_sub_type'][self.filament_ch[channel]],
+                *self._db_nozzle_args(channel))
 
-    def _get_filament_temp(self, channel, action=None):
-
-        if action == FEED_ACT_UNLOAD:
-            return self._get_filament_unload_temp(channel)
+    def _get_filament_temp(self, channel):
         if self.ace is not None:
             try:
                 _ov_fn = getattr(self.ace, 'tipform_load_temp_for', None)
@@ -784,7 +782,6 @@ class FilamentFeed:
             if _ov:
                 return max(int(_ov), 175)
         return self._get_filament_temp_db(channel)
-
     def _get_filament_unload_temp(self, channel):
         if self.ace is not None:
             try:
@@ -796,7 +793,7 @@ class FilamentFeed:
                 _ov = None
             if _ov:
                 return max(int(_ov), 175)
-        return self._get_filament_temp_db(channel)
+        return self._get_filament_temp(channel)
 
     def _get_filament_soft(self, channel):
         print_task_config = self.printer.lookup_object('print_task_config', None)
@@ -808,7 +805,8 @@ class FilamentFeed:
         return filament_parameters.get_is_soft(
                 status['filament_vendor'][self.filament_ch[channel]],
                 status['filament_type'][self.filament_ch[channel]],
-                status['filament_sub_type'][self.filament_ch[channel]])
+                status['filament_sub_type'][self.filament_ch[channel]],
+                *self._db_nozzle_args(channel))
 
     def _ms_after_feed_op(self):
         if self.ace is not None:
@@ -920,108 +918,6 @@ class FilamentFeed:
         except Exception:
             pass
 
-    def _ace_unwind_sync(self, ace_slot, length, speed):
-        """Send a non-blocking ACE unwind so the ACE pulls back concurrently
-        with the printhead retract. V2: stop FA on the slot first, clear the
-        host FA cache and rev-assist flag so the velocity tracker does not
-        re-arm / interfere with the explicit unwind."""
-        if self.ace is None or ace_slot is None:
-            return
-        try:
-            def _cb(self, response):
-                pass
-            ace_idx = self.ace._active_device_index
-            proto = (getattr(self.ace, '_protocols', {}) or {}).get(ace_idx)
-            if proto is not None and getattr(proto, 'NAME', None) == 'v2':
-                self.ace.send_request_to(ace_idx, {
-                    'method': 'stop_feed_assist',
-                    'params': {'index': ace_slot}}, _cb)
-                if self.ace._feed_assist_per_ace.get(ace_idx, -1) == ace_slot:
-                    self.ace._feed_assist_per_ace[ace_idx] = -1
-                    if ace_idx == self.ace._active_device_index:
-                        self.ace._feed_assist_index = -1
-                setattr(self.ace, '_v2_active_rev_assist', False)
-            self.ace.send_request_to(ace_idx, {
-                'method': 'unwind_filament',
-                'params': {'index': ace_slot, 'length': length,
-                           'speed': speed}}, _cb)
-        except Exception:
-            pass
-
-    def _do_unload_tip_form(self, ch, filament_soft):
-        """Unload tip-form: extrude, fast retract, cooldown (tip solidifies),
-        slow retract, final retract. The fast retract is followed by the V2
-        velocity tracker; the slow and final retracts get a concurrent ACE
-        unwind at the printhead's speed so the ACE doesn't finish early."""
-        ace_slot = None
-        if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
-            src = self.ace._head_source.get(self.filament_ch[ch])
-            if src is not None and isinstance(src.get('slot'), int):
-                ace_slot = src['slot']
-
-        if filament_soft:
-            push_len = 18
-            push_speed = 600
-        else:
-            push_len = 26
-            push_speed = 400
-
-        self.toolhead.wait_moves()
-        
-        self.gcode.run_script_from_command("MOVE_TO_DISCARD_FILAMENT_POSITION\r\n")
-        self.gcode.run_script_from_command("M83\r\n")
-        self.gcode.run_script_from_command("G1 E%d F%d\r\n" % (push_len, push_speed))
-        self.toolhead.wait_moves()
-        
-        if self.ace is not None and ace_slot is not None:
-            try:
-                self.ace._disable_feed_assist_all()
-                self._ace_unwind_sync(ace_slot, 16, 100)
-                self.ace.wait_ace_ready()
-            except Exception:
-                pass
-        self.gcode.run_script_from_command("G1 E27 F400\r\n")
-
-        if self.ace is not None:
-            try:
-                self.ace._disable_feed_assist_all()
-            except Exception:
-                pass
-
-        self.gcode.run_script_from_command("M106 S255\r\n")
-        self.gcode.run_script_from_command("G1 E-27 F2700\r\n")
-        self.toolhead.wait_moves()
-
-        cool_time = 2.0
-        try:
-            ptc = self.printer.lookup_object('print_task_config', None)
-            if ptc is not None:
-                ftype = str(ptc.get_status().get(
-                    'filament_type', [])[self.filament_ch[ch]]).upper()
-                if ftype in ('PLA', 'TPU', 'PVA', 'SUPPORT'):
-                    cool_time = 5.0
-        except Exception:
-            pass
-        self.gcode.run_script_from_command("INNER_CUTOFF_BASE_DISCARD\r\n")
-        self.gcode.run_script_from_command("INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\r\n")
-        self.toolhead.wait_moves()
-        self.reactor.pause(self.reactor.monotonic() + cool_time)
-
-        _retract_spd = self.ace.get_retract_speed(
-            self.ace._active_device_index) if self.ace is not None else 80
-
-        self._ace_unwind_sync(ace_slot, 12, 6)
-        self.gcode.run_script_from_command("G1 E-5.5 F40\r\n")
-        self.toolhead.wait_moves()
-        if self.ace is not None:
-            self.ace.wait_ace_ready()
-        self.gcode.run_script_from_command("M107\r\n")
-        self._ace_unwind_sync(ace_slot, 127.5, _retract_spd)
-        self.gcode.run_script_from_command("G1 E-37.5 F1500\r\n")
-        self.toolhead.wait_moves()
-        if self.ace is not None:
-            self.ace.wait_ace_ready()
-
     def _do_feed(self, ch, action=None, stage=None, auto_mode=None):
         if ch < 0 or ch >= FEED_CHANNEL_NUMS or action == None:
             logging.error("[feed] parameter error!")
@@ -1052,7 +948,7 @@ class FilamentFeed:
         self.channel_error[ch] = FEED_OK
         self.exception_code[ch] = 0
 
-        filament_feed_temp = self._get_filament_temp(ch, action)
+        filament_feed_temp = self._get_filament_temp(ch)
         filament_unload_temp = self._get_filament_unload_temp(ch)
         filament_feed_temp_db = self._get_filament_temp_db(ch)
         filament_soft = self._get_filament_soft(ch)
@@ -2158,70 +2054,14 @@ class FilamentFeed:
                     self.gcode.run_script_from_command("M104 S0\r\n")
 
                     if fa_gate_opened and self.ace is not None:
-                        # When the just-loaded head IS the active print head
-                        # and the print is already running (the very common
-                        # "first filament lives in the last-loaded head" case,
-                        # i.e. no tool change follows the load), closing the
-                        # gate and disarming all FA here would leave the head
-                        # with no assist through the flush and the first
-                        # extrusion - there is no subsequent extruder-change
-                        # event to re-arm it. Keep the gate open and the FA
-                        # armed in that case; the print-context FA takeover is
-                        # exactly what the head needs next. Only do the full
-                        # close+disarm when a different head will take over
-                        # (a tool change will re-arm the correct one), or when
-                        # we are not actually printing.
-                        _keep_fa = False
+                        self.ace._auto_feed_enabled = False
+                        self.ace._fa_context = 'idle'
+                        self.ace._fa_trace('gate CLOSE (context=idle) via FEED_ACT_LOAD finally')
                         try:
-                            _cur_ext = self.toolhead.get_extruder()
-                            _cur_head = getattr(
-                                _cur_ext, 'extruder_index',
-                                getattr(_cur_ext, 'extruder_num', None))
-                            _loaded_head = self.filament_ch[ch]
-                            _ps = self.printer.lookup_object('print_stats', None)
-                            _printing = (
-                                _ps is not None
-                                and _ps.get_status(
-                                    self.reactor.monotonic()).get('state')
-                                == 'printing')
-                            if (_printing
-                                    and _cur_head is not None
-                                    and _cur_head == _loaded_head
-                                    and self.ace.head_uses_ace(_loaded_head)):
-                                _keep_fa = True
-                        except Exception:
-                            _keep_fa = False
-
-                        if _keep_fa:
-                            self.ace._auto_feed_enabled = True
-                            self.ace._fa_context = 'print'
-                            self.ace._fa_trace(
-                                'gate KEEP-OPEN (context=print) after load: '
-                                'loaded head %d is the active print head, FA '
-                                'stays armed' % self.filament_ch[ch])
-                            # Re-arm to be safe: the load's feed phase ran
-                            # _disable_feed_assist_all, so make sure the slot
-                            # is actually assisting before the flush begins.
-                            try:
-                                _src = self.ace._head_source.get(
-                                    self.filament_ch[ch])
-                                if _src is not None:
-                                    self.ace._arm_fa_for(
-                                        int(_src['ace_index']),
-                                        int(_src['slot']))
-                            except Exception as fa_e:
-                                logging.info(
-                                    '[multiACE] FA keep-arm after load '
-                                    'failed: %s' % fa_e)
-                        else:
-                            self.ace._auto_feed_enabled = False
-                            self.ace._fa_context = 'idle'
-                            self.ace._fa_trace('gate CLOSE (context=idle) via FEED_ACT_LOAD finally')
-                            try:
-                                self.ace._disable_feed_assist_all()
-                            except Exception as fa_e:
-                                logging.info(
-                                    '[multiACE] FA disable after load failed: %s' % fa_e)
+                            self.ace._disable_feed_assist_all()
+                        except Exception as fa_e:
+                            logging.info(
+                                '[multiACE] FA disable after load failed: %s' % fa_e)
 
             elif action == FEED_ACT_UNLOAD:
 
@@ -2236,6 +2076,9 @@ class FilamentFeed:
                     except Exception as fa_e:
                         logging.info(
                             '[multiACE] V2 arm FA for FEED_ACT_UNLOAD failed: %s' % fa_e)
+
+                if self.ace is not None:
+                    self.ace._disable_feed_assist_all()
 
                 self.exception_code[ch] = 70
                 if stage not in [None, FEED_UNLOAD_STAGE_PREPARE, FEED_UNLOAD_STAGE_DOING,
@@ -2340,7 +2183,12 @@ class FilamentFeed:
                             "SET_FILAMENT_SENSOR SENSOR=%s ENABLE=1\r\n" % sensor_name)
                         try:
                             self._set_channel_state(ch, FEED_STA_UNLOAD_DOING)
-                            self._do_unload_tip_form(ch, filament_soft)
+                            self.toolhead.wait_moves()
+                            self.ace._run_tipform(
+                                self.filament_ch[ch], filament_unload_temp,
+                                int(filament_soft),
+                                self.toolhead.get_extruder().nozzle_diameter)
+                            self.toolhead.wait_moves()
                         except:
                             self.channel_error[ch] = FEED_ERR_CUSTOM_GCODE
                             raise ValueError('custom gcode error!')
@@ -2385,7 +2233,6 @@ class FilamentFeed:
                             _short_retract = min(FEED_UNLOAD_PROBE_RETRACT, _full_retract)
                             _retract_speed = self.ace.get_retract_speed(
                                 self.ace._active_device_index)
-                            _short_retract_speed = 100
                             _gate_empty = False
                             try:
                                 _gate_ace = (source['ace_index'] if source
@@ -2410,7 +2257,7 @@ class FilamentFeed:
                                     self.ace._active_device_index, _ace_slot,
                                     lambda: self.ace._retract(
                                         _ace_slot, _short_retract,
-                                        _short_retract_speed, head=head_idx))
+                                        _retract_speed, head=head_idx))
                                 self.ace.wait_ace_ready()
                                 self.ace._check_calibration_unload_cancel()
                                 self._unload_dec_log(
@@ -2511,7 +2358,12 @@ class FilamentFeed:
                                     self.gcode.run_script_from_command("M109 S%d\r\n"
                                         % (max(filament_feed_temp_db, filament_unload_temp)))
                                     self.toolhead.wait_moves()
-                                    self._do_unload_tip_form(ch, filament_soft)
+                                    self.ace._run_tipform(
+                                        self.filament_ch[ch],
+                                        max(filament_feed_temp_db, filament_unload_temp),
+                                        int(filament_soft),
+                                        self.toolhead.get_extruder().nozzle_diameter)
+                                    self.toolhead.wait_moves()
                                     self.gcode.run_script_from_command("M104 S%d\r\n" % probe_temp)
                                 except:
                                     logging.info("[feed][unload] toolhead unload retry failed")
@@ -2575,22 +2427,6 @@ class FilamentFeed:
                         self.gcode.run_script_from_command("M104 S0\r\n")
                         self.channel_error[ch] = FEED_OK
                         self._set_channel_state(ch, FEED_STA_UNLOAD_FINISH, True)
-
-                        if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
-                            self.reactor.register_async_callback(
-                                (lambda et, gc=self.gcode: gc.run_script_from_command(
-                                    "M106 S255\n"
-                                    "INNER_CUTOFF_BASE_DISCARD\n"
-                                    "INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\n"
-                                    "M107\r\n")))
-                        else:
-                            self.reactor.register_async_callback(
-                                (lambda et, gc=self.gcode: gc.run_script_from_command(
-                                    "M106 S255\n"
-                                    "INNER_CUTOFF_BASE_DISCARD\n"
-                                    "INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\n"
-                                    "INNER_DISCARD_FILAMENT_BASE_DISCARD\n"
-                                    "M107\r\n")))
 
                         if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
                             head_idx = self.filament_ch[ch]
@@ -2670,7 +2506,12 @@ class FilamentFeed:
 
                         try:
                             self._set_channel_state(ch, FEED_STA_UNLOAD_DOING)
-                            self._do_unload_tip_form(ch, filament_soft)
+                            self.toolhead.wait_moves()
+                            self.ace._run_tipform(
+                                self.filament_ch[ch], filament_unload_temp,
+                                int(filament_soft),
+                                self.toolhead.get_extruder().nozzle_diameter)
+                            self.toolhead.wait_moves()
                         except:
                             self.channel_error[ch] = FEED_ERR_CUSTOM_GCODE
                             raise ValueError('custom gcode error!')
@@ -2740,7 +2581,7 @@ class FilamentFeed:
                                     self.ace._active_device_index, _ace_slot,
                                     lambda: self.ace._retract(
                                         _ace_slot, _short_retract,
-                                        _short_retract_speed, head=head_idx))
+                                        _retract_speed, head=head_idx))
                                 self.ace.wait_ace_ready()
                                 self.ace._check_calibration_unload_cancel()
                                 self._unload_dec_log(
@@ -2841,7 +2682,12 @@ class FilamentFeed:
                                     self.gcode.run_script_from_command("M109 S%d\r\n"
                                         % (max(filament_feed_temp_db, filament_unload_temp)))
                                     self.toolhead.wait_moves()
-                                    self._do_unload_tip_form(ch, filament_soft)
+                                    self.ace._run_tipform(
+                                        self.filament_ch[ch],
+                                        max(filament_feed_temp_db, filament_unload_temp),
+                                        int(filament_soft),
+                                        self.toolhead.get_extruder().nozzle_diameter)
+                                    self.toolhead.wait_moves()
                                     self.gcode.run_script_from_command("M104 S%d\r\n" % probe_temp)
                                 except:
                                     logging.info("[feed][unload] toolhead unload retry failed")
@@ -2904,22 +2750,6 @@ class FilamentFeed:
                         self.gcode.run_script_from_command("M104 S0\r\n")
                         self.channel_error[ch] = FEED_OK
                         self._set_channel_state(ch, FEED_STA_UNLOAD_FINISH, True)
-
-                        if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
-                            self.reactor.register_async_callback(
-                                (lambda et, gc=self.gcode: gc.run_script_from_command(
-                                    "M106 S255\n"
-                                    "INNER_CUTOFF_BASE_DISCARD\n"
-                                    "INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\n"
-                                    "M107\r\n")))
-                        else:
-                            self.reactor.register_async_callback(
-                                (lambda et, gc=self.gcode: gc.run_script_from_command(
-                                    "M106 S255\n"
-                                    "INNER_CUTOFF_BASE_DISCARD\n"
-                                    "INNER_ROUGHLY_CLEAN_NOZZLE_BASE_DISCARD ACTION=2\n"
-                                    "INNER_DISCARD_FILAMENT_BASE_DISCARD\n"
-                                    "M107\r\n")))
 
                         if self.ace is not None and self.ace.head_uses_ace(self.filament_ch[ch]):
                             head_idx = self.filament_ch[ch]
@@ -3592,4 +3422,3 @@ class FilamentFeed:
 
 def load_config_prefix(config):
     return FilamentFeed(config)
-
