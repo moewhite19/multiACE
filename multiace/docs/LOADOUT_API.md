@@ -1,7 +1,7 @@
 # Reading the loadout from multiACE
 
 For slicers and other tools that want to know **what is actually loaded on the
-printer** before they assign filaments — and how to hand a sliced file back.
+printer** before they assign filaments - and how to hand a sliced file back.
 
 Companion documents: `ENGINE_API.md` (the gcode/runtime contract for driving the
 engine) and `SEND_TO_MULTIACE.md` (the upload endpoint in detail).
@@ -18,7 +18,7 @@ engine) and `SEND_TO_MULTIACE.md` (the upload endpoint in detail).
 GET /multiace/api/preflight/livedata
 ```
 
-Returns the loaded spools and the head wiring in a single response — the exact
+Returns the loaded spools and the head wiring in a single response - the exact
 shape multiACE's own preflight consumes, so it can never drift from what the
 printer really does.
 
@@ -43,31 +43,31 @@ printer really does.
 ```
 
 **`live_slots` is filtered on purpose.** It lists only slots whose identity is
-physically known — read from an RFID tag or set by the user. A label merely
+physically known - read from an RFID tag or set by the user. A label merely
 inherited from a previous print job is *not* a slot identity and is left out, so
 you never assign against a guess. Empty slots are omitted entirely; the absence
 of a slot means "nothing usable there".
 
 `color` is `#rrggbb`, lower case. `material` is a free string as the printer
-knows it (`PLA`, `PETG`, `ABS`, …) — compare case-insensitively.
+knows it (`PLA`, `PETG`, `ABS`, …) - compare case-insensitively.
 
 Returns **409** while any head is set to manual: the matcher is slot-based and a
 hand-fed head has no slot. Treat it as "assignment unavailable", not an error.
 
 ---
 
-## 2. Index bases — read this before you display anything
+## 2. Index bases - read this before you display anything
 
 Internally every index is **0-based**: ACE 0…3, slot 0…3, head 0…3. Every field
 in every API response uses those.
 
-The printer's own UI may show them 1-based — that is a display setting
+The printer's own UI may show them 1-based - that is a display setting
 (`display_index_base`, exposed in `GET /api/state`). It changes **only** what
 humans see, never the numbers on the wire.
 
 So: use the API values as they are, and if you print them for a user, add the
 offset the printer reports. Mixing the two produces off-by-one errors that look
-like a wrong slot rather than a display bug — this has cost real debugging time
+like a wrong slot rather than a display bug - this has cost real debugging time
 on both sides.
 
 ---
@@ -85,7 +85,7 @@ printer's own configuration:
 ```
 
 A filament sliced for one diameter can only print on a head carrying that
-diameter, because the line widths are baked into the extrusions — multiACE
+diameter, because the line widths are baked into the extrusions - multiACE
 cannot re-assign across sizes, and will refuse rather than silently produce a
 wrong-width print. Within one diameter the choice is free: several heads may
 share it, and which ACE a spool sits in is decided by multiACE, not by you.
@@ -108,13 +108,13 @@ will show it as unassigned and leave it unconstrained rather than guess.
 "mode": "multi" | "head" | "normal"
 ```
 
-- **`multi`** — the common case. Slot *N* feeds head *N*, across all units. A
+- **`multi`** - the common case. Slot *N* feeds head *N*, across all units. A
   colour needed on head 2 can sit in slot 2 of any ACE.
-- **`head`** — each head is wired to exactly one ACE (`head_ace` maps head →
+- **`head`** - each head is wired to exactly one ACE (`head_ace` maps head →
   ACE), and prints several colours by swapping between that ACE's four slots.
   `ace_heads` lists the ACE-driven heads; `feeders` lists heads fed by the
   printer's own side feeder, each pinned to a single colour.
-- **`normal`** — multiACE is not driving the feed at all.
+- **`normal`** - multiACE is not driving the feed at all.
 
 `head_ace` maps **head → ACE**, not the reverse. Inverting it is an easy mistake
 and produces a plausible-looking wrong answer.
@@ -132,12 +132,12 @@ The full dashboard state. Useful additions beyond `livedata`:
 | Field | Meaning |
 |---|---|
 | `aces[].idx` / `connected` / `protocol` | the units, in index order |
-| `aces[].slots[].state` | `empty`, `ready`, … — `empty` means no spool at the gate |
-| `aces[].slots[].source` | `rfid`, `override`, `derived`, or absent — how the identity was established |
+| `aces[].slots[].state` | `empty`, `ready`, … - `empty` means no spool at the gate |
+| `aces[].slots[].source` | `rfid`, `override`, `derived`, or absent - how the identity was established |
 | `aces[].slots[].material` / `color` / `brand` / `sku` / `subtype` | the identity |
 | `aces[].humidity` / `temp` / `dryer` | only ACE 2 units report humidity |
 | `toolheads[]` | per head: what is loaded, and from which ACE/slot |
-| `display_index_base` | display offset only — see §2 |
+| `display_index_base` | display offset only - see §2 |
 
 `source` is worth respecting: `derived` means the label came from a previous
 print job rather than from the spool, which is exactly what `live_slots` filters
@@ -155,7 +155,7 @@ The file lands in a one-slot inbox; multiACE's web UI offers it for preflight as
 soon as the printer is free. Nothing prints without the user confirming.
 
 Always send the **original slicer export**. A file multiACE has already
-processed is rejected with **409** — re-processing destroys the tool changes.
+processed is rejected with **409** - re-processing destroys the tool changes.
 
 Full semantics, status codes and the one-shot delivery rule: see
 `SEND_TO_MULTIACE.md`.
@@ -170,11 +170,10 @@ is loaded at the moment the user opens the preflight, which is not knowable at
 slice time. Spools get moved, run out, and get swapped between slicing and
 printing.
 
-What your side supplies is the file and its declared requirements — colours,
+What your side supplies is the file and its declared requirements - colours,
 materials, and the per-filament nozzle diameters from §3. What multiACE supplies
 is the loadout (§1) so your UI can show the user what is available, and the
 matching and rewriting when the file arrives.
 
-The one thing multiACE cannot re-decide is the nozzle a filament was sliced for
-— that is baked into the extrusion widths. Everything else is negotiable at
+The one thing multiACE cannot re-decide is the nozzle a filament was sliced for - that is baked into the extrusion widths. Everything else is negotiable at
 print time, which is why it is settled there.

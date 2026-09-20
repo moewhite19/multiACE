@@ -722,6 +722,8 @@ class FilamentFeed:
         return ('x' in homed_axes_list and 'y' in homed_axes_list)
 
     def _db_nozzle_args(self, channel):
+        if not self._db_takes_nozzle_args():
+            return ()
         try:
             head = self.filament_ch[channel]
             name = 'extruder' if head == 0 else 'extruder%d' % head
@@ -733,6 +735,27 @@ class FilamentFeed:
             return (float(dia), str(vt))
         except Exception:
             return ()
+
+    def _db_takes_nozzle_args(self):
+        cached = getattr(self, '_db_nozzle_ok', None)
+        if cached is not None:
+            return cached
+        ok = False
+        try:
+            import inspect
+            fp = self.printer.lookup_object('filament_parameters', None)
+            fn = getattr(fp, 'get_load_temp', None)
+            if fn is not None:
+                params = inspect.signature(fn).parameters
+                ok = ('nozzle_diameter' in params
+                      or any(p.kind == p.VAR_POSITIONAL
+                             for p in params.values()))
+        except Exception as e:
+            logging.info("[feed] filament DB signature probe failed: %s" % e)
+            ok = False
+        self._db_nozzle_ok = ok
+        logging.info("[feed] filament DB nozzle-aware (1.6.0 signature): %s" % ok)
+        return ok
 
     def _get_filament_temp_db(self, channel):
         print_task_config = self.printer.lookup_object('print_task_config', None)

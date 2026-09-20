@@ -16,7 +16,7 @@ imports it (`import ace`, subclassing its objects, etc.) becomes a derivative
 work and inherits the GPL.
 
 An external program stays a **separate work** by talking to the engine only
-through **arm's-length IPC** — never importing engine modules:
+through **arm's-length IPC** - never importing engine modules:
 
 - **Moonraker REST/WebSocket** is the bus.
 - The **gcode command vocabulary** (section 3) and the **`ace` status object**
@@ -42,11 +42,11 @@ as **idempotent-safe to retry** on transport errors.
 
 These are the commands an orchestrator relies on. `[..]` = optional.
 
-### Index base — read this before writing a script
+### Index base - read this before writing a script
 
 Every **machine-readable** index is **0-based**: the gcode parameters below
 (`HEAD=`, `ACE=`, `SLOT=`), the status object of section 4, and the fields of
-the events in section 5. So HEAD/SLOT 0–3 and ACE 0–3 (device index).
+the events in section 5. So HEAD/SLOT 0-3 and ACE 0-3 (device index).
 
 **Human-readable output is offset.** Console messages, `klippy.log`, the web UI
 and the pause/error texts multiACE raises on the touchscreen add
@@ -62,7 +62,7 @@ ours to shift.) The same slot therefore reads
 
 Nothing is converted on the way in: an index you send is always taken as
 0-based, whatever the logs display. Set `display_index_base: 0` in `[ace]` to
-make logs and UI match the API — that changes presentation only, never the
+make logs and UI match the API - that changes presentation only, never the
 values on the wire.
 
 ### Filament routing
@@ -71,7 +71,7 @@ values on the wire.
 |---------|-----------|--------|
 | `ACE_LOAD_HEAD` | `HEAD=n [ACE=n] [SLOT=n]` | Load a toolhead from an ACE slot. Ignored for manual heads. |
 | `ACE_UNLOAD_HEAD` | `HEAD=n [RETRACT_LENGTH=mm] [KEEP_HEAT=temp]` | Unload a head back to its ACE. `KEEP_HEAT>0` holds the hotend at `temp` (no cold cool-down). Ignored for manual heads. |
-| `ACE_UNLOAD_ALL_HEADS` | – | Unload every loaded head (manual heads skipped). |
+| `ACE_UNLOAD_ALL_HEADS` | - | Unload every loaded head (manual heads skipped). |
 | `ACE_SWAP_HEAD` | `HEAD=n ACE=n [SLOT=n] [ANTI_OOZE=mm] [INITIAL=1]` | Mid-print swap: unload current, load new. A no-op when the head already holds that ACE/slot. `ANTI_OOZE` = the end-of-swap retract, sized to the un-retract the following gcode will push back (default `swap_anti_ooze_retract`). `INITIAL=1` marks a swap inside the auto-load block at print start (parks at the discard position instead of restoring a print position). The flush length comes from `ACE_SET_PURGE`, not from a swap parameter. Ignored for manual heads. |
 | `ACE_SWITCH` | `TARGET=n [AUTOLOAD=1]` | Make ACE `TARGET` the active device. |
 | `ACE_RETRACT` | `INDEX=n LENGTH=mm [SPEED=mm/s]` | Low-level retract of a slot. |
@@ -82,14 +82,14 @@ values on the wire.
 
 | Command | Parameters | Effect |
 |---------|-----------|--------|
-| `ACE_SET_PURGE` | `LENGTH=mm` \| `RESET=1` \| `MATRIX=0|1 [PERSIST=0]` | Set the swap/load flush length for upcoming flush(es). `LENGTH` is 0–200 mm; `LENGTH=0` = stock default (80 mm). `RESET=1` reverts to the `swap_purge_length` config value. `MATRIX=0|1` ignores/honors per-pair `LENGTH` stamps and WRITES the `purge_matrix` config line (write-through); with `PERSIST=0` the change is RAM-only and the config value returns at restart. Settings whose RAM value deviates from their config line are listed in the status field `settings_volatile`. Intended for per-colour-pair purge fed from the slicer. Every settings setter (`ACE_SET_PICKUP_CLEANING`, `ACE_SET_AIRPRINT_DETECTION`, `ACE_SET_QUAD_REPLENISH`, `ACE_SET_CONFIRM_COMMANDS`, `ACE_SET_SPOOLMAN`, `MULTIACE_SET_LANGUAGE`, `ACE_BG_SET_HEAD`) follows the same write-through contract: it edits its config line and accepts `PERSIST=0`. |
+| `ACE_SET_PURGE` | `LENGTH=mm` \| `RESET=1` \| `MATRIX=0|1 [PERSIST=0]` | Set the swap/load flush length for upcoming flush(es). `LENGTH` is 0-200 mm; `LENGTH=0` = stock default (80 mm). `RESET=1` reverts to the `swap_purge_length` config value. `MATRIX=0|1` ignores/honors per-pair `LENGTH` stamps and WRITES the `purge_matrix` config line (write-through); with `PERSIST=0` the change is RAM-only and the config value returns at restart. Settings whose RAM value deviates from their config line are listed in the status field `settings_volatile`. Intended for per-colour-pair purge fed from the slicer. Every settings setter (`ACE_SET_PICKUP_CLEANING`, `ACE_SET_AIRPRINT_DETECTION`, `ACE_SET_QUAD_REPLENISH`, `ACE_SET_CONFIRM_COMMANDS`, `ACE_SET_SPOOLMAN`, `MULTIACE_SET_LANGUAGE`, `ACE_BG_SET_HEAD`) follows the same write-through contract: it edits its config line and accepts `PERSIST=0`. |
 
 ### Per-head mode
 
 | Command | Parameters | Effect |
 |---------|-----------|--------|
 | `ACE_SET_HEAD_MANUAL` | `HEAD=n ENABLE=0\|1` | Toggle manual bypass for a head (no ACE feed/retract/feed-assist/RFID; load by hand). Multi mode. Persisted. |
-| `ACE_SET_HEAD_ACE` | `HEAD=n ACE=n` | Head mode: wire a head to the ACE that feeds it (1:1 — one ACE per head, never shared). Persisted. |
+| `ACE_SET_HEAD_ACE` | `HEAD=n ACE=n` | Head mode: wire a head to the ACE that feeds it (1:1 - one ACE per head, never shared). Persisted. |
 | `ACE_SET_HEAD_FEEDER` | `HEAD=n ENABLE=0\|1` | Head mode: the head loads/unloads via the printer's own side feeder and the ACE never touches it. Persisted. |
 
 The operating mode itself (`normal` / `multi` / `head`, status field `mode`) is
@@ -103,7 +103,7 @@ heads print one fixed colour from the side feeder.
 
 | Command | Parameters | Effect |
 |---------|-----------|--------|
-| `ACE_BG_SWAP` | `HEAD=n SLOT=n [ACE=n] [TEMP=] [ANTI_OOZE=] [PURGE=mm] [QUIET=1] [FORCE=1]` | Unload and reload a **parked** head's ACE slot while another head prints, so the arrival toolchange becomes a no-op. Requires the head to be opted in (`ACE_BG_SET_HEAD HEAD=n ENABLE=1`, a hardware declaration that the dock is open below). `QUIET=1` turns every refusal into a log line (the arrival then swaps inline). Requires the `[ace_bg_swap]` section. **Not yet part of the stable contract** — parameters may still change. |
+| `ACE_BG_SWAP` | `HEAD=n SLOT=n [ACE=n] [TEMP=] [ANTI_OOZE=] [PURGE=mm] [QUIET=1] [FORCE=1]` | Unload and reload a **parked** head's ACE slot while another head prints, so the arrival toolchange becomes a no-op. Requires the head to be opted in (`ACE_BG_SET_HEAD HEAD=n ENABLE=1`, a hardware declaration that the dock is open below). `QUIET=1` turns every refusal into a log line (the arrival then swaps inline). Requires the `[ace_bg_swap]` section. **Not yet part of the stable contract** - parameters may still change. |
 
 ### Feed assist
 
@@ -131,7 +131,7 @@ heads print one fixed colour from the side feeder.
 `ACE_HEAD_STATUS`, `ACE_LIST`, `ACE_USB_STATS`, `ACE_DEBUG`, `ACE_TEST`, and the
 low-level `A_*` protocol pokes (`A_FEED`, `A_STATUS`, `A_FEEDCHECK`, `A_RAW`, …)
 are for humans/debugging. They expose raw protocol behaviour and **may change
-without notice** — do not build an orchestrator on them.
+without notice** - do not build an orchestrator on them.
 
 ## 4. Status object (`ace`)
 
@@ -173,7 +173,7 @@ section 3).
         { "index": 0, "status": "empty|ready|…", "sku": "",
           "material": "", "rfid": 0, "brand": "", "color": [r,g,b] }
         // color is the RAW device triple. [0,0,0] is ambiguous on its
-        // own — it is the tag's black only when "material" is set,
+        // own - it is the tag's black only when "material" is set,
         // otherwise the slot declares no colour. Engine-internal
         // captures already carry that resolved: "" = unknown,
         // "000000" = a declared black.
@@ -184,26 +184,26 @@ section 3).
 ```
 
 Key fields for orchestration:
-- **`api_version`** — engine contract version; gate capability on this (section 6).
-- **`head_source[h]`** — which ACE/slot currently feeds head `h` (null = unloaded).
-- **`head_manual[h]`** — head is in manual bypass (skip it in plans).
-- **`swap_in_progress`** — a swap is running; don't issue conflicting commands.
-- **`swap_phase`** — finer swap state (`idle|unload|load|flush|done`); a host can
+- **`api_version`** - engine contract version; gate capability on this (section 6).
+- **`head_source[h]`** - which ACE/slot currently feeds head `h` (null = unloaded).
+- **`head_manual[h]`** - head is in manual bypass (skip it in plans).
+- **`swap_in_progress`** - a swap is running; don't issue conflicting commands.
+- **`swap_phase`** - finer swap state (`idle|unload|load|flush|done`); a host can
   pre-stage on `flush` or wait for `idle` before the next action.
-- **`last_swap_result`** — `{head, ace, slot, status, ts}` of the most recent swap
+- **`last_swap_result`** - `{head, ace, slot, status, ts}` of the most recent swap
   (`status='ok'` or a failure tag such as `unload_failed`/`load_failed`/`slot_empty`).
-- **`event_seq`** — monotonic counter bumped on every emitted event (below); compare
+- **`event_seq`** - monotonic counter bumped on every emitted event (below); compare
   across polls to detect a missed update.
-- **`aces[i].status`** / **`slots[].status`** — device/slot busy vs idle, used to
+- **`aces[i].status`** / **`slots[].status`** - device/slot busy vs idle, used to
   wait for an operation to finish (e.g. a rollback returning to `ready`).
-- **`aces[i].slots[].rfid` / `material` / `color`** — spool identity.
-- **`mode`** / **`head_ace`** / **`head_feeder`** — the routing topology (section 3,
+- **`aces[i].slots[].rfid` / `material` / `color`** - spool identity.
+- **`mode`** / **`head_ace`** / **`head_feeder`** - the routing topology (section 3,
   per-head mode); read it before planning which slot can serve which head.
 
 The object carries further fields (spool table and bindings, Spoolman and
 SpoolLink state, tag read/write progress, per-spool pressure advance, dryer
 automation, calibration). They are **additive** (section 6): a host may ignore
-them, and their shape is not yet frozen — build on the fields listed above.
+them, and their shape is not yet frozen - build on the fields listed above.
 
 Filament type/colour is otherwise a **free string** pushed via the stock
 `SET_PRINT_FILAMENT_CONFIG` (the engine does not enforce a material whitelist).
@@ -219,7 +219,7 @@ polls. This is sufficient for the section 7 flow.
 
 **b) Push events (low-latency).** For timing-sensitive actions (pre-purge / pre-stage
 before a swap) the engine also emits machine-readable lines on Moonraker's
-`gcode_response` stream — subscribe to it over the WebSocket. Format:
+`gcode_response` stream - subscribe to it over the WebSocket. Format:
 
 ```
 multiace_event <name> key=val key=val ... seq=<n>
@@ -238,15 +238,14 @@ Emitted events:
 
 `status` on `swap_failed` carries the failure tag (`unload_failed`, `load_failed`,
 `slot_empty`, …). `error` is the generic fallback for an exit that names no tag of
-its own — it means "the swap failed", nothing more; the paused error message that
+its own - it means "the swap failed", nothing more; the paused error message that
 comes with it is the specific one. `ok` is never a legal value on this event.
 All push events are best-effort: a transport hiccup never disturbs
 the swap, so treat the status object (channel a) as the source of truth and the push
 events as latency hints.
 
 Every event is additionally mirrored to `klippy.log` as
-`[multiACE] multiace_event <name> …`. The `gcode_response` stream is live-only —
-Moonraker keeps roughly the last 1000 console lines and nothing on disk — so the log
+`[multiACE] multiace_event <name> …`. The `gcode_response` stream is live-only - Moonraker keeps roughly the last 1000 console lines and nothing on disk - so the log
 is where an event can still be read after the fact. Use it for post-mortems and bug
 reports; do not poll the log as a transport.
 

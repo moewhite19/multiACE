@@ -9,22 +9,33 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 (manuals updated version 0.99.8b)
 
 
-## What's new in multiACE 1.00b
+## What's new in multiACE 1.00.1b
 
-**RFID tags:** **read** the UID of any tag, read and **write** for open tags (ACE2-Open units). Not every tag's content can be read, but the card UID can be read from every tag (Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool and blank NTAG tags are read automatically when the spool is inserted; the picker gets Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
+**Fix for printers on firmware below 1.6.0** (1.4.1 up to 1.5.2, including paxx 1.5.2.x):
+1.00b called the firmware's filament database with the 1.6.0 argument list, so every
+load failed within seconds ("filament never reached the toolhead") and Klipper shut down
+once right after the update. 1.6.0 was not affected. Everything else is 1.00b:
+
+
+**RFID tags:** **read** the UID of any tag, read and **write** for open tags (ACE2-Open
+units). Not every tag's content can be read, but the card UID can be read from every tag
+(Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool
+and blank NTAG tags are read automatically when the spool is inserted; the picker gets
+Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card
+UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
 **Experimental:** tag reading and writing has so far been tested on a single printer
 with one set of ACE 2 Pro units - expect rough edges and report what you see.
 And due to the ACE 2 hardware only one side of a spool can be written - a spool with a tag
 on each flange gets the tag facing the reader written, the other side stays as it is.
 
-**ACE2-Open firmware — flash from the web UI.** Flash an ACE 2 Pro straight from the
-Config tab: stock 1.1.31, or patch automatically to ACE2-Open build **ACE2-Open** build. A big thank you to
-**[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** — his ACE 2 Pro
+**ACE2-Open firmware - flash from the web UI.** Flash an ACE 2 Pro straight from the
+Config tab: stock 1.1.31, or the patched **ACE2-Open** build. A big thank you to
+**[Simon-CR](https://github.com/Simon-CR/ace2-pro-firmware-research)** - his ACE 2 Pro
 firmware research and the ACE2-Open UID passthrough are what make everything below
-possible. (Flashing is at your own risk — never during a print, never unplug.)
+possible. (Flashing is at your own risk - never during a print, never unplug.)
 
 **Spools bound by card UID.** A spool can be identified by its chip's serial, not only by
-the tag's SKU — several codes per spool, learned on hand assignment, shared with Spoolman
+the tag's SKU - several codes per spool, learned on hand assignment, shared with Spoolman
 and SpoolLink.
 
 **Pressure advance per spool.** The stock flow calibration is stored on the spool and
@@ -32,13 +43,13 @@ applied automatically whenever that spool is loaded; synced with Spoolman using 
 field as the [pechex/SpoolLink mod](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/pull/649).
 The preflight can run the calibration per head at print start (#115).
 
-**API documentation** for slicers, hosts and scripts now ships with multiACE — see
+**API documentation** for slicers, hosts and scripts now ships with multiACE - see
 [API documentation](#api-documentation-for-slicers-hosts-and-scripts).
 
 **Also:** stock firmware 1.6.0 support, a load fix against crushed tips on reloads,
 auto-dry soft start, preflight and web UI fixes, installer fixes.
 
-**Nozzle wiper version 2 — new, larger purge bin** (unchanged from 0.99.8b):
+**Nozzle wiper version 2 - new, larger purge bin** (unchanged from 0.99.8b):
 **https://makerworld.com/en/models/3084827** Wiper ·
 **https://makerworld.com/en/models/3040955** Bin & Bin XL
 
@@ -544,7 +555,7 @@ Small things that make a big difference in practice - mostly mechanical, a few c
 - **Kobra 3 / S1 guide upgrade.** On the newer Anycubic roller-guide system the original feeder parts often skip; print the updated guide parts for much smoother winding. <!-- TODO: add link --> *(link to follow)*
 - **Tune the retry parameters for your setup.** `load_retry`, `extrusion_retry` and `unload_retry` are there to be adjusted. The defaults catch most soft failure modes without user intervention, but bumping them up further on a problematic spool/setup is worth experimenting with.
 - **Fit a larger purge bin.** Multi-color prints produce more purge than single-material runs. A bigger aftermarket or printed purge bin saves a trip to the printer mid-print.
-- **Stable splitter / PTFE connections.** A splitter that shifts under feed pressure, or a PTFE joint sitting 1–2 mm short, can cost you a load with no obvious cause. Make sure every junction is fully seated, collets are locked, and the splitter is mounted on something that doesn't flex.
+- **Stable splitter / PTFE connections.** A splitter that shifts under feed pressure, or a PTFE joint sitting 1-2 mm short, can cost you a load with no obvious cause. Make sure every junction is fully seated, collets are locked, and the splitter is mounted on something that doesn't flex.
 
 ## Troubleshooting
 
@@ -602,27 +613,27 @@ Also mention:
 
 ## ℹ️ Before you install
 
-multiACE is a **community project** — built by hobbyists, for hobbyists. A quick orientation before SSH'ing into your printer:
+multiACE is a **community project** - built by hobbyists, for hobbyists. A quick orientation before SSH'ing into your printer:
 
 - multiACE needs **root access** to your Snapmaker U1 (`touch /oem/.debug` + reboot). With root enabled and custom code running, **this may affect your manufacturer warranty**. Snapmaker support generally cannot help with a modified printer.
 - The installer **modifies live Klipper files** under `/home/lava/klipper/klippy/extras/` and `/kinematics/` (filament feed, switch-sensor, extruder). Stock files are backed up as `*_pre_multiace.py` and the included `uninstall_multiace.sh` restores everything cleanly.
 - The project is **not endorsed or supported by Snapmaker, Anycubic, or the PAXX upstream maintainers**.
-- This software comes **without warranty** — formally covered by GPL-3.0 §15–17. Translation: I do my best, but the responsibility for using it stays with you.
+- This software comes **without warranty** - formally covered by GPL-3.0 §15-17. Translation: I do my best, but the responsibility for using it stays with you.
 
-If any of that doesn't sit right, no worries — your printer keeps working with stock Snapmaker firmware as it is. If you're on board: have fun, and feedback / issues are always welcome.
+If any of that doesn't sit right, no worries - your printer keeps working with stock Snapmaker firmware as it is. If you're on board: have fun, and feedback / issues are always welcome.
 
 ## API documentation (for slicers, hosts and scripts)
 
-multiACE can be driven from outside — a slicer plugin, a print host or a plain
+multiACE can be driven from outside - a slicer plugin, a print host or a plain
 script. The contract lives in `docs/`:
 
-- [`ENGINE_API.md`](docs/ENGINE_API.md) — the gcode command vocabulary, the
+- [`ENGINE_API.md`](docs/ENGINE_API.md) - the gcode command vocabulary, the
   `ace` status object, push events and versioning (Moonraker REST/WebSocket; nothing
   imports the engine, so your program keeps its own licence).
-- [`LOADOUT_API.md`](docs/LOADOUT_API.md) — the web backend's HTTP API: read what
+- [`LOADOUT_API.md`](docs/LOADOUT_API.md) - the web backend's HTTP API: read what
   is actually loaded (spools, head wiring, nozzle sizes) before assigning filaments, and
   hand a sliced file back.
-- [`SEND_TO_MULTIACE.md`](docs/SEND_TO_MULTIACE.md) — the upload endpoint in
+- [`SEND_TO_MULTIACE.md`](docs/SEND_TO_MULTIACE.md) - the upload endpoint in
   detail (inbox semantics, status codes).
 
 ## License
@@ -637,8 +648,8 @@ All content is reviewed by humans before inclusion.
 ## Contributors
 
 - **[hfoi589](https://github.com/hfoi589)**
-  - **Feed-assist re-arm (device-status-aware)** — verifying the ACE's real slot status instead of trusting the host cache, so a stale cache after a swap, reconnect or spontaneous disarm is cleared and re-sent instead of silently skipped. Ported from an `ace.py` he shared and still in use today.
-  - **Browser-side preflight** — his JavaScript implementation was the starting point. The shipped version was rebuilt around Pyodide so the browser and the backend run the exact same Python code, but the idea and the groundwork are his.
+  - **Feed-assist re-arm (device-status-aware)** - verifying the ACE's real slot status instead of trusting the host cache, so a stale cache after a swap, reconnect or spontaneous disarm is cleared and re-sent instead of silently skipped. Ported from an `ace.py` he shared and still in use today.
+  - **Browser-side preflight** - his JavaScript implementation was the starting point. The shipped version was rebuilt around Pyodide so the browser and the backend run the exact same Python code, but the idea and the groundwork are his.
 
 - **Popstar (forum.snapmaker.com)**
   - **the default PLA swap temperature is set to 220 °C**

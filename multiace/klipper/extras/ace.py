@@ -16,13 +16,13 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "1.00b"
+MULTIACE_VERSION = "1.00.1b"
 MULTIACE_CODENAME = "Resupply Run"
 
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "fdbd60d5"
-MULTIACE_BUNDLE_SHA1 = "83f75d8"
+MULTIACE_BUILD_TAG = "f026fc15"
+MULTIACE_BUNDLE_SHA1 = "573fa61"
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict

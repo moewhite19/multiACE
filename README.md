@@ -9,7 +9,7 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 
 
-## What's new in multiACE 1.00b
+## What's new in multiACE 1.00.1b
 
 **RFID tags:** **read** the UID of any tag, read and **write** for open tags (ACE2-Open units). Not every tag's content can be read, but the card UID can be read from every tag (Bambu, Snapmaker, Anycubic, OpenSpool, blank), so any spool can be identified. OpenSpool and blank NTAG tags are read automatically when the spool is inserted; the picker gets Read tag and Write to tag buttons (OpenSpool or Anycubic format, optionally with the card UID as SKU so every ACE (V1, V2 Stock) recognises the spool).
 **Experimental:** tag reading and writing has so far been tested on a single printer
@@ -38,6 +38,8 @@ The preflight can run the calibration per head at print start (#115).
 
 **Also:** stock firmware 1.6.0 support, a load fix against crushed tips on reloads,
 auto-dry soft start, preflight and web UI fixes, installer fixes.
+
+**V1.00.1b** works with 1.5.2 again
 
 **Nozzle wiper version 2 - new, larger purge bin** (unchanged from 0.99.8b):
 **https://makerworld.com/en/models/3084827** Wiper ·
@@ -617,13 +619,13 @@ If any of that doesn't sit right, no worries — your printer keeps working with
 multiACE can be driven from outside — a slicer plugin, a print host or a plain
 script. The contract lives in `docs/`:
 
-- [`ENGINE_API.md`](docs/ENGINE_API.md) — the gcode command vocabulary, the
+- [`ENGINE_API.md`](multiace/docs/ENGINE_API.md) — the gcode command vocabulary, the
   `ace` status object, push events and versioning (Moonraker REST/WebSocket; nothing
   imports the engine, so your program keeps its own licence).
-- [`LOADOUT_API.md`](docs/LOADOUT_API.md) — the web backend's HTTP API: read what
+- [`LOADOUT_API.md`](multiace/docs/LOADOUT_API.md) — the web backend's HTTP API: read what
   is actually loaded (spools, head wiring, nozzle sizes) before assigning filaments, and
   hand a sliced file back.
-- [`SEND_TO_MULTIACE.md`](docs/SEND_TO_MULTIACE.md) — the upload endpoint in
+- [`SEND_TO_MULTIACE.md`](multiace/docs/SEND_TO_MULTIACE.md) — the upload endpoint in
   detail (inbox semantics, status codes).
 
 ## License
