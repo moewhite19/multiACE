@@ -8430,6 +8430,41 @@ class MultiAce:
         except Exception:
             return 0
 
+    def _spoollink_seed_from_slots(self, why='assign'):
+        """Link every head whose feeding slot now carries a Spoolman-backed
+        spool - same head->slot resolution as the PTC display push
+        (_sync_ptc_to_active_ace), so an inserted/assigned roll is linked
+        without waiting for a load to the toolhead. Skips heads already
+        sent the same spool and heads without a usable slot."""
+        if not self._spoollink_active():
+            return
+        head_mode = getattr(self, '_ace_mode', 'multi') == 'head'
+        active_idx = self._active_device_index
+        for h in range(4):
+            try:
+                if not self.head_uses_ace(h):
+                    continue
+                ace_idx = active_idx
+                slot_idx = h
+                if head_mode:
+                    ace_idx = self.head_ace_for(h)
+                    _s = self._first_loaded_slot_for_ace(ace_idx)
+                    if _s is not None:
+                        slot_idx = _s
+                _sid = self._spool_binding.get(
+                    self._spool_key(ace_idx, slot_idx))
+                _sp = self._spools.get(str(_sid)) if _sid else None
+                _smid = str((_sp or {}).get('spoolman_id') or '').strip()
+                if not (_smid.isdigit() and int(_smid) > 0):
+                    continue
+                _ent = self._spoollink_sent.get(h)
+                if _ent and int(_ent.get('sid', 0)) == int(_smid):
+                    continue
+                self._spoollink_send(h, int(_smid), why)
+            except Exception as e:
+                logging.info('[multiACE] [spoollink] seed head %d failed: '
+                             '%s' % (h, e))
+
     def _spoollink_send(self, head, smid, why):
         """Hand the head's spool to the SpoolLink resolver
         (spoollink_resolve_spool(channel, spool_id=...), the spool_id path
@@ -10416,6 +10451,49 @@ class MultiAce:
         except Exception as e:
             logging.info('[multiACE] [pa] store failed: %s' % e)
 
+    def _spool_sync_to_slot_display(self, ace_idx, slot, spool):
+        """After a spool is bound/adopted onto a slot, push its material,
+        colour, brand and sub-type into the slot's DISPLAY identity - an
+        adopt-bound slot was never fed by an RFID read carrying those
+        fields, so the printer/UI would otherwise keep showing 'unknown'.
+        """
+        try:
+            a, s = int(ace_idx), int(slot)
+            sp = spool or {}
+            mat = (sp.get('material') or '').strip()
+            color = (sp.get('color') or '').strip().lstrip('#').upper()
+            try:
+                rgb = ([int(color[i:i + 2], 16) for i in (0, 2, 4)]
+                       if len(color) == 6 else [0, 0, 0])
+            except ValueError:
+                rgb = [0, 0, 0]
+            brand = (sp.get('vendor') or '').strip()
+            subtype = (sp.get('subtype') or '').strip()
+            sku = (sp.get('sku') or '').strip()
+            info = self._info_per_ace.get(a)
+            if info:
+                slots = info.get('slots') or []
+                if s < len(slots):
+                    si = slots[s]
+                    si['type'] = mat
+                    si['color'] = rgb
+                    si['brand'] = brand
+                    si['subtype'] = subtype
+                    si['sku'] = sku
+                    si['rfid'] = 2
+            self._v2_filament_info_per_ace.setdefault(a, {})[s] = {
+                'type': mat, 'color': rgb, 'brand': brand, 'sku': sku,
+                'subtype': subtype, 'host': True, 'fmt': 'spool',
+            }
+            logging.info(
+                '[multiACE] [spool] synced spool #%s identity to ACE %d '
+                'slot %d (type=%r brand=%r subtype=%r color=%s)',
+                sp.get('id', '?'), self._disp(a), self._disp(s), mat,
+                brand, subtype, color or '-')
+        except Exception as e:
+            logging.info('[multiACE] [spool] slot display sync failed '
+                         '(ignored): %s' % e)
+
     def _apply_spool_pa(self, head, why=''):
         """Apply the bound spool's stored PA for the head's CURRENT nozzle.
         Silent no-op when unbound / no entry / value already applied (the
@@ -11619,6 +11697,20 @@ class MultiAce:
         self.log_always('[multiACE] %s: spool #%s (%s)'
                         % (where, sid,
                            self._spool_label(self._spools[sid])))
+        if h is None:
+            try:
+                self._spool_sync_to_slot_display(a, sl, self._spools[sid])
+            except Exception as _e:
+                logging.info('[multiACE] slot display sync skipped: %s' % _e)
+            try:
+                self._sync_ptc_to_active_ace()
+            except Exception as _e:
+                logging.info('[multiACE] ptc sync skipped: %s' % _e)
+            try:
+                self._spoollink_seed_from_slots('assign')
+            except Exception as _e:
+                logging.info('[multiACE] spoollink insert seed skipped: %s'
+                             % _e)
         if h is not None and self._spoollink_active():
             try:
                 _smid = self._spoollink_smid_for(h)

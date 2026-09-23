@@ -28,6 +28,12 @@ possible. (Flashing is at your own risk - never during a print, never unplug.)
 the tag's SKU - several codes per spool, learned on hand assignment, shared with Spoolman
 and SpoolLink.
 
+**This branch:**
+- SpoolLink: a spool is linked on RFID recognition / assignment - no toolhead load needed.
+- Asynchronous retraction (async unload) rework.
+- Additional G-code commands.
+- Improved unload flow and success rate.
+
 **Pressure advance per spool.** The stock flow calibration is stored on the spool and
 applied automatically whenever that spool is loaded; synced with Spoolman using the same
 field as the [pechex/SpoolLink mod](https://github.com/paxx12-snapmaker-u1/SnapmakerU1-Extended-Firmware/pull/649).

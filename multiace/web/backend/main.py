@@ -2102,8 +2102,27 @@ def _spoolman_to_local(sp: dict, existing: dict | None,
         out["sku"] = tag_sku
     else:
         out["sku"] = _ex_sku or _gen
-    out["subtype"] = ((ex.get("subtype") or "").strip()
-                      or _spoolman_subtype_guess(out["label"], out["material"]))
+    _sm_uids = _spool_card_uids(sp)
+    if _sm_uids:
+        _parts = [p.strip() for p in str(out["sku"] or "").split(",")
+                  if p.strip()]
+        _have = {_card_canon(p) for p in _parts}
+        for _u in _sm_uids:
+            if _u not in _have:
+                _parts.append(_u)
+                _have.add(_u)
+        out["sku"] = ",".join(_parts)
+    _sub = ""
+    try:
+        _variant = (fil.get("extra") or {}).get("variant") or ""
+        if isinstance(_variant, str):
+            _v = _variant.strip()
+            if len(_v) >= 2 and _v[0] == '"' and _v[-1] == '"':
+                _v = _v[1:-1]
+            _sub = _v.strip()
+    except Exception:
+        _sub = ""
+    out["subtype"] = _sub
     if ex.get("pa_matrix") is None:
         _pa = _spoolman_pa_extra(sp)
         if _pa:
@@ -2149,6 +2168,11 @@ async def _spoolman_refresh_known(base: str, spools: dict,
             return True
         if (new_row.get("pa_matrix") is not None
                 and ex.get("pa_matrix") is None):
+            return True
+        def _codes(s):
+            return {c for c in (_card_canon(x)
+                                for x in str(s or "").split(",")) if c}
+        if _codes(new_row.get("sku")) != _codes(ex.get("sku")):
             return True
         return False
 
@@ -2299,7 +2323,8 @@ async def spoolman_adopt(payload: dict | None = None) -> dict:
         raise HTTPException(400, "spool mode is local - adopt disabled")
     return {"ok": True, "id": await _spoolman_adopt_one(smid)}
 
-_sweep_tried: dict[str, str] = {}
+_SWEEP_TRIED_TTL = 600.0
+_sweep_tried: dict[str, tuple[str, float]] = {}
 
 @app.post("/api/spoolman/adopt_by_tags")
 async def spoolman_adopt_by_tags() -> dict:
@@ -2344,10 +2369,12 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
     items: list = []
     for ace in state.get("aces") or []:
         for sl in ace.get("slots") or []:
-            if (sl.get("state") or "") in ("", "empty", "unknown"):
+            _code = (str(sl.get("sku") or "").strip()
+                     or str(sl.get("uid") or "").strip())
+            if (sl.get("state") or "") in ("", "empty", "unknown") \
+                    and not _code:
                 continue
-            items.append((f"{ace.get('idx')}_{sl.get('idx')}",
-                          str(sl.get("sku") or "").strip(),
+            items.append((f"{ace.get('idx')}_{sl.get('idx')}", _code,
                           f"ACE_SPOOL_ASSIGN ACE={ace.get('idx')} "
                           f"SLOT={sl.get('idx')} ID={{lid}}",
                           True))
@@ -2368,8 +2395,11 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
         m = re.fullmatch(r"(?:sm)?(\d+)" if bare_id_ok else r"sm(\d+)", sku)
         if not m and not (3 <= len(sku) <= 19):
             continue
-        if not strict and _sweep_tried.get(key) == sku:
-            continue
+        if not strict:
+            _tried = _sweep_tried.get(key)
+            if (_tried is not None and _tried[0] == sku
+                    and time.monotonic() - _tried[1] < _SWEEP_TRIED_TTL):
+                continue
         tag_sku = None
         if m:
             smid_s = m.group(1)
@@ -2388,13 +2418,13 @@ async def _spoolman_sweep_tags(strict: bool = False) -> dict:
                 continue
             if len(hits) > 1:
                 ids = ", ".join(f"#{sp.get('id')}" for sp in hits)
-                _sweep_tried[key] = sku
+                _sweep_tried[key] = (sku, time.monotonic())
                 errs.append(f"{key}: card UID {uid} on multiple "
                             f"spools: {ids} - fix in Spoolman")
                 continue
             smid_s = str(hits[0].get("id", ""))
             tag_sku = sku_raw
-        _sweep_tried[key] = sku
+        _sweep_tried[key] = (sku, time.monotonic())
         try:
             lid = await _spoolman_adopt_one(smid_s, tag_sku=tag_sku)
             await _mr_post("/printer/gcode/script", {
