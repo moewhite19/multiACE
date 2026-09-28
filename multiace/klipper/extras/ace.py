@@ -13898,9 +13898,9 @@ class MultiAce:
                     elif is_v2 and mm <= -3.:
                         if fwd_armed:
                             run('M400')
-                            run('G1 E%.3f F%d' % (23, infeed))
+                            run('G1 E%.3f F%d' % (12, infeed))
                             fwd_armed = False
-                            _tf_unwind(30)
+                            _tf_unwind(24)
                             run('G1 E%.3f F%d' % (mm, feed))
                         else:
                             run('M400')
