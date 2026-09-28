@@ -11545,7 +11545,7 @@ class MultiAce:
         if fmt not in ('openspool', 'anycubic'):
             raise self._ace_error(gcmd, 'FORMAT=%s not supported for writing '
                                   '(openspool | anycubic)' % fmt, code=200)
-        mat = gcmd.get('MATERIAL', None)SET_PRESSURE_ADVANCE
+        mat = gcmd.get('MATERIAL', None)
         col = gcmd.get('COLOR', None)
         brand = gcmd.get('BRAND', None)
         sub = gcmd.get('SUBTYPE', None)
