@@ -75,8 +75,7 @@ log "All source files found"
 # CONFIG_DIR is OURS to create - the klipper dirs are not. printer_data/
 # config/extended exists on a PAXX box (S49extended-config mirrors it) and
 # on any box that ran an earlier install, but NOT on clean stock firmware:
-# there the installer aborted with "Target directory not found" and the user
-# had to mkdir it by hand (forum report, stock 1.5.2, 2026-08-19). Our
+# there the installer would abort with "Target directory not found". Our
 # include points straight at extended/ace.cfg, so the directory needs no
 # PAXX machinery behind it - creating it is enough.
 if [ ! -d "$CONFIG_DIR" ]; then
@@ -98,8 +97,7 @@ log "Target directories verified"
 # flag an install looks perfect, survives until the next reboot, and then
 # Klipper halts with "Section 'ace' is not a valid config section" - the
 # config is still included but the extras are gone. Clean stock firmware
-# ships WITHOUT the flag (HW 2026-08-20, stock 1.5.2), so this bit people
-# who never had to think about it. Creating the flag only takes effect at
+# ships WITHOUT the flag. Creating the flag only takes effect at
 # the NEXT boot, which is why we set it and say so rather than trying to
 # work around it.
 if [ ! -e /oem/.debug ]; then
@@ -145,8 +143,8 @@ cp "$INSTALL_DIR/klipper/extras/filament_switch_sensor_ace.py" "$EXTRAS_DIR/fila
 cp "$INSTALL_DIR/klipper/extras/ace_bg_swap.py" "$EXTRAS_DIR/ace_bg_swap.py"
 # Per-material tip-forming tables ([ace_tipform] section, inert on 'stock')
 cp "$INSTALL_DIR/klipper/extras/ace_tipform.py" "$EXTRAS_DIR/ace_tipform.py"
-# RC522 tag line (stage 1) - helper module imported lazily by ace.py; inert
-# without [ace] rc522: true.
+# RC522 tag line - helper module imported lazily by ace.py; used only on
+# units running the ACE2-Open firmware.
 cp "$INSTALL_DIR/klipper/extras/ace_rc522.py" "$EXTRAS_DIR/ace_rc522.py"
 chmod 644 "$EXTRAS_DIR/ace.py" "$EXTRAS_DIR/ace_protocol.py" "$EXTRAS_DIR/ace_protocol_v1.py" "$EXTRAS_DIR/ace_protocol_v2.py" "$EXTRAS_DIR/filament_feed_ace.py" "$EXTRAS_DIR/filament_switch_sensor_ace.py" "$EXTRAS_DIR/ace_bg_swap.py" "$EXTRAS_DIR/ace_tipform.py" "$EXTRAS_DIR/ace_rc522.py"
 log "  Klipper extras installed"
@@ -198,7 +196,7 @@ fi
 prune_cfg_backups() {
     # Keep only the newest 3 timestamped ace.cfg backups - the names sort
     # chronologically, so this needs no stat/find. Without it every install
-    # adds one forever (Dirk: the config already grows such a list).
+    # adds one forever.
     ls -1 "$ACTIVE_CFG".bak.* 2>/dev/null | sort | head -n -3 | while read -r old_bak; do
         rm -f "$old_bak" && log "  pruned old config backup: $old_bak"
     done
@@ -589,10 +587,9 @@ PYEOF
         "$INITD_SCRIPT" start >>"$LOGFILE" 2>&1 || log "  WARN: start failed - see $LOGFILE"
         sleep 1
         # Judge by the status EXIT CODE, not by grepping the text: the old
-        # `grep -q "running"` also matched "not running", so the installer
-        # reported "multiACE Web running" unconditionally - on 2026-08-05
-        # that green light hid an Errno-98 bind failure while the
-        # pre-update backend kept serving stale code all evening.
+        # `grep -q "running"` also matched "not running" and reported
+        # "multiACE Web running" unconditionally, hiding e.g. an Errno-98
+        # bind failure while the old backend kept serving stale code.
         if "$INITD_SCRIPT" status >>"$LOGFILE" 2>&1; then
             log "  multiACE Web running"
             log "  -> http://<printer-ip>/multiace/"

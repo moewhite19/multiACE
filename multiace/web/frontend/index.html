@@ -119,7 +119,7 @@
                    is deliberate: it reads as "not known", which is also the
                    nudge to bind one. -->
               <span class="panel-card-weight">{{
-                  spoolWeightLabel(spoolForSlot(panelAce.idx, slot.idx)) || '—' }}</span>
+                  spoolWeightLabel(spoolForSlot(panelAce.idx, slot.idx)) || '-' }}</span>
             </div>
           </div>
           <div class="panel-card-label">{{ panelSlotLabel(panelAce.idx, slot.idx) }}</div>
@@ -210,7 +210,7 @@
                       <span class="panel-card-mat muted" v-else>{{ t('ui.common.empty') }}</span>
                       <span class="panel-card-sub" v-if="subText(th.subtype)">{{ subText(th.subtype) }}</span>
                       <span class="panel-card-weight">{{
-                          spoolWeightLabel(spoolForHead(th.idx)) || '—' }}</span>
+                          spoolWeightLabel(spoolForHead(th.idx)) || '-' }}</span>
                     </div>
                   </div>
                   <div class="panel-card-label">{{ spoolForHead(th.idx) ? spoolTitle(spoolForHead(th.idx)) : '' }}</div>
@@ -232,8 +232,7 @@
     <!-- Explicit condition, NOT v-else: the else used to pair with the
          panelAce template ("no ace data -> offline"), but the feeders page
          template was inserted between them - so the else silently re-paired
-         with THAT and printed a red "offline" under every ACE page
-         (HW 2026-08-09, Dirk's screenshot). An else after a growing chain
+         with THAT and printed a red "offline" under every ACE page. An else after a growing chain
          of sibling templates is a trap; say what is meant: no page at all
          means the backend gave us nothing. -->
     <div v-if="!panelPage" class="panel-err">{{ t('ui.common.offline') }}</div>
@@ -293,10 +292,10 @@
       <p v-if="loadError" class="error">{{ loadError }}</p>
       <div class="status-row">
         <span class="pill" :class="'state-' + (state.printer_state || 'idle')">
-          {{ t('ui.dashboard.status_pill') }}: <strong>{{ state.printer_state || '–' }}</strong>
+          {{ t('ui.dashboard.status_pill') }}: <strong>{{ state.printer_state || '-' }}</strong>
         </span>
         <span class="pill">{{ t('ui.dashboard.active_pill') }}: <strong>ACE {{ dispIdx(state.active_device) }}</strong></span>
-        <span class="pill">{{ t('ui.dashboard.mode_pill') }}: <strong>{{ state.mode || '–' }}</strong></span>
+        <span class="pill">{{ t('ui.dashboard.mode_pill') }}: <strong>{{ state.mode || '-' }}</strong></span>
         <button v-if="screenAvailable" class="pill pill-btn"
                 :class="{active: screenPopout}"
                 @click="toggleScreenPopout"
@@ -327,8 +326,7 @@
                    @click="ace.idx !== state.active_device && switchAce(ace.idx)">
             <h2>
               <span class="ace-name">ACE {{ dispIdx(ace.idx) }}
-                <!-- Firmware rides in the TOOLTIP, not in the visible text
-                     (Dirk 2026-08-11): the header is a tight three-column
+                <!-- Firmware rides in the TOOLTIP, not in the visible text: the header is a tight three-column
                      grid, and the version pushed the middle block until
                      "%rH" wrapped. It stays readable on hover and is
                      spelled out in the updater dropdown, where it is
@@ -366,12 +364,11 @@
                   <span class="slot-num">{{ dispIdx(slot.idx) }}</span>
                   <!-- Format on the tile only for a UID-only slot (nothing
                        else to show there); with an identity the picker
-                       carries it (Dirk 2026-09-02: "dachte nur bei uid"). -->
+                       carries it. -->
                   <em v-if="slot.tag_format && !slot.material && slot.state !== 'empty'" class="slot-fmt">{{ tagFormatLabel(slot.tag_format) }}</em>
                   <em v-if="slot.material">{{ slot.material }}</em>
                   <em v-else-if="slot.state === 'empty'" class="empty-label">{{ t('ui.common.empty') }}</em>
-                  <!-- UID-only read: the chip id takes the identity line
-                       (Dirk 2026-09-02), like the material does for RFID. -->
+                  <!-- UID-only read: the chip id takes the identity line, like the material does for RFID. -->
                   <em v-else-if="slot.uid" class="slot-uid" :title="slot.uid">{{ slot.uid }}</em>
                   <em v-else-if="slot.state !== 'unknown'">{{ slot.state }}</em>
                   <!-- Subtype row always renders (nbsp placeholder) so every
@@ -394,7 +391,7 @@
                   <em v-else-if="slot.material && sourceLabel(slot.source)"
                       class="src-badge" :class="'src-' + slot.source">{{ sourceLabel(slot.source) }}</em>
                   <!-- UID-only read (MIFARE etc.): no identity, no spool
-                       yet - show that the chip IS known (Dirk 2026-09-02). -->
+                       yet - show that the chip IS known. -->
                   <em v-else-if="slot.uid" class="src-badge src-uid"
                       :title="slot.uid">{{ t('ui.common.source_uid') }}</em>
                 </button>
@@ -491,6 +488,25 @@
                   <span v-if="ace.dryer.remain_time"> · {{ Math.round(ace.dryer.remain_time / 60) }} min</span>
                   <span v-if="ace.valve_open !== undefined"> · {{ t('ui.dashboard.valve') }}: {{ ace.valve_open ? '◉' : '○' }}</span>
                 </div>
+                <!-- ACE2-Open 61O+ status bits (Simon-CR): bit 7 = the on-chip
+                     rotisserie is oscillating a spool right now, bit 6 = auto
+                     roll is allowed. Diagnostic only - with dry_auto_roll off
+                     both stay False. Shown for every O-firmware unit.
+                     The decoder carries the two
+                     bits only when the status frame has a DRYER BLOCK; a
+                     frame without one (dryer off) yields a dict without the
+                     field - then the row says so instead of hiding. -->
+                <div class="dry-status dry-bits"
+                     v-if="ace.open_fw && ace.dryer"
+                     :title="'raw_status ' + (ace.dryer.raw_status === undefined ? '-' : ace.dryer.raw_status)">
+                  <template v-if="ace.dryer.rotisserie !== undefined">
+                    {{ t('ui.dashboard.dry_rotisserie') }}:
+                    <strong>{{ ace.dryer.rotisserie ? t('ui.dashboard.dry_bit_yes') : t('ui.dashboard.dry_bit_no') }}</strong>
+                    · {{ t('ui.dashboard.dry_auto_roll') }}:
+                    <strong>{{ ace.dryer.auto_roll_allowed ? t('ui.dashboard.dry_bit_yes') : t('ui.dashboard.dry_bit_no') }}</strong>
+                  </template>
+                  <span v-else class="muted">{{ t('ui.dashboard.dry_bits_none') }}</span>
+                </div>
               </div>
             </transition>
           </article>
@@ -522,15 +538,14 @@
               <!-- Feeder AND manual heads carry the big feeder-tile instead
                    of this dot (same colour twice reads as two facts). The
                    tile sits HERE in the title row, top right where the dot
-                   lived (Dirk: "sollte natuerlich auch oben rechts sein"). -->
+                   lived. -->
               <span class="th-color"
                     v-if="t_.color && !t_.feeder && !t_.manual && t_.head_source_known && !toolheadOps[t_.idx]"
                     :style="{background: t_.color}"></span>
             </h2>
             <!-- The tile is a SIBLING of the title, not inside it: in the h2
                  it made the title row 5rem tall, so "T3" centred downward
-                 and everything below slid with it (Dirk 2026-08-09: "alles
-                 heruntergerutscht"). The card grid (CSS .feeder/.manual)
+                 and everything below slid with it. The card grid (CSS .feeder/.manual)
                  puts it in a right-hand column spanning title+meta+actions -
                  the text column reads exactly like an ACE toolhead card. -->
             <button class="feeder-tile" v-if="t_.feeder || t_.manual"
@@ -963,7 +978,7 @@
             <p>{{ t('ui.calibration.step3_running_hint') }}</p>
             <div class='calibration-metrics'>
               <div><small>{{ t('ui.calibration.commanded') }}</small><strong>{{ state.calibration.commanded_feed_mm }} mm</strong></div>
-              <div><small>{{ t('ui.calibration.decoder_span') }}</small><strong>{{ state.calibration.decoder_span ?? '—' }}</strong></div>
+              <div><small>{{ t('ui.calibration.decoder_span') }}</small><strong>{{ state.calibration.decoder_span ?? '-' }}</strong></div>
               <div><small>{{ t('ui.calibration.safety_limit') }}</small><strong>{{ state.calibration.max_feed_mm }} mm</strong></div>
             </div>
           </template>
@@ -976,7 +991,7 @@
             <div class='calibration-metrics'>
               <div><small>{{ t('ui.calibration.load_distance') }}</small><strong>{{ state.calibration.load_length_mm }} mm</strong></div>
               <div><small>{{ t('ui.calibration.cum_retract') }}</small><strong>{{ state.calibration.commanded_retract_mm }} mm</strong></div>
-              <div><small>{{ t('ui.calibration.swap_point') }}</small><strong>{{ state.calibration.swap_retract_length_mm ?? '—' }} mm</strong></div>
+              <div><small>{{ t('ui.calibration.swap_point') }}</small><strong>{{ state.calibration.swap_retract_length_mm ?? '-' }} mm</strong></div>
             </div>
             <div v-if='state.calibration.swap_retract_length_mm == null' class='calibration-jogs'>
               <button v-for='mm in [5,10,25,50,100,250,500]' :key='`r${mm}`'
@@ -1185,7 +1200,7 @@
             <p class='calibration-warning'>{{ t('ui.calibration.r_retract_note') }}</p>
             <p v-if='state.calibration.state === `verified`' class='calibration-success'>{{ t('ui.calibration.r_verified_note') }}</p>
             <p v-if='state.calibration.state === `verified` && state.calibration.verify_feed_delta_mm != null' class='muted'>Verified toolhead endpoint correction: {{ state.calibration.verify_feed_delta_mm >= 0 ? '+' : '' }}{{ state.calibration.verify_feed_delta_mm }} mm. This diagnostic has not been applied to the calibration values.</p>
-            <p v-if='state.calibration.protocol === `v2`' class='muted'>Encoder return delta: {{ state.calibration.decoder_return_delta ?? '—' }} counts (diagnostic only).</p>
+            <p v-if='state.calibration.protocol === `v2`' class='muted'>Encoder return delta: {{ state.calibration.decoder_return_delta ?? '-' }} counts (diagnostic only).</p>
             <div class='calibration-allowances'>
               <label>{{ t('ui.calibration.allow_load') }} <input type='number' min='0' max='200' v-model.number='calibrationUi.loadAllowance'> mm</label>
               <label>{{ t('ui.calibration.allow_splitter') }} <input type='number' min='0' max='200' v-model.number='calibrationUi.swapAllowance'> mm</label>
@@ -1250,12 +1265,12 @@
       </h2>
       <p class="muted small">{{ t('ui.spools.hint') }}</p>
       <!-- One row for everything: while adding it FILTERS the table live,
-           and it turns into the edit form for a row (Dirk). Field order
+           and it turns into the edit form for a row. Field order
            follows the display: label, colour, material, vendor, subtype. -->
       <!-- EDITOR only (pencil on a row) - v-show, not v-if: the picker
            references the datalists inside, they must stay in the DOM. The
            old always-visible form doubled as filter + creator; both roles
-           died in the tab redesign (Dirk 2026-08-09) - the free-text
+           died in the tab redesign - the free-text
            search below filters, the picker/Spoolman dialog creates. -->
       <div class="spool-add" v-show="spoolEditId || spoolCreating">
         <label>{{ t('ui.spools.label') }}
@@ -1333,8 +1348,7 @@
         <button @click="spoolFormClear()">{{ t('ui.common.cancel') }}</button>
       </div>
       <!-- The table's free-text search belongs to the LOCAL world only
-           (Dirk 2026-08-09: "ich kann unter spools noch immer in der
-           tabelle suchen") - with Spoolman connected the ONE search is
+           - with Spoolman connected the ONE search is
            the Spoolman search below, and the table is just the small
            what-sits-in-the-printer cache. The filter itself is also
            world-gated in spoolListShown, so a query typed in local mode
@@ -1347,10 +1361,9 @@
       </div>
       <!-- Spoolman dialog: pick a result, then the adopt bar DEMANDS a
            target - binding is mandatory at adopt, an unbound SM entry
-           must never exist (Dirk 2026-08-09). -->
+           must never exist. -->
       <!-- Spoolman is ACTIVE here - say it with the wordmark next to the
-           search (Dirk 2026-08-09: "anzeigen, dass spoolman aktiv ist,
-           gibts ein ausgeschriebenes logo?"). No official asset is
+           search. No official asset is
            bundled; the spool glyph (same as the config tab) + the name in
            the SM orange is our own mark. Tick/cross = the live ping the
            config tab already maintains, clickable to re-probe. -->
@@ -1401,8 +1414,8 @@
         <button @click="smPick = null; smPickTarget = ''">{{ t('ui.common.cancel') }}</button>
       </div>
       <table class="spool-table" v-if="spoolListShown().length">
-        <!-- Every header sorts by its own column (underline = active;
-             Dirk 2026-08-09). Default = assigned: bound first in slot
+        <!-- Every header sorts by its own column (underline = active).
+             Default = assigned: bound first in slot
              order, the list mirrors the printer. -->
         <tr>
           <th class="spool-th-sort" :class="{active: spoolSort === 'label'}"
@@ -1415,7 +1428,7 @@
               @click="spoolSort = 'assigned'">{{ t('ui.spools.assigned') }}</th><th></th>
         </tr>
         <!-- No id column: the internal number is bookkeeping, not identity
-             (Dirk 2026-08-09) - a Spoolman row identifies via its SM badge,
+             - a Spoolman row identifies via its SM badge,
              a local one via label/colour. -->
         <tr v-for="sp in spoolListShown()" :key="'spool-' + sp.id"
             :class="{editing: spoolEditId === sp.id}">
@@ -1431,7 +1444,7 @@
                need when writing or re-writing tags. -->
           <td class="spool-sku-cell"><span class="spool-sku" v-if="sp.sku"
                 :title="t('ui.spools.sku')">{{ sp.sku }}</span></td>
-          <td>{{ spoolWeightLabel(sp) || '–' }}</td>
+          <td>{{ spoolWeightLabel(sp) || '-' }}</td>
           <td>
             <select class="spool-slot-sel" :value="spoolSlotKey(sp)"
                     @change="spoolAssignTo(sp, $event.target.value)"
@@ -1447,10 +1460,10 @@
           <td class="spool-actions">
             <!-- SM rows: identity lives in Spoolman, no local editor. The
                  scale-check weight correction is gone too in Spoolman mode
-                 (Dirk 2026-08-15): the remaining weight comes from Spoolman
+                 : the remaining weight comes from Spoolman
                  on every refresh and the push only ever sends consumption
-                 DELTAS, so a corrected value was silently overwritten again -
-                 "dann ist ändern ja zwecklos". Correct it in Spoolman. -->
+                 DELTAS, so a corrected value would be silently overwritten
+                 again. Correct it in Spoolman. -->
             <!-- PA is OUR field on every spool kind (Spoolman does not
                  carry it until the sync build) - only SpoolLink mode
                  hides it (the mod owns PA there, engine refuses too). -->
@@ -1467,8 +1480,7 @@
         </tr>
       </table>
       <p v-else class="muted small">{{ spoolQuery.trim() ? t('ui.spools.no_match') : t('ui.spools.empty') }}</p>
-      <!-- Export/import is the LOCAL table's workflow (Dirk 2026-08-09:
-           "export / import muss auch nur lokal angezeigt werden") - and in
+      <!-- Export/import is the LOCAL table's workflow - and in
            Spoolman mode an import would plant exactly the invisible local
            entries the world split exists to prevent. Spoolman lives in
            Spoolman; its rows re-enter via search+adopt. -->
@@ -1486,8 +1498,7 @@
            row stays out of the way for everyone who does not use it. -->
       <!-- ONE button: sync = push consumption, then refresh the linked
            rows from Spoolman. The old pull-only "Import from Spoolman" was
-           a bulk-era relic (Dirk 2026-08-09: "wofuer ist noch gleich der
-           import button?") - since the redesign it only refreshed linked
+           a bulk-era relic - since the redesign it only refreshed linked
            rows, a strict subset of sync (push never discards; the
            push-before-pull order exists so nothing is lost). -->
       <div class="spool-io" v-if="state.spoolman_url">
@@ -1649,7 +1660,7 @@
                    :title="t('ui.config.spoolman_url_hint')"
                    @keyup.enter="saveSpoolmanUrl()">
             <!-- Save is a WORD now: the old ✓ next to a URL field read as
-                 "connected" (Dirk). The real state sits beside it - spool
+                 "connected". The real state sits beside it - spool
                  logo + checkmark ONLY once the instance actually answered
                  (probe), red cross when it does not; click re-checks. -->
             <button class="sm-save-btn" @click="saveSpoolmanUrl()">{{ t('ui.common.save') }}</button>
@@ -1671,8 +1682,7 @@
             <!-- Shown OFF while no URL is configured: the stored flag can
                  survive from earlier testing, and a ticked (if disabled)
                  box reads as "syncing is on" although nothing can happen
-                 without a URL - it sent Dirk hunting the wrong cause
-                 (2026-08-11). The stored value is untouched and reappears
+                 without a URL. The stored value is untouched and reappears
                  as soon as a URL is entered. -->
             <input type="checkbox"
                    :checked="state.spoolman_auto && !!state.spoolman_url"
@@ -1682,8 +1692,8 @@
           </label>
         </div>
         <p class="muted small config-row-hint">{{ t('ui.config.spoolman_hint') }}</p>
-        <!-- THE spool world switch (Dirk 2026-08-16: "lokal / spoolman /
-             spoollink.. fertig"). spoolman/spoollink only selectable with
+        <!-- THE spool world switch (local / spoolman / spoollink).
+             spoolman/spoollink only selectable with
              a LIVE Spoolman connection (smPing), spoollink additionally
              needs the paxx resolver agent. -->
         <div class="config-row">
@@ -1703,7 +1713,7 @@
         </div>
         <p class="muted small">{{ t('ui.config.spool_mode_hint') }}</p>
         <!-- PA sync: a spool-scoped setting, so it lives with the spool
-             world config (Dirk). Gates both PA automatics (capture from the
+             world config. Gates both PA automatics (capture from the
              stock flow routine + apply on toolchange); works local or with
              Spoolman, the value lives on the bound spool. Greyed in
              SpoolLink mode - PA there belongs to the paxx mod's own path,
@@ -1827,7 +1837,7 @@
         <button @click="showRawConfig = !showRawConfig">{{ showRawConfig ? t('ui.config.form_view') : t('ui.config.raw_view') }}</button>
       </div>
       <!-- Result AT the button: the config form is long, so the top reboot
-           banner was only visible after scrolling up (Dirk 2026-08-09). The
+           banner was only visible after scrolling up. The
            hint above it repeats the banner in warning colours - inside the
            grey log block the restart line went unnoticed. -->
       <p v-if="rebootNeeded" class="config-restart-hint">⚠ {{ t('ui.common.please_restart') }}</p>
@@ -1892,14 +1902,14 @@
         <div class="row">
           <button @click="tipformAddRow">{{ t('ui.config.tipform_add') }}</button>
           <!-- One save, no restart button: same policy as the config save
-               (Dirk 2026-08-09) - it worked only sometimes, and whoever
+               - a restart from here works only sometimes, and whoever
                knows what they are doing can restart Klipper from Fluidd.
                The "restart pending" line below states what is still
                missing. -->
-          <!-- "Apply", not "Save" (Dirk 2026-08-16): the save applies LIVE
-               since the tipform reload - a second identical "Save" button
-               under the config save (which DOES need a restart) is how he
-               confused the two in the first place. -->
+          <!-- "Apply", not "Save": the save applies LIVE via the tipform
+               reload - a second identical "Save" button under the config
+               save (which DOES need a restart) would read as the same
+               thing. -->
           <button @click="saveTipform()" class="primary">{{ t('ui.config.tipform_apply') }}</button>
         </div>
         <p v-if="tipform.error" class="error">{{ tipform.error }}</p>
@@ -1983,8 +1993,7 @@ reboot</pre>
                      @change="acefwUpload($event.target.files)">
             </span>
           </div>
-          <!-- Only TESTED versions are offered (allowlist, Dirk: "nur
-               getestete Versionen") - the byte gate in the backend
+          <!-- Only TESTED versions are offered (allowlist) - the byte gate in the backend
                refuses anything that does not extract to the exact tested
                image. Releasing a new version = dry run with the new
                package, read size/CRC/MD5 off the result, add the entry
@@ -2002,9 +2011,13 @@ reboot</pre>
                only shown when 1.1.31 is selected and the backend has the
                patch. The base upload stays the stock 1.1.31 package. -->
           <div class="config-row" v-if="acefwCanPatch">
-            <label>{{ t('ui.config.acefw_patch_label', {target: acefwPatchTarget}) }}</label>
+            <label>{{ t('ui.config.acefw_patch_label_any') }}</label>
             <label class="acefw-force-row">
               <input type="checkbox" v-model="acefw.patchToOpen">
+              <select v-model="acefw.patchTarget" :disabled="!acefw.patchToOpen">
+                <option v-for="tg in acefwPatchTargets" :key="tg.version"
+                        :value="tg.version">{{ acefwTargetLabel(tg) }}</option>
+              </select>
               <span class="muted small">{{ t('ui.config.acefw_patch_hint') }}</span>
             </label>
           </div>
@@ -2031,7 +2044,7 @@ reboot</pre>
             t('ui.config.acefw_test') }}</button>
           <button class="danger" :disabled="!acefwReady()"
                   @click="acefwFlash()">{{ t('ui.config.acefw_flash') }}</button>
-          <span class="small" :class="acefw.uiError ? 'acefw-err' : 'muted'"
+          <span class="small" :class="acefwStatusBad ? 'acefw-err' : 'muted'"
                 >{{ acefwStatusText }}</span>
         </div>
       </div>
@@ -2063,7 +2076,7 @@ reboot</pre>
             @contextmenu.prevent></canvas>
   </div>
   <!-- Running tag op: a plain indeterminate bar with one word, no
-       progress narration (Dirk 2026-09-02: "einfach writing..."); the
+       progress narration; the
        outcome comes as ONE notification (green self-dismissing / red). -->
   <div v-if="state.tag_op && state.tag_op.busy && !panelMode
              && !(picker.show && (state.tag_op.kind === 'write' || state.tag_op.kind === 'read'))" class="tag-op-bar">
@@ -2127,7 +2140,7 @@ reboot</pre>
   </div>
   <div v-if="picker.show" class="overlay" @click.self="closePicker">
     <div class="dialog">
-      <!-- Tag format ABOVE the header, like the tiles (Dirk 2026-09-02):
+      <!-- Tag format ABOVE the header, like the tiles:
            Anycubic / OpenSpool / MIFARE / unknown = the slot's last read. -->
       <p v-if="pickerTagFormat || pickerRfidSku" class="muted picker-note picker-fmt">
         <span v-if="pickerTagFormat">{{ pickerTagFormat }}</span>
@@ -2189,8 +2202,7 @@ reboot</pre>
              the row only exists while it can DO something - a bound spool
              to show/clear, or adopted spools to move here; with neither it
              is a dead "unassigned" dropdown and goes away, the Spoolman
-             search below is the one spool control then (Dirk 2026-08-09:
-             "wenn spools nicht genutzt werden kann, kann es auch raus"). -->
+             search below is the one spool control then. -->
         <div class="config-row"
              v-if="!spoolmanConnected || picker.spool || spoolPickerOptions.length">
           <label>{{ t('ui.spools.title') }}</label>
@@ -2259,7 +2271,7 @@ reboot</pre>
         <div class="config-row" v-if="picker.spool || !spoolmanConnected">
           <label>{{ t('ui.spools.weight') }}</label>
           <span v-if="spoolmanConnected" class="picker-short muted">{{
-              picker.weight !== "" ? picker.weight + ' g' : '–' }}</span>
+              picker.weight !== "" ? picker.weight + ' g' : '-' }}</span>
           <input v-else v-model="picker.weight" list="spool-weights"
                  class="picker-short" type="number" min="0" max="10000"
                  :title="picker.spool ? t('ui.spools.correct_weight')
@@ -2294,7 +2306,7 @@ reboot</pre>
         <button v-if="picker.head === null || picker.head === undefined"
                 @click="savePicker(true)" :disabled="isToolheadOccupied(picker.ace, picker.slot)">{{ t('ui.dialog.picker_load_after') }}</button>
         <!-- Write the picked identity onto the physical tag as OpenSpool.
-             Slot target only (a head has no ACE tag); needs [ace] rc522 and
+             Slot target only (a head has no ACE tag); needs ACE2-Open firmware and
              a spool at the gate. -->
         <template v-if="state.rc522 && (picker.head === null || picker.head === undefined) && aceOpenFw(picker.ace)">
           <select :value="tagWriteFormat()" @change="picker.tagFormat = $event.target.value"
@@ -2314,8 +2326,7 @@ reboot</pre>
                   :title="t('ui.dialog.read_tag_title')">{{ t('ui.dialog.picker_read_tag') }}</button>
         </template>
       </div>
-      <!-- The write runs from here, so its bar sits under the buttons
-           (Dirk 2026-09-02): "writing..." while busy, then the outcome
+      <!-- The write runs from here, so its bar sits under the buttons: "writing..." while busy, then the outcome
            (green / red) for a while instead of an alert. -->
       <div v-if="state.tag_op && state.tag_op.busy && (state.tag_op.kind === 'write' || state.tag_op.kind === 'read')"
            class="tag-op-bar inline">
@@ -2333,7 +2344,7 @@ reboot</pre>
        spools (paClip survives closing). Values save via ACE_SPOOL_PA. -->
   <div v-if="paDlg" class="overlay overlay-top" @click.self="paDlg = null">
     <div class="dialog">
-      <h3>PA – {{ spoolTitle(paDlg.sp) }}</h3>
+      <h3>PA - {{ spoolTitle(paDlg.sp) }}</h3>
       <p class="muted small">{{ t('ui.spools.pa_hint') }}</p>
       <p v-if="!paDlg.rows.length" class="muted small">{{ t('ui.spools.pa_empty') }}</p>
       <div v-for="(r, i) in paDlg.rows" :key="'pa-'+i" class="dialog-input pa-row">
@@ -2363,6 +2374,12 @@ reboot</pre>
                 :disabled="!paKeyValid(paDlg.newKey.trim()) || !paValueValid(paDlg.newValue)">+</button>
       </div>
       <div class="row">
+        <button @click="paCalibrate" :disabled="!paCanCalibrate()"
+                :title="paSpoolHead(paDlg.sp) !== null ? t('ui.spools.pa_calibrate_title')
+                        : paSpoolLoadPlan(paDlg.sp) ? t('ui.spools.pa_calibrate_load_title')
+                        : t('ui.spools.pa_calibrate_nohead')">
+          {{ paLoading ? t('ui.spools.pa_loading')
+             : paCalibrating ? t('ui.spools.pa_calibrating') : t('ui.spools.pa_calibrate') }}</button>
         <button @click="paCopy" :disabled="!paDlg.rows.length"
                 :title="t('ui.spools.pa_copy_title')">{{ t('ui.spools.pa_copy') }}</button>
         <button @click="paPaste" :disabled="!paClip"
@@ -2530,14 +2547,14 @@ reboot</pre>
                         <span class="hm-dd-chip"
                               :style="{background: headTargetColor(headEffectiveTargetId(c.t))}"></span>
                         <span class="hm-dd-label">{{ headTargetLabelById(headEffectiveTargetId(c.t))
-                              || ('— ' + t('ui.preflight.not_feasible') + ' —') }}</span>
+                              || ('- ' + t('ui.preflight.not_feasible') + ' -') }}</span>
                         <span class="hm-dd-caret">▾</span>
                       </button>
                       <div class="hm-dd-list" v-if="hmDropOpen === c.t">
                         <div class="hm-dd-item"
                              @mousedown.prevent="hmDdPick(c.t, '')">
                           <span class="hm-dd-chip" style="background:#444"></span>
-                          <span>— {{ t('ui.preflight.not_feasible') }} —</span>
+                          <span>- {{ t('ui.preflight.not_feasible') }} -</span>
                         </div>
                         <div class="hm-dd-item"
                              v-for="tg in headTargetOptions(c.t)"
@@ -2604,6 +2621,27 @@ reboot</pre>
         </template>
 
         <template v-else-if="!preflight.report.head_mode">
+        <!-- Multifilament-Optimierung setting in the classic multi view: the
+             copies pipeline needs a new analysis, so a change here takes
+             effect with the next upload (the head-mode/assignment view
+             recomputes live). -->
+        <div class="preflight-plan preflight-copies">
+          <div class="preflight-plan-head">
+            <h4>{{ t('ui.preflight.copies_title') }}</h4>
+            <label class="small">
+              {{ t('ui.preflight.copies_max') }}
+              <input type="number" min="1" max="4" class="copies-input"
+                     :value="headMaxCopies()"
+                     @change="setPreflightCopies($event.target.value)">
+            </label>
+            <label class="small" :title="t('ui.preflight.copies_strict_hint')">
+              <input type="checkbox" :checked="headCopiesStrict()"
+                     @change="setPreflightCopiesStrict($event.target.checked)">
+              {{ t('ui.preflight.copies_strict') }}
+            </label>
+          </div>
+          <p class="muted small">{{ t('ui.preflight.copies_multi_hint') }}</p>
+        </div>
         <h4>{{ t('ui.preflight.printer_loadout') }}</h4>
         <div class="preflight-grid">
           <div v-for="s in preflight.report.live_slots"
@@ -2733,7 +2771,11 @@ reboot</pre>
         </template>
 
         <template v-else>
-          <h4>
+          <h4 v-if="multiTopology()">
+            {{ t('ui.preflight.multi_assign_title') }}
+            <span class="muted small">- {{ t('ui.preflight.multi_assign_sub') }}<template v-if="preflight.report.manual_heads && preflight.report.manual_heads.length">, {{ t('ui.preflight.manual_head') }} {{ preflight.report.manual_heads.map(h => 'T' + dispIdx(h)).join(', ') }}</template></span>
+          </h4>
+          <h4 v-else>
             {{ t('ui.preflight.head_mode_title') }}
             <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ (preflight.report.ace_heads && preflight.report.ace_heads.length ? preflight.report.ace_heads : [preflight.report.ace_head]).map(h => 'T' + dispIdx(h)).join(', ') }}</span>
           </h4>
@@ -2766,13 +2808,37 @@ reboot</pre>
             </div>
           </div>
 
+          <!-- Multifilament-Optimierung (colour copies): one colour on several
+               heads. The setting is the printer's (write-through); copies in
+               use + the loadout suggestion come from the report and are
+               recomputed live on edits (recalcHead). -->
+          <div class="preflight-plan preflight-copies">
+            <div class="preflight-plan-head">
+              <h4>{{ t('ui.preflight.copies_title') }}</h4>
+              <label class="small">
+                {{ t('ui.preflight.copies_max') }}
+                <input type="number" min="1" max="4" class="copies-input"
+                       :value="headMaxCopies()"
+                       @change="setPreflightCopies($event.target.value)">
+              </label>
+              <label class="small" :title="t('ui.preflight.copies_strict_hint')">
+                <input type="checkbox" :checked="headCopiesStrict()"
+                       @change="setPreflightCopiesStrict($event.target.checked)">
+                {{ t('ui.preflight.copies_strict') }}
+              </label>
+            </div>
+            <p v-if="headMaxCopies() <= 1" class="muted small">{{ t('ui.preflight.copies_off') }}</p>
+            <p v-else-if="!headCopyPlan().suggestions.length && !headCopyList().length"
+               class="muted small">{{ t('ui.preflight.copies_none') }}</p>
+          </div>
+
           <template v-for="hp in ['loadout', 'optimize', 'layer', 'color']"
                     :key="'hplan-'+hp">
             <div v-if="preflight.report.plans[hp]" class="preflight-plan">
               <div class="preflight-plan-head">
                 <h4>{{ t('ui.preflight.head_plan_' + hp) }}</h4>
                 <span v-if="headPlanFeasible(hp)" class="muted small">
-                  {{ headPlanSwaps(hp) }} {{ t('ui.preflight.swaps_label') }}
+                  {{ headPlanSwaps(hp) }}<template v-if="hp === 'loadout' && headCopyPlan().suggestions.length"> → {{ headCopyPlan().swaps_after }}</template> {{ t('ui.preflight.swaps_label') }}
                   <span v-if="headPlanBg(hp)">· {{ headPlanBgLabel(hp) }}</span>
                   <span v-if="headPlanFlushG(hp) !== null">· {{ headPlanFlushG(hp) }} {{ t('ui.preflight.flush_g_label') }}</span>
                 </span>
@@ -2799,7 +2865,7 @@ reboot</pre>
                            target (ACE + feeder alike), the filament colour
                            as a chip NEXT to the label - in the closed button
                            AND in the open list (native options can't render
-                           a partial-colour chip; Dirk 2026-07-10). Items
+                           a partial-colour chip). Items
                            pick on mousedown so the button's blur-close
                            cannot swallow the click. -->
                       <div class="hm-dd">
@@ -2810,14 +2876,14 @@ reboot</pre>
                           <span class="hm-dd-chip"
                                 :style="{background: headTargetColor(headEffectiveTargetId(c.t))}"></span>
                           <span class="hm-dd-label">{{ headTargetLabelById(headEffectiveTargetId(c.t))
-                                || ('— ' + t('ui.preflight.not_feasible') + ' —') }}</span>
+                                || ('- ' + t('ui.preflight.not_feasible') + ' -') }}</span>
                           <span class="hm-dd-caret">▾</span>
                         </button>
                         <div class="hm-dd-list" v-if="hmDropOpen === c.t">
                           <div class="hm-dd-item"
                                @mousedown.prevent="hmDdPick(c.t, '')">
                             <span class="hm-dd-chip" style="background:#444"></span>
-                            <span>— {{ t('ui.preflight.not_feasible') }} —</span>
+                            <span>- {{ t('ui.preflight.not_feasible') }} -</span>
                           </div>
                           <div class="hm-dd-item"
                                v-for="tg in headTargetOptions(c.t)"
@@ -2845,10 +2911,41 @@ reboot</pre>
                       <span class="muted small">· {{ c.material || '?' }}</span>
                     </td>
                   </tr>
+                  <!-- Colour copies (Multifilament): a second spool of a
+                       colour on another head. Active = loaded already;
+                       suggested = an empty slot to load it into. Fixed
+                       rows, no dropdown - editing them would change the
+                       count they were computed for. -->
+                  <tr v-for="c in headCopyList()" :key="'hmc-'+c.t+'-'+c.id" class="copy-row">
+                    <td>
+                      <span class="preflight-dot" :style="{background: headTargetColor(c.id)}"></span>
+                      {{ headTargetLabelById(c.id) }}
+                      <span class="muted small">· {{ t('ui.preflight.copies_row_active') }}</span>
+                    </td>
+                    <td>←</td>
+                    <td>
+                      <span class="preflight-dot" :style="{background: headSlicerHex(c.t) || '#444'}"></span>
+                      T{{ dispIdx(c.t) }}
+                      <span class="muted small">· {{ headSlicerMat(c.t) }}</span>
+                    </td>
+                  </tr>
+                  <tr v-for="sg in headCopyPlan().suggestions" :key="'hms-'+sg.t+'-'+sg.ace+'-'+sg.slot" class="copy-row suggest">
+                    <td>
+                      <span class="preflight-dot" :style="{background: headSlicerHex(sg.t) || '#444'}"></span>
+                      {{ copySlotLabel(sg.ace, sg.slot) }} · {{ headSlicerMat(sg.t) }}
+                      <span class="muted small">· {{ t('ui.preflight.copies_row_load') }}</span>
+                    </td>
+                    <td>←</td>
+                    <td>
+                      <span class="preflight-dot" :style="{background: headSlicerHex(sg.t) || '#444'}"></span>
+                      T{{ dispIdx(sg.t) }}
+                      <span class="muted small">· {{ headSlicerMat(sg.t) }}</span>
+                    </td>
+                  </tr>
                 </tbody>
               </table>
 
-              <table v-else-if="preflight.report.plans[hp].mapping.length"
+              <table v-else-if="headPlanMapping(hp).length"
                      class="preflight-mapping">
                 <thead>
                   <tr>
@@ -2858,12 +2955,14 @@ reboot</pre>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="m in preflight.report.plans[hp].mapping"
-                      :key="'hpm-'+hp+'-'+m.t" :class="{warn: m.kind === 'none'}">
+                  <tr v-for="m in headPlanMapping(hp)"
+                      :key="'hpm-'+hp+'-'+m.t+'-'+(m.tier || '')+'-'+m.ace+'-'+m.slot"
+                      :class="{warn: m.kind === 'none'}">
                     <td v-if="m.kind !== 'none'">
                       <span class="preflight-dot"
                             :style="{background: headSlicerHex(m.t) || '#444'}"></span>
                       {{ headProposalLabel(m) }}
+                      <span v-if="m.tier === 'copy'" class="muted small">· {{ t('ui.preflight.copies_row_load') }}</span>
                     </td>
                     <td v-else class="muted">-</td>
                     <td>←</td>
@@ -2878,7 +2977,7 @@ reboot</pre>
               </table>
 
               <div class="row">
-                <button v-if="hp !== 'loadout' && headPlanFeasible(hp)"
+                <button v-if="headPlanFeasible(hp) && (hp !== 'loadout' || headCopyPlan().suggestions.length)"
                         :disabled="preflight.sending !== '' || preflight.applying !== ''"
                         @click="applyLoadout('head', hp)">
                   {{ preflight.applying === hp

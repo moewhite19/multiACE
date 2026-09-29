@@ -23,6 +23,12 @@ EXTRUDER_SWITCH_RECORDER = "extruder_switch_recorder.json"
 
 NOZZLE_CONFIG_POSTFIX = "_nozzle_config.json"
 VALID_NOZZLE_DIAMETERS = [0.2, 0.4, 0.6, 0.8]
+# 1.6.0 stock sync: the 1.6.0 flow_calibrator reads
+# extruder.nozzle_volume_type, and in ace mode OUR file is copied over
+# kinematics/extruder.py - a pre-1.6.0 copy under a 1.6.0 tree shuts the
+# printer down on the first FLOW_RESET_K. Everything below is
+# version-tolerant: on 1.5.x the volume type simply reads 'standard', which
+# is correct there (high_flow cannot be declared before 1.6.0).
 VALID_NOZZLE_VOLUME_TYPES = ['standard', 'high_flow']
 NOZZLE_CONFIG_DEFAULT = {
     "diameter": 0.4,
@@ -404,6 +410,11 @@ class PrinterExtruder:
         self.nozzle_config_info = self.printer.load_snapmaker_config_file(
             self.nozzle_config_path, NOZZLE_CONFIG_DEFAULT)
         self.nozzle_diameter = self.nozzle_config_info['diameter']
+        # 1.6.0 migration, mirroring stock: a config written by an older
+        # version has no diameter_v160/volume_type keys (the default only
+        # fills a MISSING FILE, not missing keys - dict.get, never []).
+        # diameter drifting from diameter_v160 means the diameter was set
+        # by a pre-1.6.0 build; the volume type is then unknown -> default.
         _need_save = False
         if self.nozzle_config_info['diameter'] \
                 != self.nozzle_config_info.get('diameter_v160'):
@@ -1115,6 +1126,10 @@ class PrinterExtruder:
         if save:
             if not self.printer.update_snapmaker_config_file(self.nozzle_config_path, self.nozzle_config_info):
                 logging.error("failed to save nozzle diameter config")
+        # 1.6.0: switching to a 0.2 nozzle resets a declared filament the
+        # firmware forbids on it. Both consulted objects are getattr-guarded:
+        # is_allow_to_print/reset_filament_info exist only from 1.6.0, so on
+        # older stock this is a no-op.
         if diameter >= 0.1999 and diameter <= 0.2001:
             try:
                 ptc = self.printer.lookup_object('print_task_config', None)
@@ -1175,6 +1190,8 @@ class PrinterExtruder:
         gcmd.respond_info("Nozzle diameter for %s set to %.1fmm" % (self.name, diameter))
 
     def cmd_SET_NOZZLE_PROPERTIES(self, gcmd):
+        # 1.6.0 stock parity: diameter and/or volume type in one command,
+        # one persisted write at the end (stock passes save=False twice).
         logging.info("[extruder] SET_NOZZLE_PROPERTIES %s",
                      gcmd.get_raw_command_parameters())
         diameter = gcmd.get_float('DIAMETER', None)
@@ -1202,6 +1219,8 @@ class PrinterExtruder:
             logging.error("failed to save nozzle properties")
 
     def _handle_control_nozzle_properties(self, web_request):
+        # 1.6.0 GUI endpoint (the screen's nozzle dialog). Same shape as
+        # stock: extruder index mandatory, diameter/volume_type optional.
         try:
             logging.info("[extruder] wb, control_nozzle_properties: %s",
                          web_request.get_raw_parameters())
@@ -1245,6 +1264,10 @@ class PrinterExtruder:
             web_request.send({'state': 'error', 'message': str(e)})
 
     def _get_filament_temp(self, extruder_index=None):
+        # 1.6.0 helper for INNER_HEAT_TO_LOADED_FILAMENT_TEMP. get_print_temp
+        # exists only from 1.6.0 - getattr-guarded, 220 as stock's own
+        # fallback, so the command works (with the default temp) even if a
+        # mixed install pairs this file with an older filament_parameters.
         print_task_config = self.printer.lookup_object(
             'print_task_config', None)
         filament_parameters = self.printer.lookup_object(
@@ -1311,7 +1334,7 @@ class PrinterExtruder:
     def set_max_accel(self, accel):
         self.max_e_accel = accel
     def get_max_accel(self):
-        return self.max_e_accel
+        return self.max_e_accel 
     def cmd_SET_MAX_E_ACCEL(self, gcmd):
         extruder = self.printer.lookup_object('toolhead').get_extruder()
         accel = gcmd.get_float('A', extruder.max_e_accel)

@@ -5,9 +5,8 @@ const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://")
 const SCREEN = "/screen";
 createApp({
   setup() {
-    // Bowden-path calibration tab (physicsG port): dev-only until it is
-    // HW-signed-off. A release flips this to false (Dirk 2026-09-06,
-    // 1.00b: "nur die calibration ausblenden"); the code stays, hidden.
+    // Bowden-path calibration tab (physicsG port): hidden for now, also on
+    // dev (Dirk 2026-09-25). The code stays; flip to true to show it.
     const CALIBRATION_TAB = false;
     const _validTabs = new Set(["dashboard", "spools", "config"]);
     if (CALIBRATION_TAB) _validTabs.add("calibration");
@@ -69,20 +68,20 @@ createApp({
       return v.replace(/\{(\w+)\}/g, (_, k) => params[k] != null ? params[k] : `{${k}}`);
     }
     function dispIdx(n) {
-      if (n == null) return "–";
+      if (n == null) return "-";
       return Number(n) + indexBase.value;
     }
     // Subtype label for display: hide the implicit defaults (empty / Basic /
     // generic) so only a meaningful subtype (Matte, Silk, HF, ...) shows.
     function subText(sku) {
       const s = (sku || "").trim();
-      // 'none' is stock print_task_config's placeholder (S28) - the backend
+      // 'none' is stock print_task_config's placeholder - the backend
       // filters it at the source now, this is the display-edge belt for any
       // path (old backend, hand-typed value) that still carries it.
       if (!s || ["basic", "generic", "none"].includes(s.toLowerCase())) return "";
       return s;
     }
-    // Provenance badge label for an identity source (spec §4 / D3):
+    // Provenance badge label for an identity source:
     // rfid = read from tag, override = user-set, derived = from print job.
     // Empty/raw slots have no badge.
     function sourceLabel(src) {
@@ -163,6 +162,8 @@ createApp({
       save_variables: {},
       bg_swap: {available: false, enabled_heads: [], busy: [], version: null},
       pickup_cleaning: false,
+      preflight_max_copies: 1,
+      preflight_copies_strict: false,
       confirm_commands: false,
       spoolman_url: "",
       spoolman_auto: false,
@@ -276,6 +277,8 @@ createApp({
       state.device_count  = s.device_count ?? 0;
       state.mode          = s.mode || "normal";
       state.pickup_cleaning = !!s.pickup_cleaning;
+      state.preflight_max_copies = Math.max(1, Math.min(4, Number(s.preflight_max_copies || 1)));
+      state.preflight_copies_strict = !!s.preflight_copies_strict;
       state.confirm_commands = !!s.confirm_commands;
       state.spoolman_url = s.spoolman_url || "";
       state.spoolman_auto = !!s.spoolman_auto;
@@ -312,9 +315,9 @@ createApp({
       // here, state.tipform kept its declared default {available:false} for
       // ever: tipformRestartPending then read the live mode as "stock"
       // against a cfg mode of "custom" and showed "restart Klipper to
-      // apply" permanently, right after a restart too (HW 2026-08-02).
-      // Same class as auto_dry_masters above - backend sends it, the state
-      // object declares it, applyState never copied it.
+      // apply" permanently, right after a restart too. Same class as
+      // auto_dry_masters above - backend sends it, the state object
+      // declares it, applyState must copy it.
       state.tipform = (s.tipform && typeof s.tipform === "object")
         ? s.tipform
         : {available: false, mode: null, tables: []};
@@ -385,9 +388,8 @@ createApp({
     }
     function enqueue(name, args, opts) {
       return new Promise((resolve) => {
-        // A new command after a FAILED one is a new intention (Dirk
-        // 2026-09-06: "muss erst play druecken, koennte man das
-        // automatisieren"): drop the failed entry and whatever still waited
+        // A new command after a FAILED one is a new intention: drop the
+        // failed entry and whatever still waited
         // behind it - that chain (e.g. the load after a failed unload) was
         // blocked for good, and its red notification has been seen - lift
         // the error pause and let the new command run. A pause pressed by
@@ -684,7 +686,7 @@ createApp({
     // the per-ACE or per-slot level - NOT the shipped global [ace] default
     // (retract_length/swap_retract_length), which is always present and
     // otherwise makes every fresh install read as "Route known" and pushes
-    // the user to verify instead of a first calibration (Dirk 2026-08-29).
+    // the user to verify instead of a first calibration.
     // Scope-independent for the question "is this route calibrated": a
     // per-slot value OR the per-ACE value that the slot inherits both count.
     const calibrationRouteCalibrated = computed(() => {
@@ -1313,13 +1315,11 @@ createApp({
     });
     const panelAce = computed(() =>
       (state.aces || []).find(a => a.idx === panelAceIdx.value) || null);
-    // Panel PAGES (Dirk 2026-08-09, second cut): the tab strip is the aces
-    // plus ONE "Feeder" tab when any feeder/manual head exists - "1, 2,
-    // Feeder". The first cut appended the head cards to EVERY ace page;
-    // the per-head-tab idea died the same day (one tab per feeder head
-    // clutters the strip the moment two exist). Manual heads ride the same
-    // page - "analog zu manual (also zukuenftig)" - and when ONLY manual
-    // heads exist the tab says Manual instead.
+    // Panel PAGES: the tab strip is the aces plus ONE "Feeder" tab when any
+    // feeder/manual head exists - "1, 2, Feeder" (one tab per feeder head
+    // would clutter the strip the moment two exist). Manual heads ride the
+    // same page, and when ONLY manual heads exist the tab says Manual
+    // instead.
     const panelFeederHeads = computed(() =>
       (state.toolheads || []).filter(t => t.feeder || t.manual));
     const panelPages = computed(() => {
@@ -1488,11 +1488,10 @@ createApp({
     // Does this slot have filament at the ACE input? 'empty' is the backend's
     // own verdict (gate == 0 or an empty status, V1's 'empty1' included);
     // 'unknown' means the unit has not reported yet and must NOT block
-    // anything. The engine refuses to load an empty slot - it has since the
-    // very first version - so offering the button here only ever produced
-    // the useless half of the sequence: on an occupied head loadSlot
-    // enqueues unload+load, the unload ran, the load was refused, and the
-    // head stood empty for nothing (HW 2026-08-03, Dirk).
+    // anything. The engine refuses to load an empty slot, so offering the
+    // button here only ever produces the useless half of the sequence: on
+    // an occupied head loadSlot enqueues unload+load, the unload runs, the
+    // load is refused, and the head stands empty for nothing.
     function slotIsEmpty(aceIdx, slotIdx) {
       const a = (state.aces || []).find(x => x.idx === aceIdx);
       const sl = a && (a.slots || []).find(s => s.idx === slotIdx);
@@ -1530,9 +1529,8 @@ createApp({
       // In head mode a head loads from any slot of its wired ACE, so the old
       // idx===slot lookup blinked "reload" under the wrong slot (slot==head).
       // toolheadOps gate: during a running unload the sensor clears ~30s
-      // before head_source does - without the gate the button flipped to
-      // "Reload" mid-op and invited a click into the half-finished unload
-      // (Dirk 2026-07-26).
+      // before head_source does - without the gate the button would flip
+      // to "Reload" mid-op and invite a click into the half-finished unload.
       return state.toolheads.some(th =>
         th.head_source_known &&
         th.ace === aceIdx && th.slot === slotIdx &&
@@ -1541,8 +1539,54 @@ createApp({
     }
     function unloadHead(idx) {
       if (_blockIfPrinting()) return;
+      const th = (state.toolheads || []).find(x => Number(x.idx) === Number(idx));
+      if (th && (th.manual || th.feeder)) return unloadHeadStaged(idx);
       if (!_confirmCmd("ui.confirm.unload_head", {head: dispIdx(idx)})) return;
       run("ACE_UNLOAD_HEAD", {HEAD: idx});
+    }
+    // Feeder/manual head: the touchscreen's unload has a "manual
+    // intervention" stop between heating and the tip-pull, because the
+    // user pulls the strand out of the side port WHILE it unloads (the
+    // port lets filament through forward only). Mirror it: STAGE=prepare,
+    // wait for the channel to report unload_heat_finish, show the dialog,
+    // Next -> STAGE=doing, Cancel -> STAGE=cancel.
+    function _channelStateOf(idx) {
+      const th = (state.toolheads || []).find(x => Number(x.idx) === Number(idx));
+      return th ? String(th.channel_state || "") : "";
+    }
+    function _waitChannelState(idx, wanted, aborts, timeoutMs) {
+      return new Promise((resolve) => {
+        const t0 = Date.now();
+        const tick = () => {
+          const cs = _channelStateOf(idx);
+          if (wanted.includes(cs)) return resolve(cs);
+          if (aborts.includes(cs) || Date.now() - t0 > timeoutMs) return resolve(cs || "timeout");
+          setTimeout(tick, 500);
+        };
+        tick();
+      });
+    }
+    async function unloadHeadStaged(idx) {
+      if (!_confirmCmd("ui.confirm.unload_head", {head: dispIdx(idx)})) return;
+      const ok = await run("ACE_UNLOAD_HEAD", {HEAD: idx, STAGE: "prepare"});
+      if (!ok) return;
+      const cs = await _waitChannelState(idx, ["unload_heat_finish"],
+        ["unload_fail", "load_finish", "preload_finish", "wait_insert", "unload_finish"],
+        300000);
+      if (cs !== "unload_heat_finish") {
+        _addNotif({id: "staged-" + Date.now(), ts: Date.now() / 1000, level: "error",
+                   msg: t("ui.dashboard.manual_intervention_failed",
+                          {head: dispIdx(idx), state: cs})});
+        return;
+      }
+      const next = await new Promise(resolve => confirm({
+        title: t("ui.dashboard.manual_intervention_title"),
+        message: t("ui.dashboard.manual_intervention_body", {head: dispIdx(idx)}),
+        okLabel: t("ui.dashboard.manual_intervention_next"),
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      }));
+      run("ACE_UNLOAD_HEAD", {HEAD: idx, STAGE: next ? "doing" : "cancel"});
     }
     function unloadAll() {
       if (_blockIfPrinting()) return;
@@ -1554,8 +1598,8 @@ createApp({
     }
     // The cancel command can only stop the ACE_UNLOAD_ALL_HEADS loop BETWEEN
     // heads, so the button must follow that loop and not "some head is
-    // unloading": during a single unload (the prefix of a slot load, say) it
-    // used to appear and do nothing (Dirk 2026-08-25). Engine state rather
+    // unloading": during a single unload (the prefix of a slot load, say)
+    // it would appear and do nothing. Engine state rather
     // than a local flag, so a reload or a second browser sees the truth.
     const anyUnloading = computed(() => !!state.unload_all_active);
     // The three head-mode setters used to swallow the outcome entirely
@@ -1586,10 +1630,8 @@ createApp({
     // A checkbox bound with :checked (not v-model) KEEPS the user's click in
     // the DOM when the action is refused: the bound value never changed, so
     // Vue has nothing to patch, and the box shows the opposite of the truth
-    // with no way back but a page reload. HW 2026-08-09: a refused feeder
-    // toggle left the checkmark gone while the state still said feeder - so
-    // the ACE picker (v-if="!t_.feeder") stayed correctly hidden and it read
-    // as "the checkbox did something and then nothing appeared".
+    // with no way back but a page reload (e.g. a refused feeder toggle
+    // leaves the checkmark gone while the state still says feeder).
     // Reverting the DOM right away makes the box purely state-driven: it
     // moves only once the state has actually moved.
     function headToggle(ev, current, fn) {
@@ -1632,12 +1674,12 @@ createApp({
     const spoolmanBusy = ref(false);
     const spoolmanLast = ref(null);
     // With a Spoolman URL configured, Spoolman is the ONLY source of new
-    // spools (Dirk 2026-08-09: "entweder lokal oder spoolman" - the local
-    // create paths hide, the pickers gain the search below). Without one,
-    // everything stays local as before. Existing local-only entries keep
-    // working either way - connecting must not orphan data.
-    // World gate: the three-way switch decides (Dirk 2026-08-16), not
-    // the URL - a configured URL with mode 'local' stays a local world.
+    // spools (either local or Spoolman - the local create paths hide, the
+    // pickers gain the search below). Without one, everything stays local
+    // as before. Existing local-only entries keep working either way -
+    // connecting must not orphan data.
+    // World gate: the three-way switch decides, not the URL - a configured
+    // URL with mode 'local' stays a local world.
     const spoolmanConnected = computed(() => state.spool_mode !== "local");
     // URL presence, for the connection probe: the ping must work BEFORE
     // the mode can be switched (spoolman/spoollink need a live check).
@@ -1672,9 +1714,8 @@ createApp({
         smBusy.value = false;
       }
     }
-    // Dismissing the result list. It used to close ONLY on a successful
-    // adopt or by closing the whole picker (Dirk 2026-08-15: "kann sie nicht
-    // mehr schliessen"). Escape and a click outside now do it too.
+    // Dismissing the result list: on a successful adopt, by closing the
+    // whole picker, by Escape and by a click outside.
     // pointerdown, not blur: blur fires BEFORE the click on a result row, so
     // a blur-close would swallow the selection. And pointerdown inside the
     // .sm-search wrapper (both the tab's and the picker's carry that class)
@@ -1694,7 +1735,7 @@ createApp({
       // one press never means "close the list AND the dialog".
       ev.stopPropagation();
     }
-    // Binding is MANDATORY at adopt (Dirk: "zwingend die Bindung") - an
+    // Binding is MANDATORY at adopt - an
     // unbound Spoolman entry must never exist, then nothing ever needs a
     // cleanup pass. In a picker the target is the picker's own slot/head
     // and is bound IMMEDIATELY (a cancel after adopt would otherwise leave
@@ -1734,9 +1775,8 @@ createApp({
       }
     }
     // A search row whose spool is ALREADY bound somewhere is no pick -
-    // the target-list discipline applied to the spool side (Dirk
-    // 2026-08-09: "wenn ich aber eine vergebene waehle, darf ich dann
-    // nicht speichern"): in the picker the click binds IMMEDIATELY, so a
+    // the target-list discipline applied to the spool side: in the picker
+    // the click binds IMMEDIATELY, so a
     // taken row would displace the other binding or run into the engine's
     // red backstop. Bound to the CURRENT picker target stays clickable
     // (re-pick of what already sits here, the adopt then just refreshes).
@@ -1760,10 +1800,9 @@ createApp({
       return sp ? spoolSlotLabel(sp) : "";
     }
     // A Spoolman row is not edited locally - its identity lives in
-    // Spoolman, a local edit would create two truths (the S41 write-back
-    // rule). The ONE manual correction that stays is the weight against a
-    // scale (Dirk 2026-08-09: "hoechstens manuelle anpassung gewicht"),
-    // as a small dialog instead of the full editor form.
+    // Spoolman, a local edit would create two truths. The ONE manual
+    // correction that stays is the weight against a scale, as a small
+    // dialog instead of the full editor form.
     function spoolWeightDialog(sp) {
       confirm({
         title: spoolTitle(sp),
@@ -1805,9 +1844,9 @@ createApp({
     }
     // Key SELECT options: the machine's real keys (engine nozzle_keys)
     // FIRST, then the standard catalog (0.2-0.8 x standard/high_flow) so
-    // values for a not-currently-mounted nozzle can be entered too (HW
-    // 2026-08-30: a uniform 0.4 machine showed ONE option and an empty
-    // list once taken). Rows already shown are filtered out. Empty machine
+    // values for a not-currently-mounted nozzle can be entered too (a
+    // uniform machine would otherwise show ONE option and an empty list
+    // once taken). Rows already shown are filtered out. Empty machine
     // list (older Klipper without the field) -> free-text fallback.
     const PA_KEY_CATALOG = ["0.2_standard", "0.4_standard", "0.6_standard",
                             "0.8_standard", "0.2_high_flow", "0.4_high_flow",
@@ -1870,6 +1909,112 @@ createApp({
       const sp = (state.spools || {})[picker.spool];
       if (sp) spoolPaDialog(sp);
     }
+    // The head this spool feeds right now: an ACE slot binding resolves
+    // through the toolhead that holds that slot with filament at the
+    // extruder; a feeder/manual binding ('h<n>') names the head directly.
+    // null = not feeding a loaded head (nothing to calibrate on).
+    function paSpoolHead(sp) {
+      if (!sp) return null;
+      const key = Object.keys(state.spool_binding || {})
+        .find(k => state.spool_binding[k] === sp.id);
+      if (!key) return null;
+      const ths = state.toolheads || [];
+      if (key.startsWith("h")) {
+        const h = Number(key.slice(1));
+        const th = ths.find(t => t.idx === h);
+        return (th && th.filament_at_extruder !== false) ? h : null;
+      }
+      const [a, sl] = key.split("_").map(Number);
+      const th = ths.find(t => t.ace === a && t.slot === sl
+                               && t.filament_at_extruder !== false);
+      return th ? th.idx : null;
+    }
+    // A spool bound to an ACE slot that is NOT loaded anywhere: the load
+    // the calibration would need first. Same head resolution as loadSlot
+    // (multi: slot index, head mode: the head wired to the ACE); unload
+    // first when that head holds another slot. null = no ACE binding, slot
+    // empty, or already feeding a head (paSpoolHead answers then).
+    function paSpoolLoadPlan(sp) {
+      if (!sp || paSpoolHead(sp) !== null) return null;
+      const key = Object.keys(state.spool_binding || {})
+        .find(k => state.spool_binding[k] === sp.id);
+      if (!key || key.startsWith("h")) return null;
+      const [a, sl] = key.split("_").map(Number);
+      if (!Number.isFinite(a) || !Number.isFinite(sl)) return null;
+      if (slotIsEmpty(a, sl)) return null;
+      const h = (state.mode === "head") ? aceHeadForAce(a) : sl;
+      if (h === null || h === undefined) return null;
+      const th = (state.toolheads || []).find(tt => tt.idx === h);
+      if (th && (th.manual || th.feeder)) return null;
+      const directLoad = !!(th && !th.filament_at_extruder
+        && th.ace === a && th.slot === sl);
+      const unload = !!(th && th.head_source_known && !directLoad
+        && (state.mode === "head" || th.ace !== a));
+      return {ace: a, slot: sl, head: h, unload};
+    }
+    const paCalibrating = ref(false);
+    const paLoading = ref(false);
+    function paCanCalibrate() {
+      const d = paDlg.value;
+      if (!d || paCalibrating.value || paLoading.value) return false;
+      if (["printing", "paused"].includes(state.printer_state)) return false;
+      return paSpoolHead(d.sp) !== null || paSpoolLoadPlan(d.sp) !== null;
+    }
+    async function paCalibrate() {
+      const d = paDlg.value;
+      if (!d || !paCanCalibrate()) return;
+      let head = paSpoolHead(d.sp);
+      if (head === null) {
+        // Not loaded: ask, then load through the normal queue and only
+        // calibrate when the load actually completed. The filament stays
+        // loaded afterwards.
+        const plan = paSpoolLoadPlan(d.sp);
+        if (!plan) return;
+        const yes = await new Promise(resolve => confirm({
+          title: t("ui.spools.pa_calibrate"),
+          message: t(plan.unload ? "ui.spools.pa_load_ask_unload" : "ui.spools.pa_load_ask",
+                     {ace: dispIdx(plan.ace), slot: dispIdx(plan.slot), head: dispIdx(plan.head)}),
+          okLabel: t("ui.common.ok"),
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false),
+        }));
+        if (!yes) return;
+        paLoading.value = true;
+        let loaded = false;
+        try {
+          if (plan.unload) {
+            const u = enqueue("ACE_UNLOAD_HEAD", {HEAD: plan.head});
+            const l = enqueue("ACE_LOAD_HEAD", {HEAD: plan.head, ACE: plan.ace, SLOT: plan.slot});
+            loaded = (await u) && (await l);
+          } else {
+            loaded = await enqueue("ACE_LOAD_HEAD", {HEAD: plan.head, ACE: plan.ace, SLOT: plan.slot});
+          }
+          await reloadState();
+        } finally {
+          paLoading.value = false;
+        }
+        if (!loaded) return;
+        head = paSpoolHead(d.sp);
+        if (head === null) head = plan.head;
+      }
+      paCalibrating.value = true;
+      try {
+        // Blocks for the whole stock flow calibration; the dialog shows
+        // the running state meanwhile. ACE_PA_CALIBRATE stores the result
+        // on the spool itself, so a reload of the rows shows it.
+        const ok = await spoolMacro("ACE_PA_CALIBRATE", {HEAD: head, FORCE: 1});
+        const sp = (state.spools || {})[d.sp.id];
+        if (ok && sp && paDlg.value && paDlg.value.sp.id === sp.id) {
+          const m = (sp.pa_matrix && typeof sp.pa_matrix === "object") ? sp.pa_matrix : {};
+          paDlg.value.sp = sp;
+          paDlg.value.orig = {...m};
+          paDlg.value.rows = Object.keys(m).sort().map(k => ({key: k, value: String(m[k])}));
+          paSeedKey();
+        }
+      } finally {
+        paCalibrating.value = false;
+      }
+    }
     function paDirty() {
       const d = paDlg.value;
       if (!d) return false;
@@ -1928,10 +2073,10 @@ createApp({
       }
     }
     // Badge for a bound spool: Spoolman-backed shows "SM" in the Spoolman
-    // orange (Dirk), a purely local spool keeps the green SPULE badge.
+    // orange, a purely local spool keeps the green SPULE badge.
     // Empty feeder/manual head: the tile must not wear the declared colour
     // as its SURFACE (a white identity on an empty feeder is
-    // indistinguishable from loaded white, Dirk 2026-08-09) - it goes grey
+    // indistinguishable from loaded white) - it goes grey
     // with the colour demoted to the border. Explicit false only: an
     // unknown sensor keeps the colour rather than guessing "empty".
     function headTileEmpty(t_) {
@@ -1944,15 +2089,14 @@ createApp({
       return sp && sp.spoolman_id ? "src-spoolman" : "src-spool";
     }
     function spoolBadgeLabel(sp) {
-      // "SL" in the SpoolLink world, "SM" in plain Spoolman (Dirk
-      // 2026-08-16: "dann sieht man gleich wo man ist") - same orange,
+      // "SL" in the SpoolLink world, "SM" in plain Spoolman - same orange,
       // the letters alone carry the mode.
       if (sp && sp.spoolman_id) return state.spoollink ? "SL" : "SM";
       return t("ui.common.source_spool");
     }
     // The REAL connection state, probed - null while unknown, so the
-    // checkmark can only ever appear after the instance actually answered
-    // (Dirk: "kann der nur bei aktiver Verbindung erscheinen?"). The URL
+    // checkmark can only ever appear after the instance actually answered.
+    // The URL
     // watcher below re-probes on every URL change including the initial
     // state load; clicking the indicator re-checks by hand.
     const smPing = ref(null);
@@ -1991,8 +2135,7 @@ createApp({
       // Entering the Spoolman world: adopt+bind every occupied slot whose
       // tag names a Spoolman spool (SM<id> scheme) - the counterpart of
       // the Klipper-side rebind that restores LOCAL bindings on the way
-      // back (Dirk 2026-08-09: "sonst muss ich alle spulen neu einlegen"
-      // / "auch beim wechseln zu spoolman"). Convenience sweep: a failure
+      // back. Convenience sweep: a failure
       // just leaves the manual search+adopt path.
       if (nowConnected && !wasConnected) {
         try {
@@ -2011,22 +2154,30 @@ createApp({
       await spoolMacro("ACE_SET_SPOOLMAN", {AUTO: enable ? 1 : 0});
     }
     // --- ACE 2 firmware update (Config tab; flash engine based on
-    // hakimio's OTA updater, DEV-pending his license OK). The heavy
+    // hakimio's OTA updater). The heavy
     // lifting is Klipper (port release/hold) + backend (flash thread);
     // this is upload, two buttons and a poll. The flash button goes
-    // through the BIG RED own-risk dialog (Dirk 2026-08-09). ---
+    // through the BIG RED own-risk dialog. ---
     const acefw = reactive({ace: "", version: "", password: "",
                             fileName: "", fileSize: 0, busy: false,
                             status: null, uiError: "", force: false,
-                            patchToOpen: false});
-    // The patch target (e.g. "1.1.3O") the backend offers as a checkbox on
-    // the matching stock upload, instead of as a direct dropdown target.
+                            patchToOpen: false, patchTarget: ""});
+    // The patch target the backend PRESELECTS, and the whole ladder it can
+    // build. They are offered as a checkbox plus a picker on the matching
+    // stock upload, instead of as direct dropdown targets: the base upload
+    // is always stock 1.1.31, only the patch on top differs.
     const acefwPatchTarget = ref("");
+    const acefwPatchTargets = ref([]);
+    // Label per entry: version plus its size, because the size is what
+    // distinguishes the builds that come up from the ones that do not.
+    function acefwTargetLabel(e) {
+      return e.size ? `${e.version} (${e.size} B)` : e.version;
+    }
     // The checkbox is shown only when stock 1.1.31 is the selected target
     // and the backend has the patch. Its base version is fixed at 1.1.31.
     const acefwCanPatch = computed(() =>
       !!acefwPatchTarget.value && acefw.version.trim() === "1.1.31");
-    // Tested-versions allowlist (Dirk: "nur getestete Versionen") - the
+    // Tested-versions allowlist - the
     // version SELECT offers exactly these, the byte gate lives in the
     // backend. Loaded once at mount; empty list = flashing impossible,
     // the dry run stays open (it is the release tool that produces the
@@ -2038,6 +2189,10 @@ createApp({
         const b = await r.json().catch(() => ({}));
         acefwVersions.value = b.versions || [];
         acefwPatchTarget.value = b.patch_target || "";
+        acefwPatchTargets.value = b.patch_targets || [];
+        // Preselect the backend's default, but never overwrite a choice the
+        // user already made in this session.
+        if (!acefw.patchTarget) acefw.patchTarget = acefwPatchTarget.value;
       } catch (e) { /* leave empty */ }
     }
     const acefwInput = ref(null);
@@ -2102,7 +2257,9 @@ createApp({
                                 // Patch stock 1.1.31 -> ACE2-Open before
                                 // flashing (only when the checkbox applies).
                                 patch_to_open: acefwCanPatch.value
-                                               && !!acefw.patchToOpen}),
+                                               && !!acefw.patchToOpen,
+                                // Empty = the backend's preselection.
+                                patch_target: acefw.patchTarget || ""}),
         });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
@@ -2110,7 +2267,7 @@ createApp({
           // restarted (a stale uvicorn still holds the port). Name that
           // explicitly instead of a bare "HTTP 404".
           if (r.status === 404)
-            throw new Error("backend has no firmware routes — restart the "
+            throw new Error("backend has no firmware routes - restart the "
                             + "multiace-web service (a stale process may "
                             + "still hold the port)");
           throw new Error(body.detail || `HTTP ${r.status}`);
@@ -2125,8 +2282,7 @@ createApp({
     // The dry run needs no version (it only reads the CURRENT one), so it
     // is available as soon as an ACE + file are chosen; the real flash
     // additionally needs the target version. Splitting the two is what
-    // fixes "nothing happens" - the version field no longer silently
-    // disables the Testlauf (Dirk 2026-08-09).
+    // keeps the version field from silently disabling the dry run.
     function acefwCanTest() {
       return acefw.ace !== "" && !!acefw.fileName && !acefw.busy;
     }
@@ -2136,12 +2292,14 @@ createApp({
     function acefwTest() { _acefwStart(true); }
     function acefwFlash() {
       const patching = acefwCanPatch.value && !!acefw.patchToOpen;
-      const tgt = patching ? acefwPatchTarget.value : acefw.version.trim();
+      const tgt = patching
+        ? (acefw.patchTarget || acefwPatchTarget.value)
+        : acefw.version.trim();
       // Patching adds a SECOND warning: it flashes a community-modified,
-      // NOT byte-tested image (Dirk 2026-08-30).
+      // NOT byte-tested image.
       const extra = patching
         ? `<div class="acefw-danger">${t("ui.config.acefw_patch_warn",
-            {target: acefwPatchTarget.value})}</div>` : "";
+            {target: tgt})}</div>` : "";
       confirm({
         title: t("ui.config.acefw_confirm_title"),
         message: `<div class="acefw-danger">${t("ui.config.acefw_confirm_msg",
@@ -2151,6 +2309,15 @@ createApp({
         onOk: () => _acefwStart(false),
       });
     }
+    // Red, not grey: an error, or a flash whose unit came up mute.
+    const acefwStatusBad = computed(() => {
+      if (acefw.uiError) return true;
+      const s = acefw.status;
+      if (!s) return false;
+      if (s.state === "error") return true;
+      return !!(s.state === "done" && s.result &&
+                s.result.app_alive === false);
+    });
     const acefwStatusText = computed(() => {
       if (acefw.uiError) return `${t("ui.common.error")}: ${acefw.uiError}`;
       const s = acefw.status;
@@ -2172,12 +2339,19 @@ createApp({
         }
         if (res.skipped)
           return t("ui.config.acefw_skipped", {v: res.current || "?"});
+        // A matching version says the image is there, not that it runs:
+        // GET_INFO is answered by the bootloader too, which is how the
+        // 1.1.61O fault verified as OK three times while the unit was
+        // mute. The backend probes an application-only command.
+        if (res.app_alive === false)
+          return t("ui.config.acefw_done_mute",
+                   {v: res.new || res.target || "?"});
         return t("ui.config.acefw_done",
                  {v: res.new || res.target || "?"});
       }
       const pct = (s.pct === null || s.pct === undefined)
         ? "" : ` ${Math.round(s.pct)}%`;
-      return `${s.state}${pct} — ${s.msg || ""}`;
+      return `${s.state}${pct} - ${s.msg || ""}`;
     });
     async function spoolmanSync(pull, push) {
       if (spoolmanBusy.value) return;
@@ -2207,17 +2381,15 @@ createApp({
     const _AUTO_DRY_RANGE = {RH_START: [5, 95], RH_END: [1, 94],
                              TEMP: [35, 80], ADD_TIME: [0, 600]};
     // Master is an ACE INDEX (-1 = none), not a number to clamp into a range.
-    // `state` is a reactive object, NOT a ref - state.value was undefined
-    // here, and the TypeError killed the whole dry-panel render on every
-    // ACE Pro card (the v2 block never calls this, so ACE 2 looked fine).
-    // HW 2026-08-02, Dirk: "die ACE 1 karten zeigen keine dry funktionen
-    // mehr an, komplett leer".
+    // `state` is a reactive object, NOT a ref - state.value is undefined
+    // here, and the TypeError would kill the whole dry-panel render on
+    // every ACE Pro card.
     const autoDryMasters = () => state.auto_dry_masters || [];
     // Edit buffer. The inputs are bound to PRINTER state, and the state is
-    // re-polled every few seconds - so a refresh landing mid-edit threw the
-    // typed value away, and a refresh landing between the send and the new
-    // state made the field jump back to the old number (Dirk: "mal geht es
-    // zurück, mal springt es auf 40, dann 45, dann 40"). While a field is
+    // re-polled every few seconds - so a refresh landing mid-edit would throw
+    // the typed value away, and a refresh landing between the send and the
+    // new state would make the field jump back to the old number. While a
+    // field is
     // being edited its buffer wins; it is released only once the printer
     // reports the new value, so there is no window where the old one shows.
     const autoDryEdit = reactive({});
@@ -2375,7 +2547,7 @@ createApp({
     // Klipper owns the table; every edit goes through gcode (/api/macro), the
     // UI never writes the file - one writer, no lost updates.
     // Starts EMPTY on purpose: the row doubles as a live FILTER for the
-    // table while not editing (Dirk), so pre-filled defaults would hide
+    // table while not editing, so pre-filled defaults would hide
     // entries before the user typed anything. Add uses fallbacks instead.
     // Colour empty as well: the swatch fills it on first interaction, so an
     // untouched row filters on nothing. A new spool is NOT bound to a slot -
@@ -2424,8 +2596,8 @@ createApp({
     // then writes onto the tag himself, which restores auto-binding - the
     // suffixed entry can never be recognised (its tag still reads the
     // original). Taking the code AWAY from the other spool is deliberately
-    // impossible (Dirk 2026-08-09: "niemals überschreiben von sku zulassen"),
-    // so the validation blocks, it does not warn. Resolves to the chosen code
+    // impossible, so the validation blocks, it does not warn. Resolves to
+    // the chosen code
     // or null when cancelled; an empty code is allowed and means "no tag".
     function askFreeSku(sku) {
       return new Promise(resolve => {
@@ -2456,7 +2628,7 @@ createApp({
     // firmware filament DB via /api/materials + [ace_tipform] vendors), PLUS
     // whatever the existing spools already use - so the lists GROW with the
     // table instead of forcing free text for a vendor/subtype the printer
-    // does not ship (Dirk: "Vendorliste aus default + spool liste").
+    // does not ship.
     function _mergeCase(base, extra) {
       const out = [...base];
       const low = new Set(out.map(x => String(x).toLowerCase()));
@@ -2507,7 +2679,7 @@ createApp({
       return Object.values(state.spools || {})
         .sort((a, b) => (parseInt(a.id, 10) || 0) - (parseInt(b.id, 10) || 0));
     }
-    // The tab redesign (Dirk 2026-08-09): the form is an EDITOR only (via
+    // The tab: the form is an EDITOR only (via
     // the row's pencil), never a filter and never a creator - new spools
     // come from the picker (local) or the Spoolman dialog. The list is
     // filtered by WORLD (connected -> only Spoolman-backed rows, local ->
@@ -2518,15 +2690,13 @@ createApp({
     // The either/or worlds as ONE predicate (mirror of ace.py
     // _spool_in_world): with Spoolman connected only Spoolman-backed
     // entries exist for the UI, without it only local ones. Every surface
-    // that OFFERS spools goes through this - the tab list did, the
-    // picker's dropdown did not and kept offering the very local entries
-    // the list hides (Dirk 2026-08-09: "die karten haben noch interne
-    // spulen zur zuordnung im sm modus, entweder oder").
+    // that OFFERS spools goes through this, so no picker keeps offering
+    // the entries the list hides.
     function spoolWorldOk(sp) {
       return spoolmanConnected.value ? !!(sp && sp.spoolman_id)
                                      : !(sp && sp.spoolman_id);
     }
-    // Sort of the tab list (Dirk 2026-08-09): every column header sorts
+    // Sort of the tab list: every column header sorts
     // by ITS column - assigned (slot order, bound first: the list mirrors
     // the printer on top, the shelf below; the DEFAULT), label
     // (alphabetical), sku (tag codes, for scanning while writing tags),
@@ -2579,12 +2749,10 @@ createApp({
       }
       return rows;
     }
-    // '+' next to the search (Dirk 2026-08-09: "add spool button im mace
-    // mode .. + neben der suche"): opens the empty form as a CREATOR -
+    // '+' next to the search: opens the empty form as a CREATOR -
     // local mode only, in Spoolman mode new spools come via search+adopt.
     // Save routes through spoolSave -> spoolAdd (unassigned entry,
-    // collision dialog included) - that path stayed fully wired when the
-    // tab redesign made the form edit-only, it was just unreachable.
+    // collision dialog included).
     const spoolCreating = ref(false);
     function spoolNewForm() {
       spoolFormClear();
@@ -2623,14 +2791,13 @@ createApp({
       return `ACE ${dispIdx(a)} / ${dispIdx(sl)}`;
     }
     // Remaining weight is an estimate (extruded length x density), but it
-    // renders WITHOUT a ~ (Dirk 2026-08-16: "kann das ca. zeichen weg -
-    // machen die anderen auch nicht"; Spoolman/SpoolLink show plain grams).
+    // renders WITHOUT a ~ (Spoolman/SpoolLink show plain grams too).
     function spoolWeightLabel(sp) {
       if (!sp || sp.weight_g === undefined || sp.weight_g === null) return "";
       return `${Math.round(sp.weight_g)} g`;
     }
     // Label AND the details - a label like "Rolle links" must not hide what
-    // the spool actually is (Dirk).
+    // the spool actually is.
     function spoolDetails(sp) {
       const sub = sp.subtype && !/^(basic|generic)$/i.test(sp.subtype)
         ? sp.subtype : "";
@@ -2641,11 +2808,9 @@ createApp({
       if (sp.label) return det ? `${sp.label} · ${det}` : sp.label;
       return det || `#${sp.id}`;
     }
-    // Reports failures. It used to swallow everything, which is how a
-    // REJECTED setting could look like a saved one: the input is bound to
-    // the printer state, so it silently snapped back to the old value and
-    // nothing said why (HW 2026-07-31: RH_START=450 refused, field showed
-    // 45 again, auto-dry stayed off and nobody could see it).
+    // Reports failures. Swallowing them would let a REJECTED setting look
+    // like a saved one: the input is bound to the printer state, so it
+    // silently snaps back to the old value and nothing says why.
     // The three-way world switch. Guarded client-side the same way the
     // options are disabled (connection / agent), so a stale button click
     // cannot select an impossible mode; Klipper validates again anyway.
@@ -2659,8 +2824,8 @@ createApp({
     async function spoolMacro(name, args) {
       // One ACE_SPOOL_ADD at a time: /api/macro blocks while the printer
       // runs long gcode (a swap holds the script queue ~150s), so every
-      // extra + click piled up behind it and each created a fresh spool
-      // minutes later (Dirk 2026-08-16: "5 neue spulen"). Later clicks
+      // extra + click would pile up behind it and each create a fresh spool
+      // minutes later. Later clicks
       // are refused with a notice instead of queued; SET/ASSIGN etc. are
       // idempotent and stay unguarded.
       if (name === "ACE_SPOOL_ADD") {
@@ -2756,9 +2921,9 @@ createApp({
     }
     // Every ACE/slot that is a REAL assignment target, as picker options.
     // Value is the internal "ace_slot" key (gcode takes 0-based), the label
-    // shows display indices - the S4 index-base rule. `taken` flags a
-    // target that already holds a spool: the markup greys it out (Dirk
-    // 2026-08-09: "ausgrauen was vergeben ist"), except the row's own
+    // shows display indices (index-base rule). `taken` flags a
+    // target that already holds a spool: the markup greys it out,
+    // except the row's own
     // current binding, which must stay pickable as the selected value.
     const spoolSlotOptions = computed(() => {
       const out = [];
@@ -2807,7 +2972,7 @@ createApp({
     // list at all, not even in the filament DB), so this is OUR set of common
     // filament colours - it works like the display's picker, it is not the
     // same table. A swatch writes a DECLARED colour: '#000000' means black,
-    // not "unknown" (S40) - clearing is what the spool form's x button is for.
+    // not "unknown" - clearing is what the spool form's x button is for.
     const FILAMENT_SWATCHES = [
       "#000000", "#ffffff", "#808080", "#c8c8c8",
       "#e02020", "#ff7800", "#f5d800", "#22a03c",
@@ -2863,10 +3028,9 @@ createApp({
       });
       // A spool bound to ANOTHER slot is not offered at all. Moving a roll
       // means taking it out first, and that frees it (the gate-empty
-      // release) - so picking a bound one can only be a mis-pick, and it
-      // used to silently move the spool and leave its old slot unbound
-      // (HW 2026-08-02: green vanished from ACE 1 / Slot 4 during an
-      // unrelated re-assign). Not merely sorted down: an option that must
+      // release) - so picking a bound one can only be a mis-pick that
+      // would silently move the spool and leave its old slot unbound.
+      // Not merely sorted down: an option that must
       // never be chosen has no business being choosable. THIS slot's own
       // spool stays, or the dropdown would open with nothing selected and
       // saving would clear the binding.
@@ -2893,9 +3057,8 @@ createApp({
     // dialog already shows, incl. the tag's #ID, and bind it: a spool the
     // printer just read is then one click from being tracked, instead of
     // retyping the id in the Spools tab.
-    // What the '+' would create, previewed on hover (Dirk 2026-08-09:
-    // "die sku anzeigt beim mouse over ... dann auch gewicht und
-    // zuordnung ... also nur bei rfid"): only for a slot with a READ tag -
+    // What the '+' would create, previewed on hover: only for a slot with
+    // a READ tag -
     // the preview reads from the exact sources the create uses (slot tag
     // sku via _pickerSlot, the grams field, the picker target), so it can
     // never diverge from the click. No tag (incl. the head picker - a
@@ -2965,7 +3128,7 @@ createApp({
     }
     // Write the picked identity onto the physical tag in this ACE slot as
     // OpenSpool (rotates the lane to park the tag, writes, restores). Slot
-    // target only (a head has no ACE tag); needs [ace] rc522 + a spool at
+    // target only (a head has no ACE tag); needs ACE2-Open firmware + a spool at
     // the gate. Always confirms - it physically moves the lane and
     // overwrites the tag. The engine's guards (idle, V2, gate, MIFARE
     // refusal, verify) are the real safety; this only gates the obvious.
@@ -2991,8 +3154,8 @@ createApp({
       }
       await spoolMacro("ACE_TAG_WRITE", args);
     }
-    // Manual tag READ from the picker (Dirk 2026-09-06: a Read button
-    // next to Write so a missed insert read can be retried from the web).
+    // Manual tag READ from the picker (a Read button next to Write so a
+    // missed insert read can be retried from the web).
     // Same command the console uses; outcome lands in the picker bar.
     async function tagRead() {
       const isHead = picker.head !== null && picker.head !== undefined;
@@ -3000,7 +3163,7 @@ createApp({
       await spoolMacro("ACE_TAG_READ", {ACE: picker.ace, SLOT: picker.slot});
     }
     // Outcome of the last tag WRITE or READ, shown in the picker bar for a
-    // while after the op (Dirk 2026-09-02: success in the bar, not as an
+    // while after the op (success in the bar, not as an
     // alert). seq from the engine ties the result to its op; a result is
     // shown once (until dismissed by the timer or the picker closing).
     const _tagWriteSeen = ref(0);
@@ -3047,10 +3210,8 @@ createApp({
                 && sl.state !== 'unknown');
     }
     // The engine refuses to move a spool OUT of a physically occupied slot
-    // (spool_bound_elsewhere, the 2026-08-02 green-spool guard). Mirrored
-    // into the dropdown so the red message becomes unreachable from the
-    // web (Dirk 2026-08-09: "einfach ausgegraut und nicht waehlbar ...
-    // statt einer meldung wenn man es versucht"): while the row's spool
+    // (spool_bound_elsewhere). Mirrored into the dropdown so the red
+    // message becomes unreachable from the web: while the row's spool
     // sits occupied, every OTHER target is greyed. Clearing stays
     // possible, and physically taking the roll out is what frees a move.
     // A head binding has no gate; the engine allows that move, so no lock.
@@ -3213,7 +3374,7 @@ createApp({
     // head index.
     // Tooltip of the "(V2)" marker on an ACE card: model and firmware
     // version, whichever the unit reported. Keeping the version out of the
-    // visible text is what gives the header room again (Dirk 2026-08-11) -
+    // visible text is what gives the header room -
     // 'Unknown' is the handshake's placeholder and is not worth showing.
     function aceProtoTitle(ace) {
       return [ace.model,
@@ -3285,8 +3446,7 @@ createApp({
         // feed (its already-loaded guard reads this same eN sensor). That
         // covers BOTH: a failed load (head_source kept with
         // load_failed=true) and the mid-print runout reload (head_source
-        // kept for the FA-rearm on resume; the old unconditional prefix
-        // forced a pointless double unload there - Dirk 2026-07-26). A
+        // kept for the FA-rearm on resume). A
         // different slot still unloads first (two filaments must not share
         // the path), and a head whose sensor reads filament (no-flow
         // class / really loaded) still unloads first too.
@@ -3318,7 +3478,7 @@ createApp({
     // head mode: the ACE head wired to this ACE (head_ace reverse lookup), or
     // null if no ACE head uses it.
     // RC522 tag read/write need the ACE2-Open firmware on THAT unit; the
-    // picker hides both otherwise (Dirk 2026-09-06).
+    // picker hides both otherwise.
     function aceOpenFw(aceIdx) {
       const a = (state.aces || []).find(x => x.idx === aceIdx);
       return !!(a && a.open_fw);
@@ -3342,7 +3502,7 @@ createApp({
       // load_failed: the slot is NOT actually loaded (failed load keeps
       // head_source for the retry) - keep its Load button usable as the
       // one-click retry. Same for a head whose toolhead sensor reads CLEAR
-      // (manual extraction: bowden off, lever, pull, cut - Dirk's no-flow
+      // (manual extraction: bowden off, lever, pull, cut - a no-flow
       // recovery): head_source alone is bookkeeping, not filament. Only an
       // explicit sensor False counts (None/undefined = module offline ->
       // stay conservative, keep disabled). toolheadOps keeps the button
@@ -3478,7 +3638,7 @@ createApp({
           headers: {"Content-Type": "application/json"},
           // Never restarts Klipper - the "restart pending" line tells the
         // user what is still missing, and Fluidd can do the restart
-        // (Dirk 2026-08-09, same policy as the config save).
+        // (same policy as the config save).
         body: JSON.stringify({mode: tipform.mode, tables,
                                 restart_klipper: false}),
         });
@@ -3487,9 +3647,8 @@ createApp({
           tipform.error = String(j.detail || `HTTP ${resp.status}`);
           return;
         }
-        // Same feedback shape as the config save above - Dirk confused
-        // the two identical buttons because this one answered with a
-        // bare grey line while the other shows path+backup.
+        // Same feedback shape as the config save above - two identical
+        // buttons must answer the same way (path+backup).
         tipform.savedMsg = `✓ ${j.path || ""}\nBackup: ${j.backup || ""}\n`
           + (j.reloaded ? t("ui.config.tipform_applied")
                         : t("ui.config.tipform_saved"));
@@ -3657,7 +3816,7 @@ createApp({
       }
     });
     // Choosing a spool ADOPTS its identity - the spool knows what it is, so
-    // the user should not retype colour/material/vendor/subtype (Dirk). Set
+    // the user should not retype colour/material/vendor/subtype. Set
     // under the _pickerOpening guard: the material/vendor cascade would
     // otherwise snap away a vendor or subtype the firmware DB does not list
     // (exactly the case for a third-party spool).
@@ -3669,8 +3828,7 @@ createApp({
       if (!id) {
         picker.weight = "";
         // Unpicking a spool must not leave ITS identity behind as the
-        // slot's own (HW 2026-09-02: MIFARE slot -> Spoolman spool ->
-        // "not assigned" -> saved as override "PLA white"). Back to what
+        // slot's own (it would be saved as an override). Back to what
         // the slot showed when the picker opened.
         _pickerOpening = true;
         picker.material = _pickerOrig.material;
@@ -3696,8 +3854,7 @@ createApp({
     // slot WITHOUT a known identity on the display defaults (PLA / Basic /
     // Generic / #ffffff) and snapshots exactly those as the "original" -
     // so choosing white, or PLA, on such a slot compared equal and Save
-    // took the "only the binding changed" exit without writing anything
-    // (HW 2026-09-06: "ready Spule auf weiss setzen - passiert nichts").
+    // took the "only the binding changed" exit without writing anything.
     // A user touch is a change by definition; the value comparison stays
     // for the programmatic paths (spool adopt, tag adopt).
     let _pickerTouched = false;
@@ -3786,13 +3943,13 @@ createApp({
       if (!picker.show) return "";
       const s = _pickerSlot();
       // Tag sku; without an identity the host-read card UID (MIFARE etc.),
-      // shown the same way (Dirk 2026-09-02: "also im picker").
+      // shown the same way.
       const v = (s && s.rfid_data && s.rfid_data.sku)
         ? s.rfid_data.sku : ((s && s.uid) ? s.uid : "");
       return v ? String(v).trim() : "";
     });
     // Tag format of the picked slot's last read (anycubic / openspool /
-    // mifare / unknown), shown above the code (Dirk 2026-09-02).
+    // mifare / unknown), shown above the code.
     const pickerTagFormat = computed(() => {
       if (!picker.show) return "";
       const s = _pickerSlot();
@@ -3835,7 +3992,7 @@ createApp({
       // On-demand feeder-reader read: FILAMENT_DT_UPDATE CHANNEL=<head> is
       // the stock command behind the insert-event read. The result arrives
       // asynchronously (~0.7-1.5s start-to-parse), so wait, refresh, then
-      // report honestly - a silent button was the §41 class.
+      // report honestly - a silent button hides a failed read.
       if (picker.head === null || picker.head === undefined) return;
       if (headRfidBusy.value) return;
       headRfidBusy.value = true;
@@ -3946,7 +4103,7 @@ createApp({
     // and future prints, so it must not change as a side effect of saving a
     // slot. The WEIGHT is exempt: the field only exists while a spool is
     // picked and can only ever land on that spool, so there is nothing to
-    // ask about (Dirk). Declining the identity question still saves it.
+    // ask about. Declining the identity question still saves it.
     async function _spoolWriteBackFromPicker() {
       const id = picker.spool;
       const sp = id ? (state.spools || {})[id] : null;
@@ -4016,9 +4173,8 @@ createApp({
       // so this sticks until the user changes it.
       if (picker.head !== null && picker.head !== undefined) {
         // Spool binding travels with the identity here too - the head
-        // picker was the one place the binding was NOT reachable from
-        // (Dirk 2026-08-09: "fehlt die ganze spool bindung??"); the rows
-        // were slot-gated. Only sent on a real change, like the slot flow.
+        // picker must reach the binding like the slot picker does.
+        // Only sent on a real change, like the slot flow.
         const hb = (state.spool_binding || {})[`h${picker.head}`] || "";
         if ((picker.spool || "") !== hb) {
           if (picker.spool) {
@@ -4056,7 +4212,7 @@ createApp({
         if (picker.spool) {
           // The assignment can LEARN the slot's read card UID into the
           // spool's code list (and from there into Spoolman's card_uids).
-          // Ask first - it is permanent and travels (Dirk 2026-09-02).
+          // Ask first - it is permanent and travels.
           const learn = _askLearnUid(picker.spool);
           const args = {ACE: aceIdx, SLOT: slotIdx, ID: picker.spool};
           if (learn !== null) args.LEARN_UID = learn ? 1 : 0;
@@ -4134,7 +4290,7 @@ createApp({
     });
     // A SET, not one index: each ACE has its own thresholds, and comparing
     // or setting two of them meant the second card closing the first
-    // (Dirk: "es ist nur das Dry Menü einer Karte sichtbar").
+    // (then only one card's dry menu could be open).
     const dryOpenAces = reactive(new Set());
     function dryPanelOpen(aceIdx) { return dryOpenAces.has(aceIdx); }
     function toggleDryPanel(aceIdx) {
@@ -4733,11 +4889,10 @@ createApp({
     async function saveConfigForm() {
       configLog.value = t("ui.common.saving");
       try {
-        // LOST-UPDATE GUARD (HW 2026-07-30): the form PATCHES the browser's
-        // cached copy of the file, so a tab that loaded an older revision
-        // silently writes it back - a cfg repaired via SSH was reverted to a
-        // section-less version, losing SET_ACE_MODE, [ace_bg_swap] and
-        // [ace_tipform]. We send the sha1 we loaded; on 409 the server
+        // LOST-UPDATE GUARD: the form PATCHES the browser's cached copy of
+        // the file, so a tab that loaded an older revision would silently
+        // write it back (e.g. revert a cfg repaired via SSH). We send the
+        // sha1 we loaded; on 409 the server
         // returns the CURRENT content and we re-apply the form values on top
         // of it and retry once, so the user's edit lands without clobbering
         // whatever else changed on disk meanwhile.
@@ -4790,12 +4945,10 @@ createApp({
         const r = await fetch(`${API}/config`, {
           method: "PUT",
           headers: {"Content-Type": "application/json"},
-          // Never restart Klipper from here - same policy as the form save
-          // (Dirk 2026-08-09: "mal klappt speichern mit klipper restart, mal
-          // nicht, einfach printer restart verlangen"). A bare Klipper
-          // restart applies most [ace] scalars but misses USB/serial
-          // re-enumeration and PAXX boot scripts, so it produced a
-          // half-applied config and once a 503 mid-restart.
+          // Never restart Klipper from here - same policy as the form save.
+          // A bare Klipper restart applies most [ace] scalars but misses
+          // USB/serial re-enumeration and PAXX boot scripts, so it produces
+          // a half-applied config.
           body: JSON.stringify({content: config.content,
                                 restart_klipper: false,
                                 base_sha1: config.sha1}),
@@ -5003,8 +5156,7 @@ createApp({
       progress: null,
       // Manual slot reassignment for the slicer plan only: {origT: "ace-slot"}.
       // slicerSwaps holds the recomputed swap count (null = use the plan's
-      // server value); recomputed automatically on every dropdown change
-      // (the old recalc button is gone, Dirk 2026-08-14).
+      // server value); recomputed automatically on every dropdown change.
       slicerOverrides: {},
       slicerSwaps: null,
       // Head mode: same idea for the single colour->target table. headOverrides
@@ -5012,6 +5164,15 @@ createApp({
       // ACE-head swap count (null = use the server plan value).
       headOverrides: {},
       headSwaps: null,
+      // Colour copies (Multifilament-Optimierung): {origT: [target_id,...]}
+      // the loadout print may use (null = the server report's copies) and
+      // the recomputed suggestion (null = the server report's copy_plan).
+      headCopies: null,
+      copyPlan: null,
+      // Live copies of the three proposal plans ({hp: plan} like copyPlan;
+      // null = the server report's copy rows), so a changed max-copies
+      // setting re-plans them without a new upload.
+      proposalCopies: null,
       // Print-preference toggles (default off): inject SET_PRINT_PREFERENCES so
       // an upload/SD start runs bed mesh / timelapse camera (stock only does
       // these on the official start).
@@ -5079,7 +5240,7 @@ createApp({
       // The file's `nozzle_diameter` is indexed per FILAMENT (demand); which
       // head carries which nozzle is the machine's business (supply). Falls
       // back to reading the file's first four entries as heads when the
-      // printer could not be asked - the pre-2026-08-07 reading.
+      // printer could not be asked.
       const r = preflight.report || {};
       const hn = r.head_nozzles || {};
       const src = Object.keys(hn).length ? hn : (r.nozzles || {});
@@ -5099,8 +5260,8 @@ createApp({
     }
     // Swap count for the FOrca view. That view REPLACES the normal plan
     // tables, and with them the only place the count was rendered - so a
-    // mixed-nozzle file never told the user how many tool changes its
-    // assignment costs (Dirk 2026-08-09). No new arithmetic: the FOrca
+    // mixed-nozzle file would never tell the user how many tool changes its
+    // assignment costs. No new arithmetic: the FOrca
     // rows edit the very plan the existing counters already track
     // (loadout in head mode, slicer in multi), including the live recalc
     // after a dropdown change.
@@ -5115,10 +5276,10 @@ createApp({
       return (r && r.head_mode) ? "loadout" : "slicer";
     }
     // The rest of the plan header's info line, reusing the plan readers
-    // verbatim (Dirk 2026-08-09: "einfach die Anzeige, optimieren nicht").
+    // verbatim (display only, no optimisation).
     // bg-swaps only in head mode - background swaps REQUIRE the 1:1
     // head<->ACE wiring, in multi one ACE feeds several heads and the
-    // number would be meaningless (S36: hardware, not policy).
+    // number would be meaningless (a hardware limit, not policy).
     function forcaBgLabel() {
       const r = preflight.report;
       if (!r || !r.head_mode) return "";
@@ -5135,8 +5296,7 @@ createApp({
       // depends on whether the size is shared:
       //   one head per size  -> the section has no freedom in it, so naming
       //                         it by the size names an abstraction the user
-      //                         then has to translate back (Dirk 2026-08-08:
-      //                         "per nozzle size ist verwirrend")
+      //                         then has to translate back
       //   two heads per size -> the freedom is real, and splitting them into
       //                         two head sections would present our pick as
       //                         if it were fixed
@@ -5241,9 +5401,8 @@ createApp({
         // Catch-all group: no head to name, and the REASON is per colour, not
         // per group - it mixes "the file names no nozzle" with "it names one
         // this machine does not have", and the latter differs by diameter.
-        // Reading it off g.colors[0] made all rows show the first row's
-        // diameter (HW screenshot: three rows all claiming 0.8 mm while two
-        // of them needed 0.2).
+        // Reading it off g.colors[0] would make all rows show the first
+        // row's diameter.
         const cc = c || {};
         return cc.noHead
           ? t("ui.preflight.forca_dia_absent", {dia: cc.wantDia})
@@ -5271,9 +5430,8 @@ createApp({
         : !!slicerEffectiveSlot(c.t)));
     }
     function slicerColorsInPrintOrder() {
-      // The "Slicer colors" list ordered by FIRST use in the print (Dirk
-      // 2026-07-19: fold the print order into the existing list instead of
-      // a separate chip strip). First-appearance index from report.events
+      // The "Slicer colors" list ordered by FIRST use in the print.
+      // First-appearance index from report.events
       // (the toolchange sequence); colours the body never prints keep
       // their T order after the used ones. No events -> original order.
       const cols = (preflight.report && preflight.report.slicer_colors) || [];
@@ -5310,12 +5468,12 @@ createApp({
     }
     function slicerSlotOptions(tt) {
       // Only loaded slots whose material matches the slicer-T (material-strict,
-      // mirrors the auto-matcher / CLAUDE.md §23).
+      // mirrors the auto-matcher).
       //
       // Under a mixed-nozzle file the option list is additionally restricted
       // to slots feeding a head of the RIGHT nozzle size - but it stays a
-      // free choice within that (Dirk: "wenn nicht geladen ist kann ich doch
-      // eine andere farbe aussuchen"). The nozzle fixes which HEAD a tool
+      // free choice within that (an unloaded colour can be swapped for
+      // another one). The nozzle fixes which HEAD a tool
       // prints on, never which COLOUR the user wants there; picking a
       // different spool is legitimate and the auto-load block loads it.
       const mat = _slicerColorMat(tt);
@@ -5327,6 +5485,20 @@ createApp({
         return true;
       });
     }
+    function multiTopology() {
+      // The multi assignment report (copies / manual heads): slot N of any
+      // ACE feeds head N. Everything else in the head-mode code is the
+      // wired 1:1 topology.
+      return !!(preflight.report && preflight.report.topology === "multi");
+    }
+    function slotHead(ace, slot) {
+      // The head an ACE slot feeds in the report's topology (null = none).
+      if (multiTopology()) {
+        const heads = (preflight.report && preflight.report.ace_heads) || [];
+        return heads.includes(Number(slot)) ? Number(slot) : null;
+      }
+      return aceHeadForAce(Number(ace));
+    }
     function headOfSlot(ls) {
       // Which head a loaded slot feeds - the same modus split the backend
       // gate makes (_head_of). MULTI: head == slot index. HEAD MODE: the
@@ -5334,7 +5506,7 @@ createApp({
       // (head_ace maps head -> ace, not ace -> head; reading it the other
       // way round would silently return the wrong head).
       const r = preflight.report;
-      if (r && r.head_mode) return aceHeadForAce(Number(ls.ace));
+      if (r && r.head_mode) return slotHead(Number(ls.ace), Number(ls.slot));
       return ls.slot;
     }
     function forcaAllowedHeads(tt) {
@@ -5359,12 +5531,12 @@ createApp({
       const out = [];
       const allowed = forcaAllowedHeads(tt);
       (state.aces || []).forEach(a => {
-        const head = aceHeadForAce(a.idx);
-        if (preflight.report && preflight.report.head_mode) {
-          if (head === null) return;                 // ACE no head is wired to
-          if (allowed && !allowed.includes(head)) return;
-        }
         (a.slots || []).forEach(s => {
+          if (preflight.report && preflight.report.head_mode) {
+            const head = slotHead(a.idx, s.idx);
+            if (head === null) return;               // no head can use this slot
+            if (allowed && !allowed.includes(head)) return;
+          }
           if (s.state === "empty") return;
           if (s.source === "rfid" || s.source === "override") return;
           out.push({ace: a.idx, slot: s.idx});
@@ -5461,7 +5633,7 @@ createApp({
         const m = (tg.material || "").trim().toLowerCase();
         if (mat && m && m !== mat) return false;
         if (allowed) {
-          const h = (tg.kind === "pin") ? tg.head : aceHeadForAce(Number(tg.ace));
+          const h = (tg.kind === "pin") ? tg.head : slotHead(tg.ace, tg.slot);
           if (h === null || !allowed.includes(h)) return false;
         }
         return true;
@@ -5477,10 +5649,15 @@ createApp({
       const ov = preflight.headOverrides[tt];
       return ov !== undefined ? ov : _headBaseTargetId(tt);
     }
+    function pinLabel(head) {
+      // A pinned target: a feeder head in head mode, a hand-fed head in multi.
+      return (multiTopology() ? t("ui.preflight.manual_head") : t("ui.preflight.feeder"))
+        + " " + dispIdx(head);
+    }
     function headTargetLabel(tg) {
       if (!tg) return "";
       const mat = tg.material || "?";
-      if (tg.kind === "pin") return t("ui.preflight.feeder") + " " + dispIdx(tg.head) + " · " + mat;
+      if (tg.kind === "pin") return pinLabel(tg.head) + " · " + mat;
       return "ACE " + dispIdx(tg.ace) + " Slot " + dispIdx(tg.slot) + " · " + mat;
     }
     function headTargetColor(id) {
@@ -5493,7 +5670,7 @@ createApp({
     }
     // Custom dropdown for the head-mode target picker: native <option>s
     // cannot render a colour chip NEXT to a label (only full-background
-    // fills, which were loud/uneven - Dirk 2026-07-10), so the open list is
+    // fills, which were loud/uneven), so the open list is
     // a small custom popup with chip + label per entry. One open at a time,
     // keyed by the slicer-T; items pick on mousedown (fires before the
     // button's blur closes the list).
@@ -5520,10 +5697,15 @@ createApp({
       }
       return out;
     }
-    function headSwapCount(events, assignment) {
+    function headSwapCount(events, assignment, copies) {
       // Port of backend head_mode_swap_count: only ACE-target (ace,slot)
       // changes count, PER ACE head (each ACE head swaps independently);
-      // pinned feeder colours never swap.
+      // pinned feeder colours never swap. With colour copies the count is
+      // the per-event choice of simulateDynamicSwaps (same as the backend).
+      if (copies && Object.keys(copies).length) {
+        return simulateDynamicSwaps(events, _targetsWithCopies(assignment, copies),
+                                    headBgHeads()).swaps;
+      }
       const cur = {};
       let swaps = 0;
       for (const tt of (events || [])) {
@@ -5534,10 +5716,334 @@ createApp({
       }
       return swaps;
     }
+    // --- colour copies (Multifilament-Optimierung) ---------------------------
+    // One slicer colour may print from SEVERAL heads when a second spool of
+    // it is loaded elsewhere; per toolchange the head that already holds the
+    // colour is taken (Belady otherwise). JS mirror of the post-processor's
+    // simulate_dynamic_swaps / detect_color_copies / plan_color_copies so the
+    // row updates live on loadout edits and on the max-copies setting; the
+    // print sends the copies verbatim (head_copies), so preview == print.
+    function headBgHeads() {
+      const bg = preflight.report && preflight.report.bg_swap;
+      return (bg && bg.enabled_heads) || [];
+    }
+    function headMaxCopies() {
+      return Math.max(1, Math.min(4, Number(state.preflight_max_copies || 1)));
+    }
+    function headCopiesEffective() {
+      // {origT: [target_id...]} actually usable: capped by the setting,
+      // never the colour's own target nor a target on its head.
+      const src = preflight.headCopies !== null
+                ? preflight.headCopies
+                : ((preflight.report && preflight.report.copies) || {});
+      const limit = headMaxCopies();
+      const out = {};
+      if (limit <= 1) return out;
+      const asn = _headEffectiveAssignment();
+      for (const k of Object.keys(src)) {
+        const prim = _headTargetById(asn[k]);
+        if (!prim) continue;
+        const heads = new Set([prim.head]);
+        const lst = [];
+        for (const id of (src[k] || [])) {
+          const tg = _headTargetById(id);
+          if (!tg || tg.kind !== "ace" || heads.has(tg.head)) continue;
+          lst.push(id); heads.add(tg.head);
+          if (lst.length >= limit - 1) break;
+        }
+        if (lst.length) out[k] = lst;
+      }
+      return out;
+    }
+    function _targetsWithCopies(assignment, copies) {
+      const out = {};
+      for (const k of Object.keys(assignment)) {
+        const prim = _headTargetById(assignment[k]);
+        if (!prim) continue;
+        out[k] = [prim].concat(((copies && copies[k]) || [])
+                    .map(id => _headTargetById(id)).filter(x => !!x));
+      }
+      return out;
+    }
+    function simulateDynamicSwaps(events, targetsOf, bgHeads) {
+      const n = (events || []).length;
+      const pos = {};
+      events.forEach((tt, k) => { (pos[tt] = pos[tt] || []).push(k); });
+      const nextUse = (tt, k) => {
+        const p = pos[tt];
+        if (!p) return n;
+        let lo = 0, hi = p.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (p[m] <= k) lo = m + 1; else hi = m; }
+        return lo < p.length ? p[lo] : n;
+      };
+      // Per head: positions of events only that head can print (mirror of
+      // the post-processor's forced-event tie-break between empty heads).
+      const forced = {};
+      events.forEach((tt, k) => {
+        const heads = new Set((targetsOf[tt] || targetsOf[String(tt)] || [])
+          .filter(e => e.kind === "ace").map(e => e.head));
+        if (heads.size === 1) { const h = [...heads][0]; (forced[h] = forced[h] || []).push(k); }
+      });
+      const nextForced = (h, k) => {
+        const p = forced[h];
+        if (!p) return n;
+        let lo = 0, hi = p.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (p[m] <= k) lo = m + 1; else hi = m; }
+        return lo < p.length ? p[lo] : n;
+      };
+      const bg = new Set((bgHeads || []).map(Number));
+      const cur = {};           // head -> {key, tool}
+      const swapsBy = {};
+      let swaps = 0;
+      const plan = [];
+      events.forEach((tt, k) => {
+        const cands = targetsOf[tt] || targetsOf[String(tt)] || [];
+        let chosen = null;
+        for (const e of cands) {
+          if (e.kind === "pin") { chosen = e; break; }
+          const c = cur[e.head];
+          if (c && c.key === e.ace + "-" + e.slot) { chosen = e; break; }
+        }
+        if (!chosen) {
+          let bestKey = null;
+          cands.forEach((e, i) => {
+            if (e.kind !== "ace") return;
+            const c = cur[e.head];
+            const key = c ? [-nextUse(c.tool, k), 0, bg.has(Number(e.head)) ? 0 : 1, swapsBy[e.head] || 0, i]
+                          : [-(n + 1), -nextForced(e.head, k), i, 0, i];
+            if (bestKey === null || _keyLess(key, bestKey)) { bestKey = key; chosen = e; }
+          });
+          if (!chosen) { plan.push(null); return; }
+          swaps++;
+          swapsBy[chosen.head] = (swapsBy[chosen.head] || 0) + 1;
+          cur[chosen.head] = {key: chosen.ace + "-" + chosen.slot, tool: tt};
+        }
+        plan.push(chosen);
+      });
+      return {swaps, plan};
+    }
+    function _keyLess(a, b) {
+      for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return a[i] < b[i]; }
+      return false;
+    }
+    function headCopiesStrict() {
+      return !!state.preflight_copies_strict;
+    }
+    const _COLOR_QUALIFIERS = ["Dark", "Light"];
+    const _COLOR_SYNONYMS = {Silver: "Gray", Gold: "Yellow"};
+    function _colorBase(name) {
+      for (const q of _COLOR_QUALIFIERS) {
+        if (name.startsWith(q) && name.length > q.length) return name.slice(q.length);
+      }
+      return name;
+    }
+    function _copyMatches(tg, c) {
+      // Mirror of the post-processor's copy match: same material (empty on
+      // either side = wildcard) and the matcher's tiers 1-4 on the colour:
+      // exact hex, same approx name, same base name (Dark/Light stripped),
+      // same synonym canon. Never fuzzy. Strict = tier 1 only.
+      const mat = (c.material || "").trim().toLowerCase();
+      const m = (tg.material || "").trim().toLowerCase();
+      if (mat && m && m !== mat) return false;
+      const hex = (c.hex || "").replace("#", "").toLowerCase();
+      const th = (tg.color || "").replace("#", "").toLowerCase();
+      if (!hex) return false;
+      if (th && hex === th) return true;
+      if (headCopiesStrict()) return false;
+      const cn = c.name || "", tn = tg.name || "";
+      if (!cn || cn === "?" || !tn || tn === "?") return false;
+      if (cn === tn) return true;
+      const cb = _colorBase(cn), tb = _colorBase(tn);
+      if (cb === tb) return true;
+      return (_COLOR_SYNONYMS[cb] || cb) === (_COLOR_SYNONYMS[tb] || tb);
+    }
+    function detectHeadCopies() {
+      // Loaded, unclaimed slots holding a slicer colour on another head.
+      const asn = _headEffectiveAssignment();
+      const claimed = new Set(Object.values(asn).filter(x => !!x));
+      const out = {};
+      for (const c of ((preflight.report && preflight.report.slicer_colors) || [])) {
+        const prim = _headTargetById(asn[c.t]);
+        if (!prim) continue;
+        const allowed = forcaAllowedHeads(c.t);
+        const heads = new Set([prim.head]);
+        for (const tg of headTargets()) {
+          if (tg.kind !== "ace" || claimed.has(tg.id) || heads.has(tg.head)) continue;
+          if (allowed && !allowed.includes(tg.head)) continue;
+          if (!_copyMatches(tg, c)) continue;
+          (out[c.t] = out[c.t] || []).push(tg.id);
+          heads.add(tg.head);
+        }
+      }
+      return out;
+    }
+    function _planCopiesGreedy(events, targets, free, limit, bg, order) {
+      // Greedy: the (colour, empty slot) that saves most swaps, repeated.
+      // Shared by the loadout suggestion and the proposal plans (JS mirror
+      // of the post-processor's plan_color_copies). `order` = the colour
+      // iteration order for tie-breaks (Python walks the assignment in
+      // insertion order; integer keys here would always iterate ascending).
+      const before = simulateDynamicSwaps(events, targets, bg).swaps;
+      const res = {max_copies: limit, suggestions: [], swaps_before: before, swaps_after: before};
+      if (limit <= 1) return res;
+      let cur = before;
+      const keys = (order || Object.keys(targets)).map(String).filter(k => targets[k]);
+      while (free.length) {
+        let best = null;
+        for (const k of keys) {
+          const lst = targets[k];
+          if (lst.length >= limit) continue;
+          const allowed = forcaAllowedHeads(Number(k));
+          const heads = new Set(lst.map(x => x.head));
+          for (const f of free) {
+            if (heads.has(f.head)) continue;
+            if (allowed && !allowed.includes(f.head)) continue;
+            const trial = Object.assign({}, targets);
+            trial[k] = lst.concat([{kind: "ace", head: f.head, ace: f.ace, slot: f.slot}]);
+            const sw = simulateDynamicSwaps(events, trial, bg).swaps;
+            if (sw < cur && (best === null || sw < best.sw)) best = {sw, k, f};
+          }
+        }
+        if (!best) break;
+        targets[best.k] = targets[best.k].concat([{kind: "ace", head: best.f.head, ace: best.f.ace, slot: best.f.slot}]);
+        free = free.filter(f => !(f.ace === best.f.ace && f.slot === best.f.slot));
+        res.suggestions.push({t: Number(best.k), ace: best.f.ace, slot: best.f.slot, head: best.f.head, swaps: best.sw});
+        cur = best.sw;
+      }
+      res.swaps_after = cur;
+      res.targets = targets;
+      return res;
+    }
+    function planHeadCopies() {
+      const events = (preflight.report && preflight.report.events) || [];
+      const asn = _headEffectiveAssignment();
+      const targets = _targetsWithCopies(asn, headCopiesEffective());
+      const free = ((preflight.report && preflight.report.empty_slots) || [])
+        .map(e => ({ace: Number(e.ace), slot: Number(e.slot), head: slotHead(e.ace, e.slot)}))
+        .filter(e => e.head !== null);
+      return _planCopiesGreedy(events, targets, free, headMaxCopies(), headBgHeads());
+    }
+    function _wiredAces() {
+      // [ace index] of every ACE an ACE head is wired to (head mode); in
+      // the multi topology every attached ACE feeds every head.
+      if (multiTopology()) return (state.aces || []).map(a => Number(a.idx));
+      const out = [];
+      for (const h of (state.ace_heads || [])) {
+        const ha = state.head_ace || {};
+        out.push(Number(ha[h] ?? ha[String(h)] ?? h));
+      }
+      return out;
+    }
+    function planProposalCopies(hp) {
+      // Copies for a PROPOSED loadout: every slot of an ACE head the
+      // proposal leaves free is a candidate (mirror of proposal_copies).
+      const plan = preflight.report && preflight.report.plans && preflight.report.plans[hp];
+      if (!plan || !plan.feasible || !plan.mapping) return null;
+      const events = (preflight.report && preflight.report.events) || [];
+      const targets = {};
+      const used = new Set();
+      for (const m of plan.mapping) {
+        if (!m || m.kind === "none" || m.tier === "copy") continue;
+        targets[m.t] = [{kind: m.kind, head: m.head, ace: m.ace, slot: m.slot}];
+        if (m.kind === "ace") used.add(m.ace + "-" + m.slot);
+      }
+      const free = [];
+      for (const a of _wiredAces()) {
+        for (let si = 0; si < 4; si++) {
+          const h = slotHead(a, si);
+          if (h === null) continue;
+          if (!used.has(a + "-" + si)) free.push({ace: a, slot: si, head: h});
+        }
+      }
+      // The proposal's assignment is built in first-use order of the
+      // events - mirror that so equal-saving ties resolve like the server.
+      const order = [];
+      for (const tt of events) if (!order.includes(tt)) order.push(tt);
+      return _planCopiesGreedy(events, targets, free, headMaxCopies(), headBgHeads(), order);
+    }
+    function proposalCopyPlan(hp) {
+      const pc = preflight.proposalCopies;
+      return (pc && pc[hp]) || null;
+    }
+    function headPlanMapping(hp) {
+      // The proposal table: the server's rows without its copy rows, plus
+      // the live-planned copies, in the server's re-stick order.
+      const plan = preflight.report && preflight.report.plans && preflight.report.plans[hp];
+      if (!plan || !plan.mapping) return [];
+      const live = proposalCopyPlan(hp);
+      if (!live) return plan.mapping;
+      const rows = plan.mapping.filter(m => m.tier !== "copy");
+      for (const sg of live.suggestions) {
+        rows.push({t: sg.t, kind: "ace", head: sg.head, ace: sg.ace, slot: sg.slot, tier: "copy"});
+      }
+      const rank = {pin: 0, ace: 1};
+      const nz = v => (v === null || v === undefined) ? 99 : v;
+      rows.sort((a, b) => {
+        const ka = [rank[a.kind] ?? 2, nz(a.ace), nz(a.slot), nz(a.head), a.t || 0];
+        const kb = [rank[b.kind] ?? 2, nz(b.ace), nz(b.slot), nz(b.head), b.t || 0];
+        for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] - kb[i];
+        return 0;
+      });
+      return rows;
+    }
+    function proposalCopyIds(hp) {
+      // {t: ["slot-A-S", ...]} of the proposal's live copies (print payload).
+      const live = proposalCopyPlan(hp);
+      const out = {};
+      if (!live) return out;
+      for (const sg of live.suggestions) {
+        (out[String(sg.t)] = out[String(sg.t)] || []).push("slot-" + sg.ace + "-" + sg.slot);
+      }
+      return out;
+    }
+    function recalcCopies() {
+      preflight.headCopies = detectHeadCopies();
+      preflight.copyPlan = planHeadCopies();
+      const pc = {};
+      for (const hp of ["optimize", "layer", "color"]) {
+        const p = planProposalCopies(hp);
+        if (p) pc[hp] = p;
+      }
+      preflight.proposalCopies = pc;
+    }
+    function headCopyPlan() {
+      if (preflight.copyPlan !== null) return preflight.copyPlan;
+      const cp = preflight.report && preflight.report.copy_plan;
+      return cp || {max_copies: 1, suggestions: [], swaps_before: null, swaps_after: null};
+    }
+    function headCopyList() {
+      // [{t, id}] of the copies in use, for the row's "active" line.
+      const eff = headCopiesEffective();
+      const out = [];
+      for (const k of Object.keys(eff)) for (const id of eff[k]) out.push({t: Number(k), id});
+      return out;
+    }
+    function copySlotLabel(ace, slot) {
+      return "ACE " + dispIdx(ace) + " Slot " + dispIdx(slot);
+    }
+    async function _setPreflightCopiesArgs(args) {
+      try {
+        await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_SET_PREFLIGHT_COPIES", args}),
+        });
+      } catch (_) {}
+      await reloadState();
+      if (preflight.report && preflight.report.head_mode) recalcHead();
+    }
+    async function setPreflightCopies(v) {
+      const n = Math.max(1, Math.min(4, Number(v) || 1));
+      await _setPreflightCopiesArgs({MAX: n});
+    }
+    async function setPreflightCopiesStrict(on) {
+      await _setPreflightCopiesArgs({STRICT: on ? 1 : 0});
+    }
     function recalcHead() {
+      if (preflight.report && preflight.report.head_mode) recalcCopies();
       preflight.headSwaps = headSwapCount(
         (preflight.report && preflight.report.events) || [],
-        _headEffectiveAssignment());
+        _headEffectiveAssignment(), headCopiesEffective());
     }
     function headSwapsDisplay() {
       if (preflight.headSwaps !== null) return preflight.headSwaps;
@@ -5559,13 +6065,61 @@ createApp({
     }
     function headPlanSwaps(hp) {
       if (hp === "loadout") return headSwapsDisplay();
+      const live = proposalCopyPlan(hp);
+      if (live) return live.swaps_after;
       const p = preflight.report && preflight.report.plans
               && preflight.report.plans[hp];
       return (p && p.swaps) || 0;
     }
-    // Background-unload balance of a head-mode plan (server-computed;
-    // stale after loadout edits like the swap count - same stale marker).
+    function _bgStatsFor(targets) {
+      // Port of head_mode_bg_stats over the per-event plan: every unload
+      // the rewrite would stamp (a released ACE head whose next arrival
+      // needs a different slot), rated by its parked window.
+      const rep = preflight.report;
+      const events = (rep && rep.events) || [];
+      const n = events.length;
+      const times = rep && rep.event_times;
+      const haveT = Array.isArray(times) && times.length === n;
+      const bgs = rep && rep.bg_swap;
+      const minW = Number((bgs && bgs.min_window_min) || 3);
+      const saving = Number((bgs && bgs.inline_saving_s) || 180);
+      const bgSet = new Set(headBgHeads().map(Number));
+      const plan = simulateDynamicSwaps(events, targets, headBgHeads()).plan;
+      const st = {unloads: 0, bg_ok: 0, bg_small: 0, bg_unknown: 0, bg_disabled: 0, saved_s: 0};
+      const same = (a, b) => a.kind === b.kind && a.head === b.head && a.ace === b.ace && a.slot === b.slot;
+      for (let i = 1; i < n; i++) {
+        const cur = plan[i], rel = plan[i - 1];
+        if (!cur || (cur.kind !== "pin" && cur.kind !== "ace")) continue;
+        if (!rel || rel.kind !== "ace") continue;
+        if ((events[i - 1] === events[i] && same(rel, cur)) || rel.head === cur.head) continue;
+        let nxt = null, nxtJ = null;
+        for (let j = i + 1; j < n; j++) {
+          const e2 = plan[j];
+          if (e2 && e2.kind === "ace" && e2.head === rel.head) { nxt = e2; nxtJ = j; break; }
+        }
+        if (!nxt || (nxt.ace === rel.ace && nxt.slot === rel.slot)) continue;
+        st.unloads++;
+        const rNow = haveT ? times[i] : null;
+        const rNxt = haveT ? times[nxtJ] : null;
+        const window = (rNow !== null && rNow !== undefined && rNxt !== null && rNxt !== undefined)
+                     ? (rNow - rNxt) : null;
+        if (!bgSet.has(Number(rel.head))) st.bg_disabled++;
+        else if (window === null) st.bg_unknown++;
+        else if (window < minW) st.bg_small++;
+        else st.bg_ok++;
+      }
+      st.saved_s = st.bg_ok * saving;
+      return st;
+    }
+    // Background-unload balance of a head-mode plan: live from the plan the
+    // table shows once a recalc ran (copies, edits), else the server's.
     function headPlanBg(hp) {
+      if (multiTopology()) return null;          // no background swaps in multi
+      const live = (hp === "loadout") ? preflight.copyPlan : proposalCopyPlan(hp);
+      if (live && live.targets) {
+        const st = _bgStatsFor(live.targets);
+        return st.unloads > 0 ? st : null;
+      }
       const p = preflight.report && preflight.report.plans
               && preflight.report.plans[hp];
       return (p && p.bg && p.bg.unloads > 0) ? p.bg : null;
@@ -5585,8 +6139,7 @@ createApp({
       if (bg.bg_ok > 0 && min > 0) {
         s += " (~" + min + " min " + t('ui.preflight.bg_saved') + ")";
       }
-      // Why the rest does NOT qualify - the diagnosis Dirk was missing
-      // (">4 colours and still no benefit": short windows vs chain on a
+      // Why the rest does NOT qualify (short windows vs chain on a
       // non-BG head vs missing M73 look different here).
       const parts = [];
       if (bg.bg_small)    parts.push(bg.bg_small + " " + t('ui.preflight.bg_too_short'));
@@ -5610,7 +6163,7 @@ createApp({
     function headProposalLabel(m) {
       // The proposed destination for a slicer colour (load that colour here).
       if (!m || m.kind === "none") return "";
-      if (m.kind === "pin") return t("ui.preflight.feeder") + " " + dispIdx(m.head);
+      if (m.kind === "pin") return pinLabel(m.head);
       return "ACE " + dispIdx(m.ace) + " Slot " + dispIdx(m.slot);
     }
     // ---- Send-to-multiACE inbox -----------------------------------------
@@ -5631,8 +6184,7 @@ createApp({
       const ps = state.printer_state;
       return !!(state.preflight_inbox && state.preflight_inbox.pending)
         && !inboxBusy.value
-        && ps !== 'printing' && ps !== 'paused' && ps !== 'busy'
-        && !state.toolheads.some(th => th.manual);
+        && ps !== 'printing' && ps !== 'paused' && ps !== 'busy';
     });
     function _maybeAutoOpenInbox() {
       if (panelMode) return;
@@ -5676,17 +6228,6 @@ createApp({
         confirm({
           title: t("ui.upload.title"),
           message: t("ui.upload.bad_ext"),
-          dismissOnly: true, okLabel: "OK", onOk: () => {},
-        });
-        return;
-      }
-      // Preflight can't handle a manual/TPU head (hand-fed, no ACE slot) - it
-      // would be ignored/mis-assigned. Disable preflight while one is active;
-      // the user uploads directly via Fluidd instead. (Full support is Pro.)
-      if (state.toolheads.some(th => th.manual)) {
-        confirm({
-          title: t("ui.upload.title"),
-          message: t("ui.preflight.manual_disabled"),
           dismissOnly: true, okLabel: "OK", onOk: () => {},
         });
         return;
@@ -5851,6 +6392,9 @@ createApp({
         preflight.slicerSwaps = null;
         preflight.headOverrides = {};
         preflight.headSwaps = null;
+        preflight.headCopies = null;
+        preflight.copyPlan = null;
+        preflight.proposalCopies = null;
       } finally {
         uploading.value = false;
         preflight.busy  = false;
@@ -5884,6 +6428,9 @@ createApp({
         preflight.slicerSwaps = null;
         preflight.headOverrides = {};
         preflight.headSwaps = null;
+        preflight.headCopies = null;
+        preflight.copyPlan = null;
+        preflight.proposalCopies = null;
       } catch (e) {
         preflight.error = e.message || String(e);
       } finally {
@@ -5960,7 +6507,7 @@ createApp({
       const block = ["; multiACE preflight: flow calibration (moved behind the auto-load, heads loaded)"];
       // Start tool LAST: the block ends with the head the start line needs
       // already in the gripper, so the closing re-select is a no-op instead
-      // of one more tool change (Dirk 2026-09-06).
+      // of one more tool change.
       const order = [...heads].filter(h => h !== initial).sort((a, b) => a - b);
       if (heads.has(initial)) order.push(initial);
       for (const h of order) {
@@ -6014,6 +6561,7 @@ createApp({
             const eff = _headEffectiveAssignment();
             for (const k of Object.keys(eff)) { if (eff[k]) asn[String(k)] = eff[k]; }
             payload.headAssignment = asn;
+            payload.headCopies = headCopiesEffective();
           }
         }
         const live = await loadLiveSlotsForPreflight();
@@ -6091,9 +6639,16 @@ createApp({
               if (eff[k]) asn[String(k)] = eff[k];
             }
             body.head_assignment = asn;
+            // The colour copies the preview counted with, verbatim (an
+            // empty object = none; the pipeline then rewrites statically).
+            body.head_copies = headCopiesEffective();
           }
-          // optimize / layer: the server recomputes the proposed loadout, so we
-          // send no assignment (the user has arranged spools to match it).
+          else {
+            // optimize / layer / color: the server recomputes the proposed
+            // loadout (the user has arranged spools to match it); the copies
+            // go verbatim so the print uses the ones the preview showed.
+            body.head_copies = proposalCopyIds(hp);
+          }
         }
         const r = await fetch(`${API}/preflight/print`, {
           method: "POST",
@@ -6162,10 +6717,17 @@ createApp({
       const overrides = [], feeders = [];
       const rep = preflight.report;
       if (!rep) return {overrides, feeders};
-      if (mode === "head") {
-        const plan = rep.plans[headPlan];
-        if (!plan || !plan.mapping) return {overrides, feeders};
-        for (const m of plan.mapping) {
+      if (mode === "head" && headPlan === "loadout") {
+        // The loadout plan applies only its SUGGESTED copies: the empty
+        // slots get the colour's identity, the user loads the spool there.
+        for (const sg of headCopyPlan().suggestions) {
+          const mat = headSlicerMat(sg.t);
+          overrides.push({ace: sg.ace, slot: sg.slot,
+                          material: (mat === "?") ? "" : mat,
+                          color: _hex6(headSlicerHex(sg.t))});
+        }
+      } else if (mode === "head") {
+        for (const m of headPlanMapping(headPlan)) {
           if (!m || m.kind === "none") continue;
           const color = _hex6(headSlicerHex(m.t));
           const mat = headSlicerMat(m.t);
@@ -6294,7 +6856,7 @@ createApp({
       // Worse, beforeunload fires every time OUR document is torn down, and
       // Fluidd drops the card's iframe src whenever it pauses its streams -
       // which a browser tab switch does. With anything left in the queue that
-      // was a "leave site?" prompt on every single tab switch (Dirk, HW).
+      // was a "leave site?" prompt on every single tab switch.
       if (!panelMode) window.addEventListener("beforeunload", _onBeforeUnload);
     });
     function _onBeforeUnload(ev) {
@@ -6355,11 +6917,13 @@ createApp({
       tagWrite,      tagWriteFormat, tagWriteUidSku, setTagWrite, slotOccupied,
       tagWriteOutcome, dismissTagWriteOutcome, tagRead, aceOpenFw,
       paDlg, paClip, spoolPaDialog, paRowDel, paAddRow, paCopy, paPaste,
+      paCalibrate, paCanCalibrate, paCalibrating, paLoading, paSpoolHead, paSpoolLoadPlan,
       paSave, paDirty, paKeyValid, paValueValid, paKeyOptions, pickerPaDialog,
       spoolCreating, spoolNewForm,
       acefw, acefwInput, acefwCandidates, acefwPickFile, acefwUpload,
       acefwCanTest, acefwReady, acefwTest, acefwFlash, acefwStatusText,
-      acefwPatchTarget, acefwCanPatch,
+      acefwStatusBad,
+      acefwPatchTarget, acefwPatchTargets, acefwTargetLabel, acefwCanPatch,
       acefwVersions,
       spoolCreateFromPicker,
       spoolExport, spoolImport, triggerSpoolImport,
@@ -6384,6 +6948,9 @@ createApp({
       hmDropOpen, hmDdToggle, hmDdClose, hmDdPick,
       headFeasible, headPlanFeasible, headPlanSwaps, headPlanBg, headPlanFlushG, headPlanBgLabel, headSlicerHex,
       headSlicerMat, headProposalLabel,
+      headMaxCopies, headCopiesEffective, headCopyPlan, headCopyList, copySlotLabel, setPreflightCopies,
+      headCopiesStrict, setPreflightCopiesStrict,
+      headPlanMapping, multiTopology, slotHead, pinLabel,
       updateState, updateCheck, updateApply,
       debugState, debugEnable, debugDisable,
       plugins, refreshPlugins, pluginIframeSrc,

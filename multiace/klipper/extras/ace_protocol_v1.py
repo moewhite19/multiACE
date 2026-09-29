@@ -115,6 +115,12 @@ class AceProtocolV1(AceProtocol):
                 'target_temp': 0,
                 'duration': 0,
                 'remain_time': 0,
+                # An ACE Pro has no rotisserie and no flag bits; the keys
+                # exist so a consumer never has to ask which protocol it
+                # is looking at.
+                'raw_status': 0,
+                'rotisserie': False,
+                'auto_roll_allowed': False,
             },
             'temp': 0,
             'enable_rfid': 1,
