@@ -8,8 +8,12 @@ trusts every request that reaches it.
 
 Environment variables:
   MOONRAKER_URL          default http://127.0.0.1:7125
-  MULTIACE_CFG_PATH      default /home/lava/printer_data/config/extended/ace.cfg
+  MULTIACE_CONFIG_DIR    printer_data/config directory
+  MULTIACE_PRINTER_DATA  printer data root
+  MULTIACE_CFG_PATH      legacy explicit config-file override
   MULTIACE_FRONTEND_DIR  default ../frontend (relative to this file)
+  MULTIACE_MANAGED       set to 1 when the platform owns installation/updates
+  MULTIACE_MANAGED_MARKER durable neutral managed-install marker path
   MULTIACE_WEB_VERSION   default "0.1.0"
 """
 from __future__ import annotations
@@ -43,8 +47,23 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import preflight_core
+from i18n_path import resolve_i18n_dir
 
 MOONRAKER_URL = os.environ.get("MOONRAKER_URL", "http://127.0.0.1:7125")
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+MULTIACE_MANAGED_MARKER = os.environ.get(
+    "MULTIACE_MANAGED_MARKER", "").strip() or os.path.join(
+        os.environ.get("MULTIACE_CONFIG_DIR", "/home/lava/printer_data/config"),
+        "extended", "multiace", ".multiace-managed")
+MULTIACE_MANAGED = (
+    _env_flag("MULTIACE_MANAGED")
+    or os.path.exists(MULTIACE_MANAGED_MARKER))
 
 
 def _user_paths(rel: str) -> list[str]:
@@ -70,11 +89,18 @@ def _first_existing(candidates: list[str]) -> str:
     return candidates[0]
 
 
-# Anchor on printer_data/config, which exists wherever Klipper runs. Probing
-# for 'extended' or 'persistent' instead would fall back to the U1 path on
-# any host that does not have those multiACE subfolders yet, which is every
-# fresh generic install.
-_CFG_DIR = _first_existing(_user_paths("printer_data/config"))
+# These two roots are the shared host-path contract. Keep fallback discovery
+# for standalone installs, but let managed platforms supply canonical paths.
+_CONFIG_DIR_ENV = os.environ.get("MULTIACE_CONFIG_DIR", "").strip()
+_PRINTER_DATA_ENV = os.environ.get("MULTIACE_PRINTER_DATA", "").strip()
+if _PRINTER_DATA_ENV:
+    MULTIACE_PRINTER_DATA = os.path.abspath(_PRINTER_DATA_ENV)
+elif _CONFIG_DIR_ENV:
+    MULTIACE_PRINTER_DATA = os.path.dirname(os.path.abspath(_CONFIG_DIR_ENV))
+else:
+    MULTIACE_PRINTER_DATA = _first_existing(_user_paths("printer_data"))
+_CFG_DIR = os.path.abspath(_CONFIG_DIR_ENV) if _CONFIG_DIR_ENV else os.path.join(
+    MULTIACE_PRINTER_DATA, "config")
 _CFG_EXT_DIR = os.path.join(_CFG_DIR, "extended")
 
 def _resolve_cfg_path() -> str:
@@ -128,10 +154,7 @@ DEFAULT_MATERIALS = [
     "PC", "PC-ABS",
     "PVA",
 ]
-I18N_DIR = os.environ.get(
-    "MULTIACE_I18N_DIR",
-    str((Path(__file__).resolve().parent.parent / "i18n")),
-)
+I18N_DIR = str(resolve_i18n_dir(__file__))
 SCREEN_PROBE_URL = os.environ.get("SCREEN_PROBE_URL", "http://127.0.0.1:8092/snapshot")
 
 # 0003 mitigation: ace.py (the Klipper module) touches this tmpfs flag on
@@ -268,6 +291,18 @@ def _int_or(v, default):
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def _community_fw_kind(fw):
+    """Same rule as ace._community_fw_kind, for status from an older ace.py."""
+    fw = str(fw or "").strip().upper()
+    if not fw:
+        return ""
+    if fw.endswith("O"):
+        return "ace2_open"
+    if fw.startswith("CV"):
+        return "gen1_cfw"
+    return ""
 
 
 def _parse_state(status: dict) -> dict:
@@ -557,10 +592,27 @@ def _parse_state(status: dict) -> dict:
             # letter O (V1.1.3O) - same rule as ace._is_open_fw_idx. The
             # RC522 tag read/write live only there.
             "open_fw":      str(a.get("firmware", "") or "").strip().upper().endswith("O"),
+            # Display-only badge: 'ace2_open' | 'gen1_cfw' | ''. Klipper sends
+            # it since 1.20b; derived here from the firmware string for an
+            # older ace.py (same rules).
+            "community_fw": (a.get("community_fw")
+                             if a.get("community_fw") is not None
+                             else _community_fw_kind(a.get("firmware", ""))),
             "status":       a.get("status"),
             "temp":         a.get("temp"),
 
             "humidity":     a.get("humidity"),
+            # Pushed external humidity (Klipper ACE_SET_HUMIDITY): last
+            # value, age, freshness, source and whether it drives a running
+            # cycle. 'humidity' above stays the DEVICE's own sensor value;
+            # 'humidity_effective' is what control actually uses. Additive -
+            # an older Klipper just yields None/False here.
+            "external_humidity": a.get("external_humidity"),
+            "external_humidity_age": a.get("external_humidity_age"),
+            "external_humidity_fresh": bool(a.get("external_humidity_fresh")),
+            "external_humidity_cycle": bool(a.get("external_humidity_cycle")),
+            "humidity_source": a.get("humidity_source"),
+            "humidity_effective": a.get("humidity_effective"),
             "auto_dry":     a.get("auto_dry"),
             "auto_dry_running": bool(a.get("auto_dry_running")),
             "dryer":        a.get("dryer_status") or {},
@@ -1676,10 +1728,16 @@ def _read_update_cfg() -> dict[str, str]:
 async def _run_update_script(args: list[str], timeout: float) -> dict:
     """Exec the bundled multiace_update.sh and capture stdout+rc."""
 
-    # Canonical install location first. The PAXX-baked
-    # /home/lava/multiace/tools/multiace_update.sh comes from the
-    # squashfs and never gets refreshed by online updates, so it
-    # serves only as a last-resort fallback.
+    if MULTIACE_MANAGED:
+        raise HTTPException(
+            status_code=409,
+            detail="multiACE updates are managed by the platform.",
+        )
+
+    # The installed updater is preferred. The legacy
+    # /home/lava/multiace/tools/multiace_update.sh path comes from the
+    # firmware image and is not refreshed by online updates, so it serves
+    # only as a last-resort standalone fallback.
     # The two U1 entries keep their exact order; the home-relative
     # pair is appended for a generic Klipper host and can never reorder them.
     update_script = None
@@ -1808,8 +1866,21 @@ async def preflight_inbox_clear() -> dict:
 async def update_check() -> dict:
     return await _run_update_script(["check"], timeout=30.0)
 
+@app.get("/api/update/status")
+async def update_status() -> dict:
+    return {
+        "managed": MULTIACE_MANAGED,
+        "owner": "platform" if MULTIACE_MANAGED else "multiACE",
+    }
+
 @app.post("/api/update/apply")
 async def update_apply(force: bool = False) -> dict:
+
+    if MULTIACE_MANAGED:
+        raise HTTPException(
+            status_code=409,
+            detail="multiACE updates are managed by the platform.",
+        )
 
     if not _DEBUG_FLAG_PATH.exists():
         raise HTTPException(
@@ -1845,26 +1916,44 @@ async def _sudo_run(argv: list[str], timeout: float = 5.0) -> tuple[int, str]:
 async def debug_mode_get() -> dict:
     return {"enabled": _DEBUG_FLAG_PATH.exists()}
 
-@app.post("/api/debug-mode/enable")
-async def debug_mode_enable() -> dict:
-    rc, out = await _sudo_run(["/usr/bin/touch", str(_DEBUG_FLAG_PATH)])
+async def _set_debug_flag(enable: bool) -> str:
+    """Create or remove /oem/.debug. The service normally runs as root
+    (S98), so the direct file operation is the primary path; sudo with
+    the multiace-debug sudoers rule is the fallback for a service that
+    runs as lava."""
+    try:
+        if enable:
+            _DEBUG_FLAG_PATH.touch()
+        else:
+            _DEBUG_FLAG_PATH.unlink()
+        return "direct"
+    except FileNotFoundError:
+        return "already removed"
+    except PermissionError:
+        pass
+    argv = (["/usr/bin/touch", str(_DEBUG_FLAG_PATH)] if enable
+            else ["/bin/rm", "-f", str(_DEBUG_FLAG_PATH)])
+    rc, out = await _sudo_run(argv)
     if rc != 0:
         raise HTTPException(
             status_code=500,
-            detail=(f"sudo touch /oem/.debug failed (rc={rc}): {out.strip()}. "
-                    "Sudoers drop-in /etc/sudoers.d/multiace-debug may be "
-                    "missing - re-run install_multiace.sh."))
+            detail=(f"{'touch' if enable else 'rm'} /oem/.debug failed: no "
+                    f"write access as this user and sudo failed (rc={rc}): "
+                    f"{out.strip()}. Either run the web service as root "
+                    "(S98 default) or install the sudoers drop-in "
+                    "/etc/sudoers.d/multiace-debug via install_multiace.sh."))
+    return out
+
+@app.post("/api/debug-mode/enable")
+async def debug_mode_enable() -> dict:
+    out = await _set_debug_flag(True)
     return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": out}
 
 @app.post("/api/debug-mode/disable")
 async def debug_mode_disable() -> dict:
     if not _DEBUG_FLAG_PATH.exists():
         return {"enabled": False, "stdout": "already disabled"}
-    rc, out = await _sudo_run(["/bin/rm", "-f", str(_DEBUG_FLAG_PATH)])
-    if rc != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"sudo rm /oem/.debug failed (rc={rc}): {out.strip()}")
+    out = await _set_debug_flag(False)
     return {"enabled": _DEBUG_FLAG_PATH.exists(), "stdout": out}
 
 @app.post("/api/reboot")
@@ -2914,10 +3003,12 @@ async def _sweep_kick_run() -> None:
     except Exception as e:
         _trace.warning("spoolman tag sweep (kick) failed: %s", e)
 
-# --- ACE 2 firmware update (OTA) ---------------------------------------
-# Flash engine: ace2_ota.py (based on hakimio's updater, see its header;
-# DEV-ONLY until his license OK). The PORT comes from Klipper:
-# ACE_FW_RELEASE disconnects the unit and holds every reconnect path,
+# --- ACE firmware update (Config tab) ----------------------------------
+# Flash engines, one per generation: ace2_ota.py for the ACE 2 (based on
+# hakimio's updater, see its header; DEV-ONLY until his license OK) and
+# ace1_flash.py for the Gen 1 ACE Pro (IAP JSON-RPC, see its header).
+# The PORT comes from Klipper in both cases: ACE_FW_RELEASE disconnects
+# the unit and holds every reconnect path (Gen 1 and Gen 2 alike),
 # ACE_FW_RESUME hands it back - so the flasher never fights the running
 # heartbeat for the serial port, and the other three units keep working.
 
@@ -2963,16 +3054,37 @@ async def acefw_upload(file: UploadFile = File(...)) -> dict:
 async def _acefw_run(ace: int, port: str, version: str,
                      password, md5, dry_run: bool, force: bool,
                      patch_to_open: bool = False,
-                     patch_target: str = "") -> None:
+                     patch_target: str = "",
+                     gen1: bool = False) -> None:
     def _prog(pct, msg):
         _acefw["pct"] = pct
         _acefw["msg"] = str(msg)
     try:
         _acefw["state"] = "flashing"
-        # Local import: a missing/broken flasher module must
+        # Local imports: a missing/broken flasher module must
         # break THIS request, never the uvicorn start.
-        import ace2_ota
         upload = str(_ACEFW_DIR / "upload.bin")
+        if gen1:
+            # Gen 1 (ACE Pro) IAP flasher - its own transport, its own
+            # tested-images gate (ace1_flash.check_known). `version` is
+            # the Gen-1 entry id, not a version string: both entries
+            # report 1.3.863, the md5 is what identifies the image.
+            import ace1_flash
+            fw, image_error = None, ""
+            try:
+                fw = await asyncio.to_thread(
+                    ace1_flash.load_image, upload, version, md5)
+            except Exception as e:
+                image_error = str(e)
+                # A real flash cannot proceed without the image; a dry
+                # run can still test the port + version (the file half is
+                # optional there, see flash()).
+                if not dry_run:
+                    raise
+            _acefw["result"] = await asyncio.to_thread(
+                ace1_flash.flash, port, fw, _prog, dry_run, image_error)
+            return
+        import ace2_ota
         fw, image_error = None, ""
         try:
             # patch_to_open: the user uploaded the STOCK V1.1.31 package;
@@ -3023,9 +3135,11 @@ async def _acefw_run(ace: int, port: str, version: str,
 
 @app.post("/api/acefw/flash")
 async def acefw_flash(payload: dict | None = None) -> dict:
-    """Release the port via Klipper, then flash in the background.
-    dry_run runs the identical chain (release, open, version query,
-    firmware parse) without writing anything - the 'Testlauf'."""
+    """Release the port via Klipper, then flash in the background with the
+    engine of the unit's generation (Gen 1 IAP / Gen 2 OTA - routed by the
+    protocol Klipper reports). dry_run runs the identical chain (release,
+    open, version query, firmware parse) without writing anything - the
+    'Testlauf'."""
     p = payload or {}
     if _acefw_running():
         raise HTTPException(409, "a firmware update is already running")
@@ -3035,6 +3149,11 @@ async def acefw_flash(payload: dict | None = None) -> dict:
         raise HTTPException(400, "ace index required")
     dry_run = bool(p.get("dry_run"))
     version = str(p.get("version") or "").strip()
+    # The client's pick, before a patch target may overwrite it below. On
+    # a Gen-1 target the patch stage does not exist, so the rewrite below
+    # is undone from here (a stray patch flag must not change which image
+    # the Gen-1 flasher is told to load).
+    version_req = version
     # Patch-to-Open: the upload is stock V1.1.31 and the backend patches it
     # to ACE2-Open before flashing. The effective TARGET (gate key + announce
     # base) then becomes ace2_ota.PATCH_TARGET regardless of the selected
@@ -3072,18 +3191,29 @@ async def acefw_flash(payload: dict | None = None) -> dict:
     # - a real flash needs it, a dry run does not (it only reads the
     # current version). So it is required only for the actual flash.
     if not version and not dry_run:
-        raise HTTPException(400, "target version required (e.g. 1.1.31)")
-    # Fast reject for an unlisted version BEFORE the port release cycle -
-    # the byte-exact gate (check_known) sits in the flash path itself.
+        raise HTTPException(400, "target version required (a Gen-2 version "
+                                 "or a Gen-1 image id)")
+    # Fast reject for an unlisted target BEFORE the port release cycle -
+    # the byte-exact gate (check_known) sits in the matching flash path
+    # itself. A target may be a Gen-2 version string or a Gen-1 image id;
+    # whichever list knows it lets the request through, and the flasher
+    # picked below still has to accept the bytes.
     if version and not dry_run:
         try:
             import ace2_ota
-            _known = ace2_ota.KNOWN_FIRMWARE.get(version.lstrip("Vv"))
+            _known = ace2_ota.KNOWN_FIRMWARE.get(
+                version.lstrip("Vv")) is not None
         except Exception:
             _known = True    # module trouble -> the in-flash gate decides
-        if _known is None:
+        if not _known:
+            try:
+                import ace1_flash
+                _known = version in ace1_flash.KNOWN_FIRMWARE
+            except Exception:
+                _known = True
+        if not _known:
             raise HTTPException(
-                400, f"version {version} is not on the tested-versions list")
+                400, f"version {version} is not on the tested list")
     if not (_ACEFW_DIR / "upload.bin").exists():
         raise HTTPException(400, "no firmware file uploaded")
     state = _parse_state(await _query_state_gated())
@@ -3094,6 +3224,20 @@ async def acefw_flash(payload: dict | None = None) -> dict:
     port = str(entry.get("serial_path") or "").strip()
     if not port:
         raise HTTPException(400, "ACE reports no serial path")
+    # Which generation owns this unit? The web sends the same payload for
+    # both; the routing is by the protocol Klipper detected, never by a
+    # client flag - a V1 image can never be fed to the ACE 2 engine.
+    gen1 = str(entry.get("protocol") or "").lower() == "v1"
+    if gen1 and patch_to_open:
+        # The ACE2-Open patcher is a Gen-2 stage on a Gen-2 stock image;
+        # ignore the flag on a Gen-1 target instead of feeding the
+        # patcher a Gen-1 image (which it would only reject). The patch
+        # rewrite above may also have replaced the picked version - put
+        # the client's own pick back before the Gen-1 flasher sees it.
+        patch_to_open, _target = False, ""
+        version = version_req
+        if not version and not dry_run:
+            raise HTTPException(400, "a Gen-1 image id is required")
     _acefw.update({"state": "releasing", "ace": ace, "pct": None,
                    "msg": "releasing serial port", "error": "",
                    "result": None})
@@ -3120,7 +3264,7 @@ async def acefw_flash(payload: dict | None = None) -> dict:
     asyncio.create_task(_acefw_run(
         ace, port, version, p.get("password") or None,
         p.get("md5") or None, dry_run, bool(p.get("force")),
-        patch_to_open, _target))
+        patch_to_open, _target, gen1))
     return {"ok": True}
 
 
@@ -3131,15 +3275,21 @@ async def acefw_status() -> dict:
 
 @app.get("/api/acefw/versions")
 async def acefw_versions() -> dict:
-    """The tested-versions allowlist -
-    the UI's version dropdown offers exactly these; the byte gate sits in
-    ace2_ota.flash via check_known. The ACE2-Open build is NOT offered as
-    a direct target: it is reached by uploading stock 1.1.31 and ticking
-    'patch to ACE2-Open'. Its KNOWN_FIRMWARE entry stays - it is the
-    byte-exact gate for the patched image."""
+    """The tested-image allowlists, one per generation.
+    'versions' is the Gen-2 list - the UI's version dropdown offers exactly
+    these; the byte gate sits in ace2_ota.flash via check_known. The
+    ACE2-Open build is NOT offered as a direct target: it is reached by
+    uploading stock 1.1.31 and ticking 'patch to ACE2-Open'. Its
+    KNOWN_FIRMWARE entry stays - it is the byte-exact gate for the
+    patched image.
+    'gen1_versions' is the Gen-1 (ACE Pro) list - images, not versions:
+    the Gen-1 flasher announces 1.3.863 for every entry, so the entry id
+    selects the image and the md5 is the gate (ace1_flash.check_known).
+    'file' is the release asset name - the Gen-1 equivalent of the .swu
+    hint next to the Gen-2 versions."""
     try:
         import ace2_ota
-        return {"versions": [
+        out = {"versions": [
             {"version": v, "size": e.get("size"),
              "crc": "0x%04X" % e["crc"], "source": e.get("source", ""),
              # The googleable package name - shown in brackets behind the
@@ -3167,7 +3317,21 @@ async def acefw_versions() -> dict:
                 if ace2_ota.KNOWN_FIRMWARE.get(v)]
                 if hasattr(ace2_ota, "apply_open_patch") else [])}
     except Exception as e:
-        return {"versions": [], "error": str(e)}
+        out = {"versions": [], "error": str(e)}
+    try:
+        import ace1_flash
+        out["gen1_versions"] = [
+            {"id": k, "version": e.get("version", ""),
+             "label": e.get("label", ""), "file": e.get("file", ""),
+             "size": e.get("size"), "crc": "0x%04X" % e["crc"],
+             "md5": e.get("md5", ""), "source": e.get("source", ""),
+             "tested": e.get("tested", "")}
+            for k, e in ace1_flash.KNOWN_FIRMWARE.items()]
+    except Exception as e:
+        # A broken Gen-1 module must not take the Gen-2 list down with it.
+        out["gen1_versions"] = []
+        out["gen1_error"] = str(e)
+    return out
 
 # What this process last knew Spoolman's PA field to hold, per smid - the
 # piggyback push's change gate. RAM only: after a backend restart the first
@@ -4668,7 +4832,7 @@ async def test_notification(payload: dict | None = None) -> dict:
         curl -X POST http://127.0.0.1:7126/api/notifications/test
     """
     msg = (payload or {}).get("msg") if payload else None
-    text = "!! " + (msg or "Test notification from /api/notifications/test")
+    text = "!! [multiACE] " + (msg or "Test notification from /api/notifications/test")
     rec = _record_notification(text)
     return {"ok": rec is not None, "notification": rec}
 
@@ -4925,29 +5089,36 @@ def _load_filament_db() -> dict:
                     flat = node.value
         if not isinstance(cfg, ast.Dict):
             # 1.6.0 flattened the DB into five per-nozzle literals with
-            # '{vendor}_{material}_{sub}_{param}' keys (vendor is always
-            # 'generic' in the shipped literals; material names carry
-            # dashes, never underscores). Rebuild the type -> vendor ->
-            # subtypes hierarchy from the '_load_temp' keys of the 04
-            # literal - the broadest one, the 02 table omits the
-            # forbidden-on-0.2 materials.
+            # '{vendor}_{material}_{sub}_{param}' keys. Rebuild the
+            # type -> vendor -> subtypes hierarchy from the 04 literal
+            # (the broadest one). Materials come from the 'generic_' rows
+            # only, which also drops the meta keys ('hard filaments max',
+            # 'process print slow'); vendor rows (Snapmaker, Polymaker)
+            # carry print_temp/flow keys but no load_temp, so every key is
+            # taken, not only '_load_temp'.
             if isinstance(flat, ast.Dict):
+                keys = [k.value for k in flat.keys
+                        if isinstance(k, ast.Constant)
+                        and isinstance(k.value, str)]
+                mats: list = []
+                for kv in keys:
+                    tok = kv.split("_")
+                    if len(tok) >= 4 and tok[0] == "generic" and tok[1] \
+                            and tok[1] not in mats:
+                        mats.append(tok[1])
                 db2: dict = {}
-                for k in flat.keys:
-                    if not (isinstance(k, ast.Constant)
-                            and isinstance(k.value, str)
-                            and k.value.endswith("_load_temp")):
+                for kv in keys:
+                    tok = kv.split("_")
+                    if len(tok) < 4 or tok[1] not in mats:
                         continue
-                    body = k.value[:-len("_load_temp")]
-                    if not body.startswith("generic_"):
-                        continue          # user-added vendor rows: skip here
-                    rest = body[len("generic_"):]
-                    mat, _, sub = rest.partition("_")
-                    if not mat:
+                    vendor, mat, sub = tok[0], tok[1], tok[2]
+                    if not vendor or not sub:
                         continue
+                    vendor = "Generic" if vendor == "generic" else vendor
                     vendors = db2.setdefault(mat, {"Generic": []})
-                    if sub and sub != "generic"                             and sub not in vendors["Generic"]:
-                        vendors["Generic"].append(sub)
+                    subs = vendors.setdefault(vendor, [])
+                    if sub != "generic" and sub not in subs:
+                        subs.append(sub)
                 if db2:
                     _FIL_DB_CACHE[path] = (mtime, db2)
                     return db2

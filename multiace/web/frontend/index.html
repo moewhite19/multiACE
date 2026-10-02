@@ -333,6 +333,8 @@
                      actionable. -->
                 <span class="ace-proto" v-if="ace.protocol"
                       :title="aceProtoTitle(ace)">({{ ace.protocol.toUpperCase() }})</span>
+                <span class="ace-cfw" v-if="ace.community_fw"
+                      :title="aceCfwTitle(ace)">CFW</span>
                 <small v-if="ace.idx === state.active_device">{{ t('ui.common.active') }}</small>
               </span>
               <span class="ace-status">
@@ -628,8 +630,8 @@
                 <span>{{ t('ui.dashboard.head_ace') }}</span>
                 <select :value="headAceOf(t_.idx)"
                         :disabled="t_.head_source_known || t_.filament_at_extruder"
-                        @change="setHeadAce(t_.idx, $event.target.value)">
-                  <option v-for="o in aceOptionsForHead(t_.idx)" :key="o.value" :value="o.value">{{ o.label }}</option>
+                        @change="headSelect($event, headAceOf(t_.idx), v => setHeadAce(t_.idx, v))">
+                  <option v-for="o in aceOptionsForHead(t_.idx)" :key="o.value" :value="o.value" :disabled="o.disabled">{{ o.label }}</option>
                 </select>
               </label>
               <label class="th-manual th-bg" v-if="state.bg_swap?.available"
@@ -1920,7 +1922,10 @@
       <p v-else class="muted small">{{ t('ui.config.tipform_unsupported') }}</p>
       <h3>{{ t('ui.config.update_title') }}</h3>
       <p class="muted small">{{ t('ui.config.update_intro') }}</p>
-      <div class="update-card">
+      <p v-if="updateState.managed" class="muted small">
+        {{ t('ui.config.update_managed') }}
+      </p>
+      <div class="update-card" v-else>
         <div class="update-row debug-row"
              :class="debugState.enabled ? 'debug-on' : 'debug-off'">
           <span>
@@ -1973,7 +1978,9 @@ reboot</pre>
            without writing a byte. -->
       <div class="update-card acefw-card" v-if="acefwCandidates.length">
         <h4>{{ t('ui.config.acefw_title') }}</h4>
-        <p class="muted small">{{ t('ui.config.acefw_intro') }}</p>
+        <p class="muted small">{{ acefwIsV1
+          ? t('ui.config.acefw_gen1_intro')
+          : t('ui.config.acefw_intro') }}</p>
         <div class="config-form">
           <div class="config-row">
             <label>{{ t('ui.config.acefw_ace') }}</label>
@@ -1993,18 +2000,22 @@ reboot</pre>
                      @change="acefwUpload($event.target.files)">
             </span>
           </div>
-          <!-- Only TESTED versions are offered (allowlist) - the byte gate in the backend
-               refuses anything that does not extract to the exact tested
-               image. Releasing a new version = dry run with the new
-               package, read size/CRC/MD5 off the result, add the entry
-               to KNOWN_FIRMWARE in ace2_ota.py. -->
+          <!-- Only TESTED images are offered (one allowlist per generation)
+               - the byte gate in the matching backend (ace2_ota.py for the
+               ACE 2, ace1_flash.py for the Gen 1) refuses anything that
+               does not match the exact tested bytes. Releasing a new
+               version = dry run with the new package, read size/CRC/MD5
+               off the result, add the entry to the matching
+               KNOWN_FIRMWARE. -->
           <div class="config-row">
             <label>{{ t('ui.config.acefw_version_label') }}</label>
             <select v-model="acefw.version" class="acefw-version">
               <option value="" disabled>{{ t('ui.common.select') }}</option>
-              <option v-for="v in acefwVersions" :key="'fwv'+v.version"
-                      :value="v.version">{{ v.version
-                      }}{{ v.swu ? ' (' + v.swu + ')' : '' }}</option>
+              <option v-for="v in acefwVersionOptions"
+                      :key="'fwv'+(v.id || v.version)"
+                      :value="v.id || v.version">{{ v.label || v.version
+                      }}{{ v.swu ? ' (' + v.swu + ')' : ''
+                      }}{{ v.file ? ' (' + v.file + ')' : '' }}</option>
             </select>
           </div>
           <!-- Patch stock 1.1.31 -> ACE2-Open (Simon-CR UID passthrough):
@@ -2023,21 +2034,26 @@ reboot</pre>
           </div>
           <p v-if="acefwCanPatch && acefw.patchToOpen"
              class="muted small acefw-danger">{{ t('ui.config.acefw_patch_warn2') }}</p>
-          <div class="config-row">
+          <!-- Gen 1 has no .swu packaging: raw .bin only, so the password
+               field is a Gen-2 thing. -->
+          <div class="config-row" v-if="!acefwIsV1">
             <label>{{ t('ui.config.acefw_pw_label') }}</label>
             <input v-model="acefw.password" class="acefw-pw"
                    :placeholder="t('ui.config.acefw_pw_ph')">
           </div>
           <!-- Force = re-flash although the unit already reports the
                target version (test/repair). Only the same-version skip is
-               bypassed - the allowlist byte gate always applies. -->
-          <div class="config-row">
+               bypassed - the allowlist byte gate always applies. Gen 1 has
+               no same-version skip at all (a version string does not
+               identify a Gen-1 image), so the field is Gen-2 only. -->
+          <div class="config-row" v-if="!acefwIsV1">
             <label>{{ t('ui.config.acefw_force') }}</label>
             <label class="acefw-force-row">
               <input type="checkbox" v-model="acefw.force">
               <span class="muted small">{{ t('ui.config.acefw_force_hint') }}</span>
             </label>
           </div>
+          <p v-if="acefwIsV1" class="muted small">{{ t('ui.config.acefw_gen1_note') }}</p>
         </div>
         <div class="acefw-actions">
           <button :disabled="!acefwCanTest()" @click="acefwTest()">{{

@@ -1,5 +1,13 @@
 #!/bin/bash
 set -e
+
+if [ "${MULTIACE_MANAGED:-0}" = "1" ] || \
+   [ "${MULTIACE_MANAGED:-}" = "true" ] || \
+   [ -e "${MULTIACE_MANAGED_MARKER:-${MULTIACE_CONFIG_DIR:-/home/lava/printer_data/config}/extended/multiace/.multiace-managed}" ]; then
+    echo "multiACE is managed by the platform; use its integration instead of install_multiace.sh" >&2
+    exit 2
+fi
+
 INSTALL_WEB=0
 KEEP_CONFIG=0
 for arg in "$@"; do

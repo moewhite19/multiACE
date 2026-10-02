@@ -16,7 +16,7 @@ from .ace_protocol_v2 import AceProtocolV2
 
 KNOWN_PROTOCOLS = (AceProtocolV1, AceProtocolV2)
 
-MULTIACE_VERSION = "1.10b"
+MULTIACE_VERSION = "1.11b"
 
 # Engine API contract version (see docs/ENGINE_API.md). Distinct from
 # MULTIACE_VERSION (the product version): this only bumps on a breaking
@@ -24,8 +24,22 @@ MULTIACE_VERSION = "1.10b"
 # external host can detect engine capability. Additive changes do not bump it.
 ACE_API_VERSION = 1
 
-MULTIACE_BUILD_TAG = "a5fd3df1"
-MULTIACE_BUNDLE_SHA1 = "6013fe1"
+MULTIACE_BUILD_TAG = "eed86c9b"
+MULTIACE_BUNDLE_SHA1 = "40a00eb"
+
+
+def _env_flag(name):
+    return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+_MULTIACE_CONFIG_DIR = os.environ.get(
+    'MULTIACE_CONFIG_DIR', '/home/lava/printer_data/config')
+MULTIACE_MANAGED_MARKER = os.environ.get(
+    'MULTIACE_MANAGED_MARKER', '').strip() or os.path.join(
+        _MULTIACE_CONFIG_DIR, 'extended', 'multiace', '.multiace-managed')
+MULTIACE_MANAGED = (
+    _env_flag('MULTIACE_MANAGED')
+    or os.path.exists(MULTIACE_MANAGED_MARKER))
 
 def _load_i18n_catalog(i18n_dir, lang):
     """Read <i18n_dir>/<lang>.json overlaid on en.json. Returns a dict
@@ -434,6 +448,25 @@ AUTO_DRY_SOFT_START_TEMP = 50
 AUTO_DRY_SOFT_STEP = 5
 AUTO_DRY_SOFT_STEP_SECONDS = 300.
 
+# External humidity (ACE_SET_HUMIDITY): a reading pushed over gcode by a
+# sensor stack outside the ACE (BLE feeder, Home Assistant, MQTT bridge), so
+# even an ACE Pro - which has no sensor of its own - can drive its cycle.
+# Kept OUT of _info_per_ace: the 1 Hz heartbeat rebuilds that dict and would
+# wipe the value within a second. Per unit and with a TTL; a reading older
+# than its TTL counts as absent everywhere, and a dry cycle that was STARTED
+# from one is stopped when it expires (never keep heating on a value nobody
+# is refreshing). TTL is clamped to the range below: MIN is one control tick
+# (AUTO_DRY_INTERVAL), MAX keeps a forgotten feeder from authorising hours
+# of drying on a stale value.
+EXTERNAL_RH_DEFAULT_TTL = 900.0
+EXTERNAL_RH_MIN_TTL = 60.0
+EXTERNAL_RH_MAX_TTL = 7200.0
+# Plausible sensor temperature range (informational - nothing regulates on
+# it). The dryer box can reach the unit's own dryer ceiling; a reading far
+# outside that is a broken sensor, not a temperature.
+EXTERNAL_RH_TEMP_MIN = 0.0
+EXTERNAL_RH_TEMP_MAX = 100.0
+
 SPOOL_SAMPLE_INTERVAL = 1.0
 SPOOL_FLUSH_INTERVAL = 60.0          # disk writes: see _spool_sample_tick
 # Euclidean RGB distance above which a tag colour and its table entry are
@@ -593,6 +626,62 @@ def _wt_fmt_heads(v):
         return str(v)
 
 
+def _resolve_multiace_paths(config):
+    host_type = config.get('host', 'u1').strip().lower()
+    if host_type not in ('u1', 'generic'):
+        host_type = 'u1'
+    printer = config.get_printer()
+    printer_args = {}
+    if hasattr(printer, 'get_start_args'):
+        try:
+            printer_args = printer.get_start_args() or {}
+        except Exception:
+            printer_args = {}
+    elif hasattr(printer, 'get_args'):
+        try:
+            printer_args = printer.get_args() or {}
+        except Exception:
+            printer_args = {}
+    cfg_file = printer_args.get('config_file', '')
+    env_cfg = os.environ.get('MULTIACE_CONFIG_DIR', '')
+    env_data = os.environ.get('MULTIACE_PRINTER_DATA', '')
+
+    if env_cfg and os.path.isdir(env_cfg):
+        config_dir = os.path.abspath(env_cfg)
+        printer_data = env_data if (env_data and os.path.isdir(env_data)) else os.path.dirname(config_dir)
+    elif cfg_file and os.path.isfile(cfg_file):
+        config_dir = os.path.dirname(os.path.abspath(cfg_file))
+        printer_data = os.path.dirname(config_dir)
+    elif host_type == 'u1' and os.path.isdir('/home/lava/printer_data/config'):
+        config_dir = '/home/lava/printer_data/config'
+        printer_data = '/home/lava/printer_data'
+    else:
+        home = os.path.expanduser('~')
+        config_dir = os.path.join(home, 'printer_data', 'config')
+        printer_data = os.path.join(home, 'printer_data')
+
+    log_dir = os.path.join(printer_data, 'logs')
+    extended_dir = os.path.join(config_dir, 'extended')
+    multiace_cfg_dir = os.path.join(extended_dir, 'multiace')
+
+    for d in (log_dir, extended_dir, multiace_cfg_dir, os.path.join(config_dir, 'persistent')):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+
+    return {
+        'host_type': host_type,
+        'printer_data': printer_data,
+        'config_dir': config_dir,
+        'log_dir': log_dir,
+        'ace_cfg': os.path.join(extended_dir, 'ace.cfg'),
+        'slot_overrides': os.path.join(multiace_cfg_dir, 'slot_overrides.json'),
+        'i18n_primary': os.path.join(multiace_cfg_dir, 'i18n'),
+        'spool_db': os.path.join(config_dir, 'persistent', 'multiace_spools.json'),
+    }
+
+
 class MultiAce:
     # Canonical [ace] config file - the write-through target. Mirrors the
     # web backend's MULTIACE_CFG_PATH
@@ -619,6 +708,13 @@ class MultiAce:
         self.send_time = None
         self.ace_dev_fd = None
         self.heartbeat_timer = None
+
+        self.paths = _resolve_multiace_paths(config)
+        self.host = self.paths['host_type']
+        self._managed_by_host = MULTIACE_MANAGED
+        # Derived from the shared config-directory contract so Klipper and
+        # the web UI always write through to the same ace.cfg.
+        self.ACE_CFG_PATH = self.paths['ace_cfg']
 
         self.gate_status = [GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN, GATE_UNKNOWN]
         if self._name.startswith('ace '):
@@ -669,6 +765,9 @@ class MultiAce:
         self.retract_length = config.getint('retract_length', 100)
 
         self.feed_length = config.getint('feed_length', 0)
+        self.calibration_sensor = config.get('calibration_sensor', None)
+        if self.calibration_sensor:
+            self.calibration_sensor = self.calibration_sensor.strip()
 
         self.load_length = config.getint('load_length', 2000)         
         self.load_retry = config.getint('load_retry', 3)              
@@ -979,6 +1078,16 @@ class MultiAce:
         # Config tab): a user choice lives in the config line.
         self.tag_write_uid_sku = config.getboolean('tag_write_uid_sku', True)
         self._tag_write_uid_sku_cfg = self.tag_write_uid_sku
+        # Gen-1 (ACE Pro) tag tunnel (ace_gen1_tunnel.py): when ON, a slot
+        # the firmware could not identify gets ONE opportunistic page read
+        # through the community firmware's RC522 tunnel, so a third-party
+        # spool surfaces with its card UID (and, for an OpenSpool tag, its
+        # material/colour). OFF by default: on a unit without the tunnel
+        # the option only produces one log line, and ACE_TAG_READ is the
+        # explicit probe either way. Read unconditionally (config-halt
+        # trap); write-through to the gen1_tag_tunnel line.
+        self.gen1_tag_tunnel = config.getboolean('gen1_tag_tunnel', False)
+        self._gen1_tag_tunnel_cfg = self.gen1_tag_tunnel
 
         # Auto-dry: humidity-controlled drying. Only an ACE 2 can drive it -
         # it is the only one reporting a humidity reading (cmd 6 field 4); an
@@ -1063,6 +1172,17 @@ class MultiAce:
         # _v1_tag_bind_from_status); empty at start on purpose, so the
         # first status after boot binds every occupied slot once.
         self._v1_tag_seen = {}
+        self._native_name_seen = {}
+        # Gen-1 tag tunnel (ace_gen1_tunnel.py): the per-unit client cache,
+        # the per-slot tunnel reads ({idx: {slot: {...}}}, own store - never
+        # _info_per_ace; the 1 Hz heartbeat rebuilds that dict) and the
+        # one-session-per-unit busy set. Cleared with the device-coupled
+        # read cache on disconnect (_drop_device_tag_reads) and per slot
+        # when that slot turns empty (_gen1_tunnel_status_tick).
+        self._gen1_tunnel_clients = {}
+        self._gen1_tunnel_reads = {}
+        self._gen1_tunnel_tried = {}
+        self._gen1_tunnel_busy = set()
         # Per-connection tag-rescan marker: set in _open_ace (boot AND
         # reconnect share that path), consumed by the first status merge
         # (_merge_v2_filament_info -> _v2_rfid_boot_rescan). V2 only -
@@ -1081,6 +1201,16 @@ class MultiAce:
         # backstop with no stop path left.
         self._auto_dry_follow_until = {}
         self._auto_dry_seen = {}
+        # Pushed external humidity (ACE_SET_HUMIDITY): idx -> {'rh', 'temp',
+        # 'ts', 'ttl'}. Monotonic ts, and the store deliberately dies with
+        # the process - a reading that outlived a Klipper restart has no age
+        # we could trust. The set remembers which of OUR cycles were started
+        # from such a reading; a feeder stops refreshing when something is
+        # wrong, and the cycle must not outlive the reading (persisted, so
+        # the first tick after a restart can stop a still-running cycle
+        # instead of letting it burn the device backstop).
+        self._external_rh = {}
+        self._external_rh_cycle = set()
         if self.save_variables:
             _sv = self.save_variables.allVariables.get('ace__auto_dry_running',
                                                        None)
@@ -1094,6 +1224,10 @@ class MultiAce:
                         int(k): float(v) for k, v in _sv.items()}
                 except (TypeError, ValueError):
                     self._auto_dry_follow_until = {}
+            _sv = self.save_variables.allVariables.get(
+                'ace__auto_dry_external', None)
+            if isinstance(_sv, (list, tuple)):
+                self._external_rh_cycle = set(int(i) for i in _sv)
 
         # Spoolman. The printer holds the SETTING (url + auto-sync), the web
         # backend does the actual HTTP - Klipper must never block on a network
@@ -1188,8 +1322,8 @@ class MultiAce:
         self._info_per_ace = {}
 
         self._slot_overrides = {}
-        self._slot_overrides_file = (
-            "/home/lava/printer_data/config/extended/multiace/slot_overrides.json")
+        self._slot_overrides_file = config.get(
+            'slot_overrides_file', self.paths['slot_overrides'])
         self._slot_overrides_mtime = 0.0
 
         self._orig_set_ptc = None
@@ -1219,6 +1353,7 @@ class MultiAce:
         self._thread_stop_flags = {}
         self._cb_locks = {}
         self._seq_lock = threading.Lock()
+        self._last_rx_ts = {}
         self._gate_status_per_ace = {}
 
         self._v2_filament_info_per_ace = {}
@@ -1260,8 +1395,10 @@ class MultiAce:
         self._enable_web = config.getboolean('enable_web', True)
         self._web_port = config.getint(
             'web_port', 7126, minval=1024, maxval=65535)
-        self._web_dir = config.get(
-            'web_dir', '/home/lava/multiace_web')
+        _default_web = os.path.join(self.paths['printer_data'], '..', 'multiace_web')
+        if not os.path.isdir(_default_web) and os.path.isdir('/home/lava/multiace_web'):
+            _default_web = '/home/lava/multiace_web'
+        self._web_dir = config.get('web_dir', _default_web)
 
         # Language: prefer the persisted ace__language (same store the web
         # language switcher writes via MULTIACE_SET_LANGUAGE), fall back to the
@@ -1313,8 +1450,12 @@ class MultiAce:
         self._inbox_max_mb = config.getint(
             'inbox_max_mb', 256, minval=1, maxval=4096)
 
-        self._i18n_primary = '/home/lava/printer_data/config/extended/multiace/i18n'
-        self._i18n_fallback = os.path.join(self._web_dir, 'i18n')
+        self._i18n_primary = config.get('i18n_dir', self.paths['i18n_primary'])
+        self._i18n_fallbacks = []
+        app_dir = os.environ.get('MULTIACE_APP_DIR', '').strip()
+        if app_dir:
+            self._i18n_fallbacks.append(os.path.join(app_dir, 'i18n'))
+        self._i18n_fallbacks.append(os.path.join(self._web_dir, 'i18n'))
         self._reload_i18n_catalog()
 
         self._head_source = {0: None, 1: None, 2: None, 3: None}
@@ -1486,7 +1627,6 @@ class MultiAce:
         # pushes the remainder at the discard position), cleared on a
         # verified unload.
         self._bg_prime_deficit = {}
-        self._hotplug_gone = {}
 
         self._serial_failed = False
         self._serial_failed_at = 0.0
@@ -1503,7 +1643,7 @@ class MultiAce:
         # arm, wholesale in _on_print_start.
         self._fa_failed_notified = {}
 
-        log_dir = config.get('log_dir', '/home/lava/printer_data/logs')
+        log_dir = config.get('log_dir', self.paths['log_dir'])
         self._usb_log = _setup_file_logger(
             'multiace_usb', os.path.join(log_dir, 'multiace_usb.log'))
         self._state_log = _setup_file_logger(
@@ -1522,9 +1662,7 @@ class MultiAce:
         # everything on every change, shared with all other vars. Klipper
         # is the SINGLE writer - the web edits through gcode commands, never
         # by writing this file (avoids lost updates).
-        self.spool_db_path = config.get(
-            'spool_db', '/home/lava/printer_data/config/persistent/'
-                        'multiace_spools.json')
+        self.spool_db_path = config.get('spool_db', self.paths['spool_db'])
         self._spools = {}          # id(str) -> spool dict
         self._spool_binding = {}   # 'ace_slot' -> id
         self._spool_next_id = 1
@@ -1945,7 +2083,12 @@ class MultiAce:
         self.gcode.register_command(
             'ACE_SET_AUTO_DRY',
             self.cmd_ACE_SET_AUTO_DRY,
-            desc='[multiACE] Humidity-controlled drying per ACE 2, live + persist')
+            desc='[multiACE] Humidity-controlled drying per ACE (own sensor '
+                 'or external ACE_SET_HUMIDITY), live + persist')
+        self.gcode.register_command(
+            'ACE_SET_HUMIDITY',
+            self.cmd_ACE_SET_HUMIDITY,
+            desc=self.cmd_ACE_SET_HUMIDITY_help)
         self.gcode.register_command(
             'ACE_PA_CALIBRATE',
             self.cmd_ACE_PA_CALIBRATE,
@@ -1999,6 +2142,9 @@ class MultiAce:
         self.gcode.register_command(
             'ACE_TAG_WRITE', self.cmd_ACE_TAG_WRITE,
             desc=self.cmd_ACE_TAG_WRITE_help)
+        self.gcode.register_command(
+            'ACE_SET_TAG_TUNNEL', self.cmd_ACE_SET_TAG_TUNNEL,
+            desc=self.cmd_ACE_SET_TAG_TUNNEL_help)
 
         self.gcode.register_command(
             'ACE_RAW_PROBE',
@@ -2226,8 +2372,9 @@ class MultiAce:
     def _reload_i18n_catalog(self):
         """(Re)load self._i18n for the current self._language. Used at startup
         and live by MULTIACE_SET_LANGUAGE."""
-        i18n_dir = self._i18n_primary if os.path.isdir(self._i18n_primary) \
-            else self._i18n_fallback
+        candidates = [self._i18n_primary] + self._i18n_fallbacks
+        i18n_dir = next((path for path in candidates if os.path.isdir(path)),
+                        self._i18n_primary)
         try:
             self._i18n = _load_i18n_catalog(i18n_dir, self._language)
         except Exception as e:
@@ -3040,7 +3187,7 @@ class MultiAce:
                     self._usb_log.info(
                         'RETRY [startup_connect] idx=%d attempt=%d/%d failed, retrying in 1s',
                         idx, attempt + 1, CONNECT_ATTEMPTS)
-                    time.sleep(1.0)
+                    self.reactor.pause(self.reactor.monotonic() + 1.0)
             if not ok:
                 self.log_error(self._t('msg.open_ace_failed_attempts',
                     ace=self._disp(idx), attempts=CONNECT_ATTEMPTS))
@@ -3049,46 +3196,6 @@ class MultiAce:
             self.log_error(self._t('msg.not_all_aces_opened'))
 
         self._set_active_idx(self._active_device_index)
-
-    def _hotplug_monitor(self, eventtime):
-
-        if self._auto_feed_enabled or self._swap_in_progress:
-            return eventtime + 2.0
-
-        try:
-            current = set(self._scan_ace_devices('hotplug'))
-            known = set(self._ace_devices)
-            now = self.reactor.monotonic()
-
-            for dev in known - current:
-                if dev not in self._hotplug_gone:
-                    self._hotplug_gone[dev] = now
-
-            for dev in list(self._hotplug_gone.keys()):
-                if dev in current:
-                    gone_time = now - self._hotplug_gone[dev]
-                    del self._hotplug_gone[dev]
-                    if gone_time >= 5.0:
-
-                        fresh_devices = sorted(current)
-                        if dev in fresh_devices:
-                            new_index = fresh_devices.index(dev)
-                            self.log_always(self._t('msg.ace_returned_switching',
-                                ace=self._disp(new_index), seconds=gone_time))
-                            self.reactor.register_async_callback(
-                                lambda et, idx=new_index: self.gcode.run_script_from_command(
-                                    'ACE_SWITCH TARGET=%d' % idx))
-                            return eventtime + 10.0  
-
-            for dev, gone_since in list(self._hotplug_gone.items()):
-                gone_time = now - gone_since
-                if gone_time >= 5.0 and gone_time < 7.0:
-                    self.log_always(self._t('msg.ace_removed_reenable'))
-
-        except Exception as e:
-            logging.info('[multiACE] Hotplug monitor error: %s' % str(e))
-
-        return eventtime + 2.0
 
     def _handle_disconnect(self):
         logging.info('[multiACE] Closing all ACE connections')
@@ -3299,19 +3406,39 @@ class MultiAce:
         return None
 
     def _is_open_fw_idx(self, idx):
-        """True when this ACE runs the ACE2-Open firmware (Simon-CR): the
-        runtime firmware string ends in the LETTER 'O' (V1.1.3O) - stock
-        versions are purely numeric (V1.1.31, V1.3.856). Flashed units
-        announce the O string at connect, so per-ACE auto-detection works
-        and a mixed O/stock fleet needs no per-ACE config. The insert
-        abort+read runs ONLY on O units - aborting the
-        stock firmware's procedure would throw away its Anycubic read and
-        give nothing back."""
+        """True when this ACE has the RC522 tag tunnel, i.e. runs the
+        ACE2-Open firmware (Simon-CR): the runtime firmware string ends in
+        the LETTER 'O' (V1.1.60O). This is a capability test, not a
+        "community firmware" flag: the Gen 1 community firmware for the
+        ACE Pro reports a leading C (CV1.3.863) and is deliberately NOT
+        matched, since it has no tunnel and every consumer of this test is
+        ACE 2 only anyway. Flashed units announce the string at connect, so
+        a mixed fleet needs no per-ACE config. The insert abort+read runs
+        ONLY on tunnel units - aborting a stock procedure would throw away
+        its own Anycubic read and give nothing back."""
         try:
             fw = (self._ace_models.get(idx) or ('', ''))[1]
         except Exception:
             return False
         return bool(fw) and fw.strip().upper().endswith('O')
+
+    def _community_fw_kind(self, idx):
+        """Which community firmware this ACE announces, for display only:
+        'ace2_open' (trailing O, ACE 2, has the tag tunnel), 'gen1_cfw'
+        (leading C, ACE Pro Gen 1 build that parses third-party tags
+        itself), '' for stock or unknown. Nothing gates on this; the
+        tunnel gate is _is_open_fw_idx."""
+        try:
+            fw = ((self._ace_models.get(idx) or ('', ''))[1] or '').strip().upper()
+        except Exception:
+            return ''
+        if not fw:
+            return ''
+        if fw.endswith('O'):
+            return 'ace2_open'
+        if fw.startswith('CV'):
+            return 'gen1_cfw'
+        return ''
 
     def _any_open_fw(self):
         """True when at least one ACE runs the ACE2-Open firmware."""
@@ -4147,9 +4274,25 @@ class MultiAce:
             logging.info('[multiACE] gcode load-sniff failed: %s' % e)
             return False
 
+    def _head_filament_present(self, sensor, head=None):
+        """Filament presence at a toolhead sensor for head_source bookkeeping.
+        The raw presence pin is the primary signal (it needs no extruder
+        motion, so it cannot latch a stale 'gone'); the motion helper is the
+        fallback when the pin is unreadable or unload_gpio is off."""
+        motion = bool(sensor.get_status(0)['filament_detected'])
+        if getattr(self, 'unload_gpio', True):
+            pin = getattr(sensor, 'runout_buttun_state', None)
+            if pin is not None:
+                if bool(pin) != motion and head is not None:
+                    logging.info('[multiACE] head %d presence: pin=%s motion=%s '
+                                 '- pin decides' % (head, bool(pin), motion))
+                return bool(pin)
+        return motion
+
     def _on_print_start(self, *args):
-        # Sniffed per print (print_stats:start does not fire on resume, so the
-        # flag holds across pause/resume within the print).
+        # Sniffed per print. print_stats:start fires on start AND on resume
+        # (note_start runs in the virtual_sdcard work handler), so the flag
+        # is refreshed on every resume as well.
         self._print_has_gcode_loads = self._sniff_print_gcode_loads()
         logging.info('[multiACE] print gcode carries multiACE loads: %s'
                      % self._print_has_gcode_loads)
@@ -4165,7 +4308,7 @@ class MultiAce:
                     'filament_motion_sensor e%d_filament' % head, None)
                 if sensor is None:
                     continue
-                detected = sensor.get_status(0)['filament_detected']
+                detected = self._head_filament_present(sensor, head)
                 src = self._head_source.get(head)
                 if detected and src is None:
                     if not self.head_uses_ace(head):
@@ -5184,10 +5327,12 @@ class MultiAce:
         return protocol.make_default_info()
 
     def _next_request_id_for(self, idx):
-
+        # The V2 frame carries the sequence in 16 bits and the reader looks
+        # the callback up by the id stored here, so the counter must never
+        # exceed 65535 or every later V2 response misses its callback.
         with self._seq_lock:
             rid = self._request_ids.get(idx, 0) + 1
-            if rid >= 300000:
+            if rid > 65535:
                 rid = 1
             self._request_ids[idx] = rid
             return rid
@@ -5429,6 +5574,7 @@ class MultiAce:
             self._serials[idx] = ser
             self._connected_per_ace[idx] = True
             self._serial_failed_per_ace[idx] = False
+            self._last_rx_ts[idx] = time.monotonic()
             self._request_ids[idx] = 0
             self._callback_maps[idx] = {}
             self._read_buffers[idx] = bytearray()
@@ -5586,6 +5732,7 @@ class MultiAce:
         self._v2_filament_info_pending.pop(idx, None)
         self._v2_filament_info_empty.pop(idx, None)
         self._connected_per_ace[idx] = False
+        self._last_rx_ts.pop(idx, None)
         ht = self._heartbeat_timers.pop(idx, None)
         if ht is not None:
             try:
@@ -5747,6 +5894,7 @@ class MultiAce:
                         idx, e))
                     continue
                 for ret in frames:
+                    self._last_rx_ts[idx] = time.monotonic()
                     msg_id = ret.get('id')
                     cb = None
                     lock = self._cb_locks.get(idx)
@@ -5774,6 +5922,7 @@ class MultiAce:
         if protocol is None:
             return
         for ret in protocol.decode_frames(buf):
+            self._last_rx_ts[idx] = time.monotonic()
             msg_id = ret.get('id')
             cb_map = self._callback_maps.get(idx, {})
             if msg_id in cb_map:
@@ -5795,9 +5944,12 @@ class MultiAce:
         # needless reconnect while the device idled.
         # filament_identify is a sensor read too (RFID scan, no motor) -
         # stamping it would blip 'busy' from the connect-time tag rescan.
+        # filament_recognition carries the Gen-1 tunnel ops (one page read
+        # is ~20 of them): a sensor read as well, and stamping 'busy' per
+        # op would make the UI flicker and starve wait_ace_ready.
         if request.get('method') not in (
                 'get_status', 'get_feed_info', 'get_filament_info',
-                'filament_identify'):
+                'filament_identify', 'filament_recognition'):
             info['status'] = 'busy'
         msg_id = self._next_request_id_for(idx)
         cb_map = self._callback_maps.setdefault(idx, {})
@@ -6965,6 +7117,36 @@ class MultiAce:
                 return fmt
         return ''
 
+    def _strip_native_tag_names(self, idx, result):
+        """Status-frame counterpart of the check in _v2_store_filament_read:
+        a slot whose firmware-read sku is one of the on-chip decoder's
+        format/material names gets an empty sku and that format as
+        tag_format, so the name can neither bind, be adopted by the sweep
+        nor prefill the picker. A V1 (ACE Pro community firmware) has no
+        other ingest than this status; on a V2 the cmd13 merge has already
+        done it and this is a no-op. Logged once per slot and name."""
+        try:
+            seen = self._native_name_seen.setdefault(idx, {})
+            for n, slot in enumerate(result.get('slots') or []):
+                if not isinstance(slot, dict) or slot.get('rfid') != 2:
+                    continue
+                fmt = self._native_tag_format(slot.get('sku'))
+                if not fmt:
+                    seen.pop(n, None)
+                    continue
+                if seen.get(n) != fmt:
+                    seen[n] = fmt
+                    logging.info(
+                        '[multiACE] [tag-data] ACE %d slot %d: %s tag decoded '
+                        'by the ACE firmware (sku field carries the format '
+                        'name, not an id) - dropped, bind by card UID only',
+                        self._disp(idx), self._disp(n), fmt)
+                slot['sku'] = ''
+                slot['tag_format'] = fmt
+        except Exception as e:
+            logging.info('[multiACE] [tag-data] native name strip failed '
+                         '(ignored): %s' % e)
+
     @staticmethod
     def _uid_from_sentinel(res):
         """The card UID when the reply's version field is one of the
@@ -7111,7 +7293,11 @@ class MultiAce:
         DEVICE-coupled cmd13 reads go (the device re-reports them); host
         reads stay - they were restored from save_variables at init and
         the first connect would wipe the whole per-unit dict right after.
-        The empty-slot rule in the merge remains their only eviction."""
+        The empty-slot rule in the merge remains their only eviction.
+        Gen-1 tunnel reads are session truth like a device read (the tag
+        may have been swapped while the unit was gone): dropped here."""
+        self._gen1_tunnel_reads.pop(idx, None)
+        self._gen1_tunnel_tried.pop(idx, None)
         slots = self._v2_filament_info_per_ace.get(idx)
         if not slots:
             return
@@ -7901,6 +8087,29 @@ class MultiAce:
             ser = self._serials.get(idx)
             if ser is None or not ser.is_open:
                 return eventtime + 1.0
+
+            last_rx = self._last_rx_ts.get(idx)
+            if last_rx is not None:
+                silence = time.monotonic() - last_rx
+                if silence >= 8.0:
+                    # Log the transition only: a unit that stays dead until
+                    # resume must not add a line per heartbeat tick.
+                    if not self._serial_failed_per_ace.get(idx, False):
+                        logging.warning(
+                            '[multiACE] ACE %d transport silence >= 8.0s (mute detected), '
+                            'triggering reconnect recovery' % idx)
+                        self._serial_failed_per_ace[idx] = True
+                        try:
+                            self.reactor.register_async_callback(
+                                lambda et, i=idx: self._reconnect_or_pause(
+                                    i, 'transport silence >= 8.0s'))
+                        except Exception as re:
+                            logging.info(
+                                '[multiACE] Watchdog reconnect schedule failed '
+                                'ACE %d: %s' % (idx, str(re)))
+                            self._handle_per_ace_failure(idx, 'transport silence >= 8.0s')
+                    return eventtime + 1.0
+
             is_active = (idx == self._active_device_index)
 
             def callback(self, response):
@@ -7914,7 +8123,13 @@ class MultiAce:
                 prev_info = self._info_per_ace.get(idx, self._make_default_info(idx))
                 prev_slots = prev_info.get('slots', [])
                 self._merge_v2_filament_info(idx, result)
+                self._strip_native_tag_names(idx, result)
                 self._v1_tag_bind_from_status(idx, result)
+                # Gen-1 third-party fallback: a slot the firmware could not
+                # identify (or whose SKU matches no table entry) gets ONE
+                # opportunistic tunnel read, so its card UID surfaces. A
+                # no-op on V2 (and with the feature off).
+                self._gen1_tunnel_status_tick(idx, result)
                 # Split a merged RFID type ('PLA Glow') into base + subtype
                 # against the firmware material list, centrally, so type is a
                 # printable base everywhere downstream (get_status, head_source,
@@ -8716,8 +8931,7 @@ class MultiAce:
         self._enable_feed_assist(index)
 
     def _disable_feed_assist(self, index=-1):
-
-        rt_index = self._feed_assist_index
+        rt_index = index if index >= 0 else self._feed_assist_index
         if rt_index == -1:
             return
         self.wait_ace_ready()
@@ -9108,8 +9322,28 @@ class MultiAce:
         }
 
     def _calibration_sensor(self, head):
-        sensor = self.printer.lookup_object(
-            'filament_motion_sensor e%d_filament' % int(head), None)
+        sensor = None
+        if getattr(self, 'calibration_sensor', None):
+            name = self.calibration_sensor
+            if '%d' in name:
+                try:
+                    name = name % int(head)
+                except Exception:
+                    pass
+            sensor = self.printer.lookup_object(name, None)
+        if sensor is None:
+            candidates = [
+                'filament_motion_sensor e%d_filament' % int(head),
+                'filament_switch_sensor toolhead_entry',
+                'filament_switch_sensor toolhead_sensor',
+                'filament_motion_sensor encoder_sensor',
+                'filament_switch_sensor toolhead_postgear',
+                'filament_switch_sensor e%d_entry' % int(head),
+            ]
+            for name in candidates:
+                sensor = self.printer.lookup_object(name, None)
+                if sensor is not None:
+                    break
         if sensor is None:
             return None
         try:
@@ -9224,6 +9458,8 @@ class MultiAce:
         try:
             extruder = self.printer.lookup_object(
                 'extruder' if head == 0 else 'extruder%d' % head, None)
+            if extruder is None:
+                extruder = self.printer.lookup_object('extruder', None)
             pheaters = self.printer.lookup_object('heaters', None)
             if extruder is not None and pheaters is not None:
                 pheaters.set_temperature(extruder.get_heater(), 0.)
@@ -10461,6 +10697,7 @@ class MultiAce:
     )
     _FILAMENT_DB_PATHS = (
         '/home/lava/klipper/klippy/extras/filament_parameters.py',
+        os.path.expanduser('~/klipper/klippy/extras/filament_parameters.py'),
         '/home/printer_data/klipper/klippy/extras/filament_parameters.py',
         '/usr/share/klipper/klippy/extras/filament_parameters.py',
     )
@@ -11651,106 +11888,132 @@ class MultiAce:
             self.log_always('[multiACE] Preflight copies strict colour '
                             'match: %s%s' % ('ON' if st else 'OFF', sfx))
 
+    def _gcode_num(self, gcmd, param, lo, hi, cast=float):
+        """One optional numeric gcode parameter, ranged by hand.
+
+        Ranges checked HERE, not via gcmd.get_*(minval=): Klipper's own
+        parameter error surfaces as a bare level-3 "System error" popup with
+        no hint of which value was wrong, and a single bad field then aborts
+        the whole command - which is how an ENABLE=1 was lost together with
+        a mistyped RH_START. Returns None for an absent parameter."""
+        raw = gcmd.get(param, None)
+        if raw is None:
+            return None
+        try:
+            val = cast(float(raw))
+        except (TypeError, ValueError, OverflowError):
+            raise self._ace_error(
+                gcmd, '%s: "%s" is not a number' % (param, raw), code=200)
+        # NaN/inf parse fine and would compare False against every bound,
+        # then poison the control loop - reject them by name.
+        if not math.isfinite(val):
+            raise self._ace_error(
+                gcmd, '%s: "%s" is not a finite number' % (param, raw),
+                code=200)
+        if val < lo or val > hi:
+            raise self._ace_error(
+                gcmd, '%s must be between %g and %g (got %g)'
+                      % (param, lo, hi, val), code=200)
+        return val
+
     cmd_ACE_SET_AUTO_DRY_help = (
-        '[multiACE] Humidity-controlled drying for one ACE 2: '
+        '[multiACE] Humidity-controlled drying for one ACE: '
         'ACE_SET_AUTO_DRY ACE=n [ENABLE=0|1] [RH_START=45] [RH_END=35] '
-        '[TEMP=50] [MASTER=0|1] [ADD_TIME=60] [RESET=1]. MASTER also drives '
-        'the ACE Pros (they report no humidity); ADD_TIME is the minutes '
-        'they keep going after the master is satisfied. Live + persisted as '
-        'ace__auto_dry.')
+        '[TEMP=50] [MASTER=0|1] [ADD_TIME=60] [RESET=1]. A unit with a '
+        'reading of its own - an ACE 2 sensor, or a pushed ACE_SET_HUMIDITY '
+        'value on ANY generation - regulates on it; a unit without one '
+        'follows a master. ADD_TIME is the minutes a follower keeps going '
+        'after the master is satisfied. Live + persisted as ace__auto_dry.')
 
     def cmd_ACE_SET_AUTO_DRY(self, gcmd):
         idx = gcmd.get_int('ACE', minval=0, maxval=3)
-        # Both unit types are configurable now, with DISJOINT parameter sets:
-        # an ACE 2 regulates (rh_start/rh_end/temp), an ACE Pro follows one
-        # ACE 2 (master/temp/add_time). Taking a parameter the unit cannot
-        # act on would silently store a setting that never does anything -
-        # a silent skip - so the wrong one is refused by name.
+        # Both unit types are configurable, with DISJOINT parameter sets:
+        # a unit that has a reading of its own regulates (rh_start/rh_end/
+        # temp), a unit driven by another one follows (master/temp/add_time).
+        # 'A reading of its own' is an ACE 2 sensor OR a pushed external one
+        # (ACE_SET_HUMIDITY) - so an ACE Pro can be its own master once it
+        # has a source. Taking a parameter the unit cannot act on would
+        # silently store a setting that never does anything - a silent skip
+        # - so the wrong one is refused by name.
         is_v2 = self._is_v2(idx)
+        has_read = is_v2 or idx in getattr(self, '_external_rh', {})
         _wrong = ([p for p in ('MASTER', 'ADD_TIME') if gcmd.get(p, None) is not None]
                   if is_v2 else
-                  [p for p in ('RH_START', 'RH_END') if gcmd.get(p, None) is not None])
+                  [p for p in ('RH_START', 'RH_END')
+                   if gcmd.get(p, None) is not None and not has_read])
         if _wrong:
-            raise self._ace_error(
-                gcmd,
-                '%s is an ACE %s setting - ACE %d is an ACE %s'
-                % (', '.join(_wrong), 'Pro' if is_v2 else '2',
-                   self._disp(idx), '2' if is_v2 else 'Pro'),
-                code=200)
+            if is_v2:
+                _why = ('%s is a follower setting - ACE %d is an ACE 2 and '
+                        'regulates on its own sensor'
+                        % (', '.join(_wrong), self._disp(idx)))
+            else:
+                _why = ('%s needs a humidity reading - ACE %d is an ACE Pro '
+                        'and has none: push ACE_SET_HUMIDITY ACE=%d RH=... '
+                        'for it first, or drive it as a follower (MASTER=)'
+                        % (', '.join(_wrong), self._disp(idx), idx))
+            raise self._ace_error(gcmd, _why, code=200)
         key = str(idx)
         if gcmd.get_int('RESET', 0):
             self._auto_dry_cfg.pop(key, None)
         else:
             cur = dict(self._auto_dry_cfg.get(key, {}))
-            # Ranges checked HERE, not via get_*(minval=): Klipper's own
-            # parameter error surfaces as a bare level-3 "System error"
-            # popup with no hint of which value was wrong, and a
-            # single bad field then aborts the whole command - which is
-            # how an ENABLE=1 was lost together with a mistyped RH_START.
-            def _num(param, lo, hi, cast=float):
-                raw = gcmd.get(param, None)
-                if raw is None:
-                    return None
-                try:
-                    val = cast(float(raw))
-                except (TypeError, ValueError):
-                    raise self._ace_error(
-                        gcmd, '%s: "%s" is not a number' % (param, raw),
-                        code=200)
-                if val < lo or val > hi:
-                    raise self._ace_error(
-                        gcmd, '%s must be between %g and %g (got %g)'
-                              % (param, lo, hi, val), code=200)
-                return val
-            v = _num('ENABLE', 0, 1, int)
+            _num = self._gcode_num
+            v = _num(gcmd, 'ENABLE', 0, 1, int)
             if v is not None:
                 cur['enabled'] = bool(v)
-            v = _num('RH_START', 5., 95.)
+            v = _num(gcmd, 'RH_START', 5., 95.)
             if v is not None:
                 cur['rh_start'] = v
-            v = _num('RH_END', 1., 94.)
+            v = _num(gcmd, 'RH_END', 1., 94.)
             if v is not None:
                 cur['rh_end'] = v
-            v = _num('TEMP', 35, self.max_dryer_temperature, int)
+            v = _num(gcmd, 'TEMP', 35, self.max_dryer_temperature, int)
             if v is not None:
                 cur['temp'] = v
             # MASTER is the follower's master ACE INDEX (-1 = none), not the
-            # old boolean. Only a connected ACE 2 can drive anything.
-            v = _num('MASTER', -1, 3, int)
+            # old boolean. Any unit with a humidity reading can drive one:
+            # an ACE 2 sensor, or a pushed external reading.
+            v = _num(gcmd, 'MASTER', -1, 3, int)
             if v is not None:
-                if v >= 0 and not self._is_v2(v):
+                if v >= 0 and not (self._is_v2(v)
+                                   or v in getattr(self, '_external_rh', {})):
                     raise self._ace_error(
-                        gcmd, 'MASTER: ACE %d is not an ACE 2 - only an ACE 2 '
-                              'reports humidity and can drive a follower'
-                              % self._disp(v), code=200)
+                        gcmd, 'MASTER: ACE %d has no humidity reading - only '
+                              'an ACE 2, or a unit you push ACE_SET_HUMIDITY '
+                              'for, can drive a follower' % self._disp(v),
+                        code=200)
                 cur['master'] = v
-            v = _num('ADD_TIME', 0, 600, int)
+            v = _num(gcmd, 'ADD_TIME', 0, 600, int)
             if v is not None:
                 cur['add_time'] = v
             self._auto_dry_cfg[key] = cur
         eff = self._auto_dry_for(idx)
-        # Hysteresis check is an ACE 2 concern - a follower has no thresholds.
-        # Without real hysteresis the unit would switch on and off around a
-        # single reading - refuse instead of silently "fixing" the numbers.
-        if is_v2 and float(eff['rh_end']) >= float(eff['rh_start']):
+        _m = int(eff.get('master', -1))
+        # A follower (a unit driven by ANOTHER one) has no thresholds of its
+        # own. Everyone else does: the hysteresis check is what stops a unit
+        # switching on and off around a single reading - refuse instead of
+        # silently "fixing" the numbers.
+        _follows = (not is_v2 and _m >= 0 and _m != idx)
+        if not _follows and float(eff['rh_end']) >= float(eff['rh_start']):
             self._auto_dry_cfg.pop(key, None)
             raise self._ace_error(
                 gcmd, 'RH_END (%.0f) must be BELOW RH_START (%.0f)'
                       % (float(eff['rh_end']), float(eff['rh_start'])),
                 code=200)
-        # A follower with no master is ENABLED BUT INERT - nothing would ever
-        # start it, and it would say "on" while doing nothing (a silent
-        # skip). Refuse the enable and keep the rest of the
-        # settings; picking a master is one click.
-        if (not is_v2 and eff.get('enabled')
-                and int(eff.get('master', -1)) < 0):
+        # A unit with nothing that can ever start it is ENABLED BUT INERT -
+        # it would say "on" while doing nothing (a silent skip). Refuse the
+        # enable and keep the rest of the settings; there are TWO ways out
+        # now: pick a master, or push an external reading for it.
+        if (not is_v2 and eff.get('enabled') and not has_read
+                and (_m < 0 or _m == idx)):
             cur = dict(self._auto_dry_cfg.get(key, {}))
             cur['enabled'] = False
             self._auto_dry_cfg[key] = cur
             raise self._ace_error(
-                gcmd, 'ACE %d has no master - pick the ACE 2 that drives it '
-                      'before switching auto-dry on (MASTER=<ace>)'
-                      % self._disp(idx), code=200)
+                gcmd, 'ACE %d has nothing to drive it: pick a master that '
+                      'has a humidity reading (MASTER=<ace>) or push an '
+                      'external reading first (ACE_SET_HUMIDITY ACE=%d RH=...)'
+                      % (self._disp(idx), idx), code=200)
         try:
             if self.save_variables:
                 self.save_variable('ace__auto_dry', self._auto_dry_cfg,
@@ -11764,15 +12027,16 @@ class MultiAce:
                      % (self._disp(idx), eff))
         # One message per role: the parameter sets are disjoint, so a single
         # line would always print half of it as noise. NOTE master is an
-        # INDEX now - `if eff['master']` would read -1 (= none) as truthy.
-        if is_v2:
+        # INDEX - `if eff['master']` would read -1 (= none) as truthy. A Pro
+        # that regulates on a pushed reading has master -1 (or itself) and
+        # gets the threshold line like an ACE 2.
+        if is_v2 or _m < 0 or _m == idx:
             self.log_always(self._t('msg.auto_dry_config',
                 ace=self._disp(idx),
                 state='ON' if eff.get('enabled') else 'OFF',
                 start=float(eff['rh_start']), end=float(eff['rh_end']),
                 temp=int(eff['temp'])))
         else:
-            _m = int(eff.get('master', -1))
             self.log_always(self._t('msg.auto_dry_config_follower',
                 ace=self._disp(idx),
                 state='ON' if eff.get('enabled') else 'OFF',
@@ -11780,28 +12044,92 @@ class MultiAce:
                 temp=int(eff['temp']),
                 add=int(eff.get('add_time') or 0)))
 
-    cmd_ACE_FW_RELEASE_help = (
-        '[multiACE] Release one ACE 2 serial port for a firmware flash: '
-        'ACE_FW_RELEASE ACE=n. Disconnects the unit and holds every '
-        'reconnect path until ACE_FW_RESUME.')
+    cmd_ACE_SET_HUMIDITY_help = (
+        '[multiACE] Push an external humidity reading for one ACE: '
+        'ACE_SET_HUMIDITY ACE=n RH=42.5 [TEMP=24] [TTL=900]. The reading '
+        'drives auto-dry on ANY generation while fresh (an ACE Pro has no '
+        'sensor of its own); it expires after TTL seconds (default 900, '
+        'clamped to 60..7200) and a drying cycle started from it is stopped '
+        'when it does. No reader traffic; a cycle you started by hand is '
+        'never touched.')
 
-    def cmd_ACE_FW_RELEASE(self, gcmd):
-        """The Klipper half of the ACE 2 OTA update (web backend does the
-        flashing): tear down OUR side of the port so the flasher can open
-        it, and HOLD it - _open_ace refuses a held idx, which gates every
-        reconnect path through the one choke point (scans, error recovery,
-        late-join). NOT persisted on purpose: a Klipper restart mid-flash
-        reconnects the unit and the flash fails loudly - the inverse (a
-        stale persisted hold stranding an ACE forever) would be a silent
-        failure. So: no Klipper restarts while flashing."""
+    def cmd_ACE_SET_HUMIDITY(self, gcmd):
+        """Store one pushed external reading.
+
+        Deliberately does NOT touch _info_per_ace: the 1 Hz heartbeat
+        rebuilds that dict and would wipe the value within a second. No
+        device traffic either - the feeder must be able to push while the
+        ACE is reconnecting (or absent): the value simply ages out."""
         idx = gcmd.get_int('ACE', minval=0, maxval=3)
         if idx >= len(self._ace_devices):
             raise self._ace_error(gcmd, 'No ACE %d' % self._disp(idx),
                                   code=208)
-        if not self._is_v2(idx):
+        rh = self._gcode_num(gcmd, 'RH', 0., 100.)
+        if rh is None:
             raise self._ace_error(
-                gcmd, 'ACE %d is a V1 (ACE Pro) - the OTA updater is for '
-                      'the ACE 2 only' % self._disp(idx), code=200)
+                gcmd, 'RH is required (0..100, e.g. RH=42.5)', code=200)
+        temp = self._gcode_num(gcmd, 'TEMP', EXTERNAL_RH_TEMP_MIN,
+                               EXTERNAL_RH_TEMP_MAX)
+        ttl = EXTERNAL_RH_DEFAULT_TTL
+        clamped = None
+        raw_ttl = gcmd.get('TTL', None)
+        if raw_ttl is not None:
+            try:
+                ttl = float(raw_ttl)
+            except (TypeError, ValueError):
+                raise self._ace_error(
+                    gcmd, 'TTL: "%s" is not a number' % raw_ttl, code=200)
+            if ttl <= 0:
+                raise self._ace_error(gcmd, 'TTL must be > 0', code=200)
+            if ttl < EXTERNAL_RH_MIN_TTL:
+                ttl, clamped = EXTERNAL_RH_MIN_TTL, raw_ttl
+            elif ttl > EXTERNAL_RH_MAX_TTL:
+                ttl, clamped = EXTERNAL_RH_MAX_TTL, raw_ttl
+        self._external_rh[idx] = {
+            'rh': rh, 'temp': temp,
+            'ts': self.reactor.monotonic(), 'ttl': ttl}
+        temp_txt = (', temp %.1f C' % temp) if temp is not None else ''
+        # One line per accepted push - the value is only ever read by the
+        # control loop and get_status, so this is the log trail for "the
+        # feeder pushed X at time T" (and for expiry investigations).
+        logging.info('[multiACE] external humidity ACE %d: %.1f%%rH%s, '
+                     'TTL %.0fs%s'
+                     % (self._disp(idx), rh, temp_txt, ttl,
+                        '' if clamped is None else
+                        ' (clamped from %s)' % clamped))
+        self.log_always(self._t('msg.ace_humidity_set',
+            ace=self._disp(idx), rh=('%.1f' % rh), temp=temp_txt,
+            ttl=int(ttl),
+            ttl_note=('' if clamped is None else
+                      ' (TTL %s clamped to %ds)' % (clamped, int(ttl)))))
+
+    cmd_ACE_FW_RELEASE_help = (
+        '[multiACE] Release one ACE serial port for a firmware flash: '
+        'ACE_FW_RELEASE ACE=n. Works for both generations (Gen 1 ACE Pro: '
+        'IAP flasher, Gen 2 ACE 2: OTA updater). Disconnects the unit and '
+        'holds every reconnect path until ACE_FW_RESUME.')
+
+    def cmd_ACE_FW_RELEASE(self, gcmd):
+        """The Klipper half of an ACE firmware update (the web backend or a
+        bench flasher does the flashing): tear down OUR side of the port so
+        the flasher can open it, and HOLD it - _open_ace refuses a held idx,
+        which gates every reconnect path through the one choke point
+        (scans, error recovery, late-join). Both generations use this one
+        command: the web picks the Gen 1 IAP or the Gen 2 OTA transport
+        from the protocol Klipper reports. NOT persisted on purpose: a
+        Klipper restart mid-flash reconnects the unit and the flash fails
+        loudly - the inverse (a stale persisted hold stranding an ACE
+        forever) would be a silent failure. So: no Klipper restarts while
+        flashing."""
+        idx = gcmd.get_int('ACE', minval=0, maxval=3)
+        if idx >= len(self._ace_devices):
+            raise self._ace_error(gcmd, 'No ACE %d' % self._disp(idx),
+                                  code=208)
+        if not (self._is_v2(idx) or self._is_v1(idx)):
+            raise self._ace_error(
+                gcmd, 'ACE %d has no detected protocol yet - connect it '
+                      'once so the flasher is known before releasing the '
+                      'port' % self._disp(idx), code=200)
         if self._is_actively_printing():
             raise self._ace_error(
                 gcmd, 'Refusing to release ACE %d while a print is running'
@@ -12048,6 +12376,24 @@ class MultiAce:
         sfx = self._wt_persist(gcmd, 'pa_sync', _wt_fmt_bool(enable), None,
                                shadow_attr='_pa_sync_cfg', shadow_val=enable)
         self.log_always('[multiACE] PA sync %s%s'
+                        % ('ON' if enable else 'OFF', sfx))
+
+    cmd_ACE_SET_TAG_TUNNEL_help = (
+        '[multiACE] Enable/disable the Gen-1 (ACE Pro) tag tunnel '
+        '(ENABLE=0|1): ON gives a slot the firmware could not identify ONE '
+        'opportunistic tag read through the community firmware RC522 tunnel '
+        '(CV1.3.87x) per insert, so third-party spools surface with their '
+        'card UID (and OpenSpool material/colour). ACE_TAG_READ works with '
+        'the flag off too. Live + write-through (writes the gen1_tag_tunnel '
+        'config line; PERSIST=0 = until restart).')
+
+    def cmd_ACE_SET_TAG_TUNNEL(self, gcmd):
+        enable = bool(gcmd.get_int('ENABLE', 1, minval=0, maxval=1))
+        self.gen1_tag_tunnel = enable
+        sfx = self._wt_persist(gcmd, 'gen1_tag_tunnel', _wt_fmt_bool(enable),
+                               None, shadow_attr='_gen1_tag_tunnel_cfg',
+                               shadow_val=enable)
+        self.log_always('[multiACE] Gen-1 tag tunnel %s%s'
                         % ('ON' if enable else 'OFF', sfx))
 
     def cmd_ACE_SET_TAG_WRITE(self, gcmd):
@@ -13067,6 +13413,224 @@ class MultiAce:
             logging.info('[multiACE] [spool] V1 tag bind failed (ignored): '
                          '%s' % e)
 
+    # ---- Gen-1 tag tunnel (ace_gen1_tunnel.py) ---------------------------
+    # The ACE Pro's own reader only understands Anycubic tags: a third-party
+    # spool arrives with no SKU (or an SKU no table entry carries). On the
+    # community firmware (CV1.3.87x) an RC522 tunnel can read such a tag
+    # directly, so this path probes a slot ONCE per occupancy, stores the
+    # result in its own dict (never _info_per_ace) and offers the card UID
+    # to the SHARED tag-bind path. Unbind is deliberately OFF on that call:
+    # a tunnel read must never release a binding the vendor path owns.
+
+    def _gen1_tunnel_client(self, idx):
+        """The cached per-unit client, or None when the helper module is
+        missing (deploy skew: an updated ace.py before the installer ran)
+        or the client cannot be built."""
+        cli = self._gen1_tunnel_clients.get(idx)
+        if cli is not None:
+            return cli
+        try:
+            # Broad on purpose: a broken helper module must cost this
+            # feature, never Klipper (boundary to optional local code).
+            from .ace_gen1_tunnel import Gen1TagTunnel
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: helper module not '
+                         'importable (%s) - re-run the installer to enable '
+                         'it' % e)
+            return None
+        try:
+            cli = Gen1TagTunnel(self, idx)
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: client init failed '
+                         '(%s)' % e)
+            return None
+        self._gen1_tunnel_clients[idx] = cli
+        return cli
+
+    def _gen1_tunnel_status_tick(self, idx, result):
+        """Pro' status hook: decide whether any slot needs ONE tunnel read.
+
+        Candidate = a slot that is occupied and whose tag the firmware did
+        NOT identify (rfid != 2 / empty sku) or whose SKU matches no table
+        entry. Per occupancy session (empty -> present) there is AT MOST
+        ONE attempt: the tag only answers while it faces the coil, the
+        firmware rotates the spool during its own insert procedure, and a
+        Gen-1 has no host-side motor control to search for it later.
+        ACE_TAG_READ is the explicit retry. Never runs on V2; never runs
+        with the feature off; never touches _info_per_ace.
+
+        Binding is gated on ATTRIBUTION: the two slots of an antenna pair
+        (0/2 and 1/3) share one RF path, so a read can belong to either
+        bay. The automatic read binds the slot's spool ONLY when the
+        partner slot (slot ^ 1) reads EMPTY in the same status; an
+        occupied OR unknown/absent partner still stores and surfaces the
+        read but does not bind (a wrong first binding has no repair path
+        here - see the tunnel report, section 4)."""
+        try:
+            if not self.gen1_tag_tunnel or self._is_v2(idx):
+                return
+            if not self._connected_per_ace.get(idx):
+                return
+            if idx in self._gen1_tunnel_busy:
+                return
+            tried = self._gen1_tunnel_tried.setdefault(idx, {})
+            reads = self._gen1_tunnel_reads.get(idx) or {}
+            slots = result.get('slots') or []
+            for i, slot in enumerate(slots):
+                if not isinstance(slot, dict):
+                    continue
+                if self._is_empty_status(slot.get('status', '')):
+                    # Occupancy ended: the next spool is a new read.
+                    tried.pop(i, None)
+                    reads.pop(i, None)
+                    continue
+                sku = slot.get('sku') if slot.get('rfid') == 2 else ''
+                if self._sku_canon(sku):
+                    _, sp = self._spool_by_sku(sku)
+                    if sp is not None:
+                        continue       # firmware read a tag we know
+                # No vendor tag, or one no entry carries: worth a probe.
+                if tried.get(i):
+                    continue
+                # Shared-antenna attribution: the partner bay (slot ^ 1)
+                # must read empty; occupied OR unknown/absent is NOT
+                # empty (conservative - do not bind a possibly-wrong read).
+                partner = slots[i ^ 1] if (i ^ 1) < len(slots) else None
+                partner_empty = (isinstance(partner, dict)
+                                 and self._is_empty_status(
+                                     partner.get('status', '')))
+                tried[i] = True
+                self._gen1_tunnel_schedule(idx, i, bind=partner_empty)
+                # ONE session per unit at a time: the next candidate (if
+                # any) gets its attempt on a following heartbeat.
+                break
+            if reads:
+                self._gen1_tunnel_reads[idx] = reads
+            elif idx in self._gen1_tunnel_reads:
+                self._gen1_tunnel_reads.pop(idx, None)
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: status tick failed '
+                         '(ignored): %s' % e)
+
+    def _gen1_tunnel_schedule(self, idx, slot, bind=True):
+        """Queue ONE tunnel read in its own greenlet (the reply poll uses
+        reactor.pause, which must not run in the heartbeat callback).
+        `bind` carries the shared-antenna attribution decision from the
+        tick through to the store: False still reads and stores, but does
+        not offer the UID to the tag bind."""
+        cli = self._gen1_tunnel_client(idx)
+        if cli is None:
+            return
+        self._gen1_tunnel_busy.add(idx)
+
+        def _run(eventtime):
+            try:
+                if not cli.tunnel_available():
+                    return             # one log line, then never again
+                res = cli.read_slot(slot)
+                if res:
+                    self._gen1_tunnel_store(idx, slot, res, why='auto',
+                                            bind=bind)
+                else:
+                    logging.info(
+                        '[multiACE] gen1 tag tunnel: ACE %d slot %d: no '
+                        'tag answered on the antenna (tag must face the '
+                        'coil) - one attempt per insert, ACE_TAG_READ '
+                        'retries on demand', self._disp(idx),
+                        self._disp(slot))
+            except Exception as e:
+                logging.info('[multiACE] gen1 tag tunnel: read failed on '
+                             'ACE %d slot %d (ignored): %s'
+                             % (self._disp(idx), self._disp(slot), e))
+            finally:
+                self._gen1_tunnel_busy.discard(idx)
+
+        try:
+            self.reactor.register_async_callback(_run)
+        except Exception as e:
+            self._gen1_tunnel_busy.discard(idx)
+            logging.info('[multiACE] gen1 tag tunnel: schedule failed '
+                         '(ignored): %s' % e)
+
+    def _gen1_tunnel_store(self, idx, slot, res, why='auto', bind=True):
+        """Record one tunnel read and offer its card UID to the SHARED
+        tag-bind path (unbind=False - the tunnel never releases a vendor
+        binding). Own store; the heartbeat's _info_per_ace is untouched.
+
+        `bind` is the shared-antenna attribution gate: the automatic path
+        passes False when the partner slot (slot ^ 1) is occupied or
+        unknown, so a read that could belong to the neighbour bay is
+        STORED and surfaced in get_status but never binds. The manual
+        ACE_TAG_READ path leaves it True (the operator chose the slot)."""
+        try:
+            op = res.get('openspool') or {}
+            ent = {
+                'uid': res.get('uid', ''),
+                'format': res.get('format', 'unknown'),
+                'material': op.get('material', ''),
+                'color': op.get('color', ''),
+                # The V2 decoder names this 'vendor' (OpenSpool's JSON
+                # 'brand'); keep the stored/status key as 'brand'.
+                'brand': op.get('vendor', ''),
+                'page0': ' '.join('%02X' % b
+                                  for b in bytes(res.get('data') or b'')),
+                'ts': self.reactor.monotonic(),
+                'why': why,
+                'bound': False,
+            }
+            uid = ent['uid']
+            ent['bound'] = bool(uid and bind)
+            self._gen1_tunnel_reads.setdefault(idx, {})[slot] = ent
+            if uid:
+                logging.info(
+                    '[multiACE] [spool] gen1 tunnel read ACE %d slot %d: '
+                    'card UID %s (%s)%s', self._disp(idx), self._disp(slot),
+                    uid, ent['format'],
+                    ' - OpenSpool %s %s %s' % (
+                        ent['material'] or '?', ent['color'] or '?',
+                        ent['brand'] or '?') if op else '')
+                if bind:
+                    self._spool_bind_by_tag(idx, slot, uid, unbind=False)
+                else:
+                    logging.info(
+                        '[multiACE] gen1 tunnel read ACE %d slot %d: card '
+                        'UID %s (%s) STORED but NOT bound - the partner '
+                        'slot on the shared antenna is occupied or '
+                        'unknown, so the read cannot be attributed to this '
+                        'slot; ACE_TAG_READ is the operator probe',
+                        self._disp(idx), self._disp(slot), uid,
+                        ent['format'])
+            else:
+                logging.info(
+                    '[multiACE] gen1 tunnel read ACE %d slot %d: a card '
+                    'answered but no readable page (format %s) - no UID',
+                    self._disp(idx), self._disp(slot), ent['format'])
+        except Exception as e:
+            logging.info('[multiACE] gen1 tunnel store failed (ignored): %s'
+                         % e)
+
+    def _gen1_tunnel_status(self, idx):
+        """The additive get_status block for one unit."""
+        out = {'enabled': bool(getattr(self, 'gen1_tag_tunnel', False)),
+               'available': None, 'reads': {}}
+        cli = self._gen1_tunnel_clients.get(idx)
+        if cli is not None:
+            sup = cli.support_state()
+            if sup is not None:
+                out['available'] = bool(sup[1])
+        now = self.reactor.monotonic()
+        for slot, ent in (self._gen1_tunnel_reads.get(idx) or {}).items():
+            out['reads'][str(slot)] = {
+                'uid': ent.get('uid', ''),
+                'format': ent.get('format', ''),
+                'material': ent.get('material', ''),
+                'color': ent.get('color', ''),
+                'brand': ent.get('brand', ''),
+                'bound': bool(ent.get('bound', False)),
+                'age': max(0.0, now - float(ent.get('ts', now))),
+            }
+        return out
+
     def _spool_rebind_from_tag_cache(self, why):
         """Re-run the tag auto-bind against the LAST READ tag of every
         occupied slot. The world switch clears all bindings, but the
@@ -13730,12 +14294,95 @@ class MultiAce:
         p = self._protocols.get(idx)
         return bool(p is not None and getattr(p, 'NAME', '') == 'v2')
 
-    def _ace_humidity(self, idx):
+    def _is_v1(self, idx):
+        p = self._protocols.get(idx)
+        return bool(p is not None and getattr(p, 'NAME', '') == 'v1')
+
+    def _ace_internal_humidity(self, idx):
+        """The unit's OWN sensor reading (ACE 2 only - a Pro has none)."""
         try:
             h = (self._info_per_ace.get(idx) or {}).get('humidity')
             return float(h) if h is not None else None
         except (TypeError, ValueError):
             return None
+
+    def _external_rh_get(self, idx, now=None):
+        """The pushed reading of one unit while it is still inside its TTL,
+        else None. This is the ONLY freshness rule - control, status and the
+        expiry stop must never disagree about fresh vs expired."""
+        st = (getattr(self, '_external_rh', None) or {}).get(idx)
+        if not st:
+            return None
+        if now is None:
+            now = self.reactor.monotonic()
+        try:
+            if (now - float(st.get('ts', 0.))) > float(st.get('ttl', 0.)):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return st
+
+    def _external_rh_age(self, idx, now=None):
+        """Age in seconds of the last pushed reading, or None if none was
+        ever pushed. An EXPIRED reading still reports its true age (status
+        wants to say how stale it is)."""
+        st = (getattr(self, '_external_rh', None) or {}).get(idx)
+        if not st:
+            return None
+        if now is None:
+            now = self.reactor.monotonic()
+        try:
+            return max(0., now - float(st.get('ts', 0.)))
+        except (TypeError, ValueError):
+            return None
+
+    def _ace_humidity(self, idx):
+        """The reading control acts on: a FRESH pushed external one wins
+        over the unit's own sensor; a stale or absent one falls back to the
+        internal value (which a Pro never has)."""
+        ext = self._external_rh_get(idx)
+        if ext is not None:
+            return float(ext['rh'])
+        return self._ace_internal_humidity(idx)
+
+    def _ace_humidity_source(self, idx, now=None):
+        """'external' / 'internal' / None - which reading _ace_humidity
+        would use right now (the source label get_status reports)."""
+        if self._external_rh_get(idx, now) is not None:
+            return 'external'
+        if self._ace_internal_humidity(idx) is not None:
+            return 'internal'
+        return None
+
+    def _external_rh_status(self, idx, now=None):
+        """get_status keys of one unit's pushed reading. Never raises:
+        get_status is polled during __init__, before the store exists."""
+        try:
+            if now is None:
+                now = self.reactor.monotonic()
+            st = (getattr(self, '_external_rh', None) or {}).get(idx)
+            fresh = self._external_rh_get(idx, now) is not None
+            age = self._external_rh_age(idx, now)
+            internal = self._ace_internal_humidity(idx)
+            return {
+                # Last pushed value (reported even when stale), its age and
+                # TTL, whether it is fresh (external = true) and whether it
+                # started a cycle that is still running.
+                'external_humidity': (float(st['rh']) if st else None),
+                'external_humidity_temp': (st.get('temp') if st else None),
+                'external_humidity_age': age,
+                'external_humidity_ttl': (float(st.get('ttl'))
+                                          if st else None),
+                'external_humidity_fresh': fresh,
+                'external_humidity_cycle': idx in getattr(
+                    self, '_external_rh_cycle', ()),
+                # Which reading the control loop would use right now, and
+                # its effective value ('humidity' stays the DEVICE sensor).
+                'humidity_source': self._ace_humidity_source(idx, now),
+                'humidity_effective': (float(st['rh']) if fresh else internal),
+            }
+        except Exception:
+            return {}
 
     def _ace_is_drying(self, idx):
         st = ((self._info_per_ace.get(idx) or {})
@@ -13754,8 +14401,12 @@ class MultiAce:
         the next reading above rh_start simply starts a fresh cycle."""
         if idx not in self._auto_dry_started:
             return
+        had_ext = idx in getattr(self, '_external_rh_cycle', ())
         self._auto_dry_started.discard(idx)
+        self._external_rh_cycle.discard(idx)
         self._auto_dry_persist()
+        if had_ext:
+            self._auto_dry_persist_ext()
         logging.info('[multiACE] auto-dry ownership released on ACE %d (%s)'
                      % (self._disp(idx), why))
 
@@ -13767,6 +14418,21 @@ class MultiAce:
                                    sorted(self._auto_dry_started), write=True)
         except Exception as e:
             logging.info('[multiACE] persist auto-dry ownership failed: %s' % e)
+
+    def _auto_dry_persist_ext(self):
+        """Cycles started from a PUSHED reading survive a restart like the
+        ownership does: the device keeps drying across a Klipper restart,
+        the reading store does NOT (monotonic ts, memory only), so without
+        this note the first tick after a restart would see a running cycle
+        with no reading and no memory of why - and let it burn the device
+        backstop. With the note, that first tick stops it."""
+        try:
+            if self.save_variables:
+                self.save_variable('ace__auto_dry_external',
+                                   sorted(self._external_rh_cycle), write=True)
+        except Exception as e:
+            logging.info('[multiACE] persist external-rh ownership failed: %s'
+                         % e)
 
     def _auto_dry_persist_follow(self):
         """The add-time deadlines must survive a restart like the ownership
@@ -13853,11 +14519,14 @@ class MultiAce:
         if self._dry_exhaust_supported(idx):
             self._set_dry_exhaust(idx, False, why)
 
-    def _auto_dry_start(self, idx, temp, why):
+    def _auto_dry_start(self, idx, temp, why, external=False):
         # AUTO_DRY_MAX_MINUTES, not a computed runtime: the humidity check
         # ends the cycle, this is only the backstop for the case where we
         # stop asking (Klipper restart, unplugged unit) - the device must not
         # keep heating forever on its own.
+        # `external` marks a cycle started because of a PUSHED reading:
+        # _auto_dry_tick stops it when that reading expires. Followers are
+        # never external - they read nothing, they follow.
         def _cb(self, response):
             # Signature is callback(self, response) - self is the ACE
             # instance, not the callback object.
@@ -13888,6 +14557,14 @@ class MultiAce:
             else:
                 self._auto_dry_ramp.pop(idx, None)
             self._auto_dry_started.add(idx)
+            if external:
+                self._external_rh_cycle.add(idx)
+                self._auto_dry_persist_ext()
+            elif idx in self._external_rh_cycle:
+                # Re-started from the internal reading: the cycle no longer
+                # depends on the pushed one.
+                self._external_rh_cycle.discard(idx)
+                self._auto_dry_persist_ext()
             self._auto_dry_persist()
             # klippy.log too: log_always only reaches the response pipe, so
             # a fired start/stop left NO trace and a later log could not say
@@ -13910,6 +14587,10 @@ class MultiAce:
             self._close_dry_exhaust(idx, why)
             self._auto_dry_ramp.pop(idx, None)
             self._auto_dry_started.discard(idx)
+            if idx in getattr(self, '_external_rh_cycle', ()):
+                # The cycle is over - nothing left to expire.
+                self._external_rh_cycle.discard(idx)
+                self._auto_dry_persist_ext()
             self._auto_dry_persist()
             # Any stop retires a pending add-time deadline (manual stop of
             # a follower mid-window included) - a stale persisted deadline
@@ -13925,23 +14606,48 @@ class MultiAce:
                          % (idx, e))
 
     def _auto_dry_followers(self, master_idx):
-        """The ACE Pros that follow THIS master: connected, auto-dry on, and
-        pointing at master_idx. A Pro has no humidity reading of its own, so
-        following is the only thing it can do - but which ACE 2 it follows is
-        now its own setting rather than one unit claiming every Pro, so two
-        ACE 2s can drive different Pros."""
+        """The units that follow THIS master: connected, auto-dry on, and
+        pointing at master_idx. A follower reads nothing itself - following
+        is the only thing it can do - but which unit it follows is its own
+        setting rather than one unit claiming every Pro, so two units can
+        drive different followers. `i != master_idx`: a unit may name ITSELF
+        as master (the external-humidity convention our feeder uses), and a
+        self-mastered unit must not be its own follower - the start loop
+        would send the cycle twice."""
         return [i for i in range(len(self._ace_devices))
-                if self._connected_per_ace.get(i, False)
+                if i != master_idx
+                and self._connected_per_ace.get(i, False)
                 and not self._is_v2(i)
                 and self._auto_dry_for(i).get('enabled')
                 and int(self._auto_dry_for(i).get('master', -1)) == master_idx]
+
+    def _auto_dry_followers_done(self, master_idx):
+        """OUR master's cycle ended: hand the followers their own add-time.
+
+        Called from every path that stops a master we own - the normal
+        below-rh_end stop AND the external-reading expiry stop - because a
+        follower must not see a difference: it is sealed worse, cannot
+        measure itself, and keeps going for its own add_time. Without this
+        the expiry path would leave a follower to the orphan sweep, which
+        stops it at once (and says 'master done before restart', which it is
+        not)."""
+        for f in self._auto_dry_followers(master_idx):
+            if f not in self._auto_dry_started:
+                continue
+            extra = float(
+                self._auto_dry_for(f).get('add_time') or 0) * 60.
+            if extra <= 0:
+                self._auto_dry_stop(f, 'master done')
+            else:
+                self._auto_dry_follow_until[f] = time.time() + extra
+                self._auto_dry_persist_follow()
 
     def _auto_dry_ramp_tick(self, eventtime):
         """Advance the soft start of every unit we run.
 
         Deliberately its own loop over _auto_dry_started rather than a step
-        inside the humidity loop: that loop skips non-V2 units early (they
-        have no reading of their own), so a follower would have been left
+        inside the humidity loop: that loop may skip a unit (a follower, or
+        a Pro with no reading yet), so a follower would have been left
         sitting at the soft start temperature for the whole cycle.
         """
         def _cb(self, response):
@@ -13981,6 +14687,38 @@ class MultiAce:
         be the worst kind of helpfulness."""
         try:
             self._auto_dry_ramp_tick(eventtime)
+            # EXPIRY FIRST, and outside every config/role gate: a cycle WE
+            # started from a PUSHED reading must not outlive it, even if
+            # auto-dry was switched off in between, and for a unit that has
+            # no internal sensor this is the ONLY stop path there is. This
+            # is the promise the feature rests on - a feeder that dies (or a
+            # sensor that falls off the wall) stops the heater instead of
+            # turning a stale value into hours of unrequested drying.
+            for idx in list(getattr(self, '_external_rh_cycle', ())):
+                if self._external_rh_get(idx, now=eventtime) is not None:
+                    continue
+                if idx not in self._auto_dry_started:
+                    # Ownership went away on another path - drop the note.
+                    self._external_rh_cycle.discard(idx)
+                    self._auto_dry_persist_ext()
+                    continue
+                if not self._connected_per_ace.get(idx, False):
+                    continue    # comms recovery owns it; retried when back
+                age = self._external_rh_age(idx, now=eventtime)
+                if age is None:
+                    why = ('external humidity reading gone (none since '
+                           'restart)')
+                else:
+                    st = ((getattr(self, '_external_rh', None) or {})
+                          .get(idx) or {})
+                    why = ('external humidity reading expired (age %.0fs, '
+                           'TTL %.0fs)'
+                           % (age, float(st.get('ttl') or 0.)))
+                self._auto_dry_stop(idx, why)
+                # A master stopped by expiry hands its followers their own
+                # add-time exactly like a below-rh_end stop does - the
+                # reason must not change a follower's behaviour.
+                self._auto_dry_followers_done(idx)
             printing = self._is_actively_printing()
             # range(len(_ace_devices)), NOT _ace_canonical: that one holds
             # device PATHS, not indices - iterating it fed path strings into
@@ -13989,10 +14727,16 @@ class MultiAce:
             for idx in range(len(self._ace_devices)):
                 if not self._connected_per_ace.get(idx, False):
                     continue
-                if not self._is_v2(idx):
-                    continue        # no reading of its own - follower only
                 cfg = self._auto_dry_for(idx)
                 if not cfg.get('enabled'):
+                    continue
+                _m = int(cfg.get('master', -1))
+                if not self._is_v2(idx) and _m >= 0 and _m != idx:
+                    continue        # a follower waits for its master
+                ext = self._external_rh_get(idx, now=eventtime)
+                if not self._is_v2(idx) and ext is None:
+                    # A Pro has no sensor of its own; without a pushed
+                    # reading there is nothing to regulate on.
                     continue
                 rh = self._ace_humidity(idx)
                 if rh is None:
@@ -14005,9 +14749,12 @@ class MultiAce:
                 seen = (drying, ours)
                 if self._auto_dry_seen.get(idx) != seen:
                     self._auto_dry_seen[idx] = seen
-                    logging.info('[multiACE] auto-dry ACE %d: %.0f%%rH '
+                    logging.info('[multiACE] auto-dry ACE %d: %.0f%%rH (%s) '
                                  'device_drying=%s ours=%s (start>=%s stop<=%s)'
-                                 % (self._disp(idx), rh, drying, ours,
+                                 % (self._disp(idx), rh,
+                                    'external' if ext is not None
+                                    else 'internal',
+                                    drying, ours,
                                     cfg['rh_start'], cfg['rh_end']))
                 # OUR OWN bookkeeping decides, not the device status. The
                 # reported dryer state falls back to 'stop' whenever the
@@ -14019,7 +14766,11 @@ class MultiAce:
                 if not ours and not drying and rh >= float(cfg['rh_start']):
                     if printing and not self.auto_dry_while_printing:
                         continue
-                    self._auto_dry_start(idx, cfg['temp'], '%.0f%%rH' % rh)
+                    self._auto_dry_start(
+                        idx, cfg['temp'],
+                        '%.0f%%rH external' % rh if ext is not None
+                        else '%.0f%%rH' % rh,
+                        external=ext is not None)
                     # Each follower runs at ITS OWN temperature - the value
                     # is on its own card, so it has to be the one that acts.
                     for f in self._auto_dry_followers(idx):
@@ -14035,17 +14786,7 @@ class MultiAce:
                     # sealed worse and cannot tell when they are done. The
                     # deadline is wall-clock + persisted (see __init__), so
                     # a restart inside the window cannot strand them.
-                    for f in self._auto_dry_followers(idx):
-                        if f not in self._auto_dry_started:
-                            continue
-                        extra = float(
-                            self._auto_dry_for(f).get('add_time') or 0) * 60.
-                        if extra <= 0:
-                            self._auto_dry_stop(f, 'master done')
-                        else:
-                            self._auto_dry_follow_until[f] = (
-                                time.time() + extra)
-                            self._auto_dry_persist_follow()
+                    self._auto_dry_followers_done(idx)
             # Followers whose extra time is up (wall clock - survives
             # restarts; a deadline restored as already-past fires here on
             # the first tick).
@@ -14068,7 +14809,17 @@ class MultiAce:
                 if not self._connected_per_ace.get(f, False):
                     continue
                 _m = int(self._auto_dry_for(f).get('master', -1))
-                if _m < 0 or _m not in self._auto_dry_started:
+                if _m < 0 or _m == f:
+                    # Not a follower of another unit: self-regulating.
+                    # Ours only while its reading lives - the expiry loop
+                    # above already handled a cycle that was STARTED from
+                    # one; this covers a role change mid-cycle.
+                    if self._external_rh_get(f, now=eventtime) is not None:
+                        continue
+                    self._auto_dry_stop(
+                        f, 'orphaned - no humidity reading after restart')
+                    continue
+                if _m not in self._auto_dry_started:
                     self._auto_dry_stop(
                         f, 'orphaned - master done before restart')
         except Exception as e:
@@ -14350,18 +15101,26 @@ class MultiAce:
                                 % (spool.get('label') or sid))
 
     cmd_ACE_TAG_READ_help = (
-        '[multiACE] Rotate a slot until its RFID tag sits in front of the '
-        'antenna, read it and bind the matching spool: ACE_TAG_READ ACE=n '
-        'SLOT=n [MAX_MM=600] [DEBUG=1] [DUMP=1]. Needs the ACE2-Open '
-        'firmware. DEBUG '
-        'logs each raw RC522 step, DUMP logs the NTAG user pages (OpenSpool '
-        'decode data). Idle printer only - the search physically rotates '
-        'the lane (restored afterwards).')
+        '[multiACE] Read a slot\'s RFID tag. ACE 2 (ACE2-Open firmware): '
+        'rotate the slot until the tag sits in front of the antenna, read '
+        'it and bind the matching spool - ACE_TAG_READ ACE=n SLOT=n '
+        '[MAX_MM=600] [DEBUG=1] [DUMP=1]; needs an idle printer (the search '
+        'physically rotates the lane, restored afterwards). ACE Pro (Gen 1, '
+        'community firmware with the RC522 tunnel): read the tag directly - '
+        'ACE_TAG_READ ACE=n SLOT=n [PAGE=n] prints the raw page bytes and '
+        'the card UID; moves nothing, safe during a print. PAGE defaults to '
+        '0; the tag must face the coil.')
 
     def cmd_ACE_TAG_READ(self, gcmd):
         ace_idx = gcmd.get_int('ACE', self._active_device_index,
                                minval=0, maxval=3)
         slot = gcmd.get_int('SLOT', minval=0, maxval=3)
+        if not self._is_v2_idx(ace_idx):
+            # Gen-1 (ACE Pro): the community firmware's RC522 tunnel is the
+            # only reader route (docs/GEN1_TAG_TUNNEL.md). Read-only, no
+            # lane motion - allowed on a printing printer too.
+            self._cmd_ace_tag_read_gen1(gcmd, ace_idx, slot)
+            return
         max_mm = gcmd.get_int('MAX_MM', 600, minval=50, maxval=2000)
         debug = gcmd.get_int('DEBUG', 0, minval=0, maxval=1)
         dump = gcmd.get_int('DUMP', 0, minval=0, maxval=1)
@@ -14485,6 +15244,130 @@ class MultiAce:
         self.reactor.register_async_callback(_run)
         gcmd.respond_info('[multiACE] tag read started (ACE %d slot %d)'
                           % (self._disp(ace_idx), self._disp(slot)))
+
+    def _cmd_ace_tag_read_gen1(self, gcmd, ace_idx, slot):
+        """ACE_TAG_READ on an ACE Pro (Gen 1): one tunnel read session.
+
+        The command itself is the explicit consent - it runs with the
+        gen1_tag_tunnel config flag off (the flag gates only the automatic
+        fallback). Synchronous is not an option in the gcode thread, so the
+        read runs in its own greenlet; the console gets the raw page bytes
+        and the UID. The result also feeds the own-store/status surface and
+        the SHARED tag bind (unbind=False) exactly like an automatic read."""
+        page = gcmd.get_int('PAGE', 0, minval=0, maxval=255)
+        if not self._connected_per_ace.get(ace_idx):
+            raise self._ace_error(gcmd, 'ACE %d is not connected'
+                                  % self._disp(ace_idx), code=208)
+        if ace_idx in self._gen1_tunnel_busy:
+            raise self._ace_error(gcmd, 'a Gen-1 tag read is already running '
+                                  'on ACE %d' % self._disp(ace_idx), code=200)
+        cli = self._gen1_tunnel_client(ace_idx)
+        if cli is None:
+            raise self._ace_error(gcmd, 'the Gen-1 tag tunnel helper '
+                                  '(ace_gen1_tunnel.py) is missing on this '
+                                  'install - re-run the installer', code=200)
+        self._gen1_tunnel_busy.add(ace_idx)
+        # Same outcome contract as the V2 read (ace.py's tag_op status):
+        # the web picker bar can report this op when/if it is offered on a
+        # Gen 1. seq ties the result to the call.
+        self._tag_op_kind = 'read'
+        self._tag_op_seq = int(getattr(self, '_tag_op_seq', 0)) + 1
+        self._tag_op_result = None
+        _seq = self._tag_op_seq
+        _out = {'ok': None, 'msg': ''}
+
+        def _run(eventtime):
+            try:
+                if not cli.tunnel_available():
+                    fw = (self._ace_models.get(ace_idx) or ('', '?'))[1]
+                    _out['ok'] = False
+                    _out['msg'] = ('no tag tunnel (firmware %s, needs the '
+                                   'community build CV1.3.87x)' % fw)
+                    self.log_always(
+                        '[multiACE] ACE %d: no tag tunnel - firmware %s '
+                        'does not answer tunnel ops (needs the community '
+                        'build %s); nothing read'
+                        % (self._disp(ace_idx), fw,
+                           'CV1.3.87x'))
+                    return
+                res = cli.read_slot(slot, page=page)
+                if not res:
+                    _out['ok'] = False
+                    _out['msg'] = 'no tag answered (tag must face the coil)'
+                    self.log_always(
+                        '[multiACE] ACE %d slot %d page %d: no tag answered '
+                        'on the antenna - the tag must face the coil, then '
+                        'retry' % (self._disp(ace_idx), self._disp(slot),
+                                   page))
+                    return
+                _out['ok'], _out['msg'] = self._gen1_tunnel_report(
+                    ace_idx, slot, res)
+                self._gen1_tunnel_store(ace_idx, slot, res, why='manual')
+            except Exception as e:
+                _out['ok'] = False
+                _out['msg'] = 'read failed: %s' % e
+                self.log_always('[multiACE] ACE %d slot %d: tag read failed: '
+                                '%s' % (self._disp(ace_idx),
+                                        self._disp(slot), e))
+                logging.exception('[multiACE] gen1 tag tunnel: read_slot')
+            finally:
+                self._gen1_tunnel_busy.discard(ace_idx)
+                self._tag_op_result = {
+                    'ok': bool(_out['ok']), 'kind': 'read', 'seq': _seq,
+                    'msg': (_out['msg'] or 'no tag read')[:200]}
+
+        try:
+            self.reactor.register_async_callback(_run)
+        except Exception as e:
+            self._gen1_tunnel_busy.discard(ace_idx)
+            raise self._ace_error(gcmd, 'could not schedule the Gen-1 tag '
+                                  'read (%s)' % e, code=200)
+        gcmd.respond_info('[multiACE] Gen-1 tag read started (ACE %d slot '
+                          '%d page %d)' % (self._disp(ace_idx),
+                                           self._disp(slot), page))
+
+    def _gen1_tunnel_report(self, ace_idx, slot, res):
+        """Console report of ONE finished tunnel read: the raw page bytes
+        first, then the UID and what the bytes are (third-party format).
+        Returns (ok, short_message) for the command's tag_op result."""
+        try:
+            data = res.get('data') or b''
+            page = res.get('page', 0)
+            self.log_always('[multiACE] ACE %d slot %d page %d: %s'
+                            % (self._disp(ace_idx), self._disp(slot), page,
+                               ' '.join('%02X' % b for b in data)))
+            uid = res.get('uid', '')
+            fmt = res.get('format', '')
+            op = res.get('openspool') or {}
+            if uid:
+                if op:
+                    extra = (' - OpenSpool tag: %s %s %s'
+                             % (op.get('material') or '?',
+                                op.get('color') or '?',
+                                op.get('vendor') or '?'))
+                elif fmt == 'ntag':
+                    extra = ' - plain NTAG (no OpenSpool NDEF record)'
+                elif fmt == 'anycubic':
+                    extra = ' - Anycubic layout'
+                else:
+                    extra = ''
+                msg = 'UID %s (%s)' % (uid, fmt or 'unknown')
+                self.log_always('[multiACE] ACE %d slot %d: %s%s - '
+                                'third-party tag'
+                                % (self._disp(ace_idx), self._disp(slot),
+                                   msg, extra))
+                return True, msg
+            if fmt == 'unknown':
+                self.log_always(
+                    '[multiACE] ACE %d slot %d: a card answered SELECT but '
+                    'returned no readable NTAG page (MIFARE?) - no UID'
+                    % (self._disp(ace_idx), self._disp(slot)))
+                return True, 'card answered, no readable page (MIFARE?)'
+            return True, 'card read, no UID on this page'
+        except Exception as e:
+            logging.info('[multiACE] gen1 tag tunnel: report failed '
+                         '(ignored): %s' % e)
+            return True, 'read done'
 
     def _tag_read_guards(self, gcmd, ace_idx, slot):
         """Shared refusals for the RC522 tag commands. Raises _ace_error;
@@ -18504,6 +19387,8 @@ class MultiAce:
             extruder_name = 'extruder' if head == 0 else 'extruder%d' % head
             extruder = self.printer.lookup_object(extruder_name, None)
             if extruder is None:
+                extruder = self.printer.lookup_object('extruder', None)
+            if extruder is None:
                 logging.info(
                     '[multiACE] _get_swap_temp head=%d step2 skip '
                     '(%s not loaded)' % (head, extruder_name))
@@ -20020,7 +20905,7 @@ class MultiAce:
                     self.log_always(self._t('msg.ace_not_reachable_attempt',
                         ace=self._disp(source['ace_index']),
                         attempt=attempt + 1))
-                    time.sleep(1.0)
+                    self.reactor.pause(self.reactor.monotonic() + 1.0)
                 if not switched:
                     self.log_error(self._t('msg.ace_failed_after_retries',
                         ace=self._disp(source['ace_index']), head=self._disp(head)))
@@ -20084,7 +20969,7 @@ class MultiAce:
         for h in range(4):
             sensor = self.printer.lookup_object(
                 'filament_motion_sensor e%d_filament' % h, None)
-            detected = sensor and sensor.get_status(0)['filament_detected']
+            detected = sensor and self._head_filament_present(sensor, h)
             if not detected and self._head_source.get(h) is not None:
                 self._head_source[h] = None
                 cleared.append(h)
@@ -20211,7 +21096,13 @@ class MultiAce:
         # multi<->head stay on the SAME ace files -> pure runtime flip, no file
         # swap / reboot. Only transitions involving 'normal' (stock files) run
         # the file switch script below.
-        if mode in ('multi', 'head') and current in ('multi', 'head'):
+        if self._managed_by_host and mode == 'normal':
+            raise gcmd.error(
+                '[multiACE] Normal mode is controlled by the host platform. '
+                'Disable the managed multiACE integration and reboot.')
+
+        if mode in ('multi', 'head') and (
+                current in ('multi', 'head') or self._managed_by_host):
             self.gcode.run_script_from_command(
                 "SAVE_VARIABLE VARIABLE=ace__mode VALUE=\"'%s'\"" % mode)
             self._ace_mode = mode
@@ -20245,6 +21136,14 @@ class MultiAce:
                 pass
             return
 
+        if self._managed_by_host:
+            # The host has already selected and activated the ACE modules.
+            # Managed mode changes runtime state only; it never invokes the
+            # standalone helper that copies over stock Klipper files.
+            raise gcmd.error(
+                '[multiACE] This mode change is not supported by the managed '
+                'runtime; the host platform controls file activation.')
+
         save_vars = self.printer.lookup_object('save_variables')
         vars_path = save_vars.filename
         script_dir = os.path.dirname(os.path.abspath(vars_path))
@@ -20255,6 +21154,24 @@ class MultiAce:
         file_mode = 'normal' if mode == 'normal' else 'ace'
 
         self.log_always(self._t('msg.running_mode_switch', mode=mode.upper()))
+
+        # Swap the files first and persist the mode only when that worked:
+        # a persisted mode over unswapped files would boot stock modules
+        # under an ace config (S58 re-applies the swap on PAXX, an SSH
+        # install has no such boot hook).
+        import subprocess
+        try:
+            result = subprocess.run(['bash', script, file_mode],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=30)
+        except subprocess.TimeoutExpired:
+            raise gcmd.error('[multiACE] Mode switch script timed out after 30s')
+        except Exception as e:
+            raise gcmd.error('[multiACE] Failed to run mode switch script: %s' % str(e))
+        if result.returncode != 0:
+            raise gcmd.error(
+                '[multiACE] Mode switch script failed (rc=%d): %s' % (
+                    result.returncode, result.stderr.decode('utf-8', 'replace')))
 
         self.gcode.run_script_from_command(
             "SAVE_VARIABLE VARIABLE=ace__mode VALUE=\"'%s'\"" % mode)
@@ -20270,29 +21187,18 @@ class MultiAce:
             # so multi->head->normal->multi still restores the manual heads.
             self._convert_feeder_to_manual()
 
-        try:
-            import subprocess
-            result = subprocess.run(['bash', script, file_mode],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    timeout=30)
-            if result.returncode != 0:
-                raise gcmd.error(
-                    '[multiACE] Mode switch script failed (rc=%d): %s' % (
-                        result.returncode, result.stderr.decode('utf-8', 'replace')))
-        except subprocess.TimeoutExpired:
-            raise gcmd.error('[multiACE] Mode switch script timed out after 30s')
-        except Exception as e:
-            raise gcmd.error('[multiACE] Failed to run mode switch script: %s' % str(e))
-
         self.gcode.run_script_from_command(
             'RAISE_EXCEPTION ID=6666 INDEX=6 CODE=6 MESSAGE="[multiACE] Switched to %s mode. Please reboot!" ONESHOT=0 LEVEL=2' % mode.upper())
 
         raise gcmd.error(
             '[multiACE] Switched to %s mode. Please reboot the printer to activate!' % mode.upper())
 
-    _UPDATE_SCRIPT = '/home/lava/multiace_update.sh'
+    _UPDATE_SCRIPT = '/home/lava/multiace_update.sh' if os.path.isfile('/home/lava/multiace_update.sh') else os.path.expanduser('~/multiace_update.sh')
 
     def _run_update_script(self, gcmd, sub_args, timeout):
+        if self._managed_by_host:
+            raise gcmd.error(
+                '[multiACE] Updates are managed by the platform.')
         if not os.path.isfile(self._UPDATE_SCRIPT):
             raise gcmd.error(
                 '[multiACE] Updater script not found at %s - re-run '
@@ -20943,6 +21849,14 @@ class MultiAce:
             for n, s in enumerate(info.get('slots', []) or []):
                 if not isinstance(s, dict):
                     continue
+                # Gen-1 tunnel read for this slot (own store, never
+                # _info_per_ace): it supplies the card UID the Pro's own
+                # reader cannot deliver for a third-party tag. A device
+                # value always wins - the tunnel only fills the gap.
+                _tt = (self._gen1_tunnel_reads.get(i) or {}).get(
+                    s.get('index', n))
+                if not isinstance(_tt, dict):
+                    _tt = {}
                 slots_out.append({
                     'index':    s.get('index', n),
                     'status':   s.get('status', ''),
@@ -20954,18 +21868,25 @@ class MultiAce:
                     'color':    s.get('color', [0, 0, 0]),
                     # Card UID of the last host read (UID-first line);
                     # the merge sets it, this list is explicit so it
-                    # never reached the web.
-                    'uid':      s.get('uid', ''),
+                    # never reached the web. On a Gen 1 the tunnel read is
+                    # such a host read - the device's own value wins when
+                    # it has one.
+                    'uid':      s.get('uid', '') or _tt.get('uid', ''),
                     # anycubic / openspool / mifare / unknown. A
                     # DEVICE read (rfid==2 from the firmware - every V1
                     # slot, and V2 slots the firmware read itself) is by
                     # definition the Anycubic layout; only host reads
-                    # carry another format.
+                    # carry another format. A Gen-1 tunnel read supplies
+                    # it when the firmware delivered none.
                     'tag_format': (s.get('tag_format', '')
                                    or ('anycubic' if s.get('rfid') == 2
-                                       else '')),
+                                       else '')
+                                   or _tt.get('format', '')),
                 })
             protocol = self._protocols.get(i)
+            # Pushed external reading (ACE_SET_HUMIDITY): last value, age,
+            # freshness, source, and whether it drives a running cycle.
+            _ext = self._external_rh_status(i)
             aces.append({
                 'idx':          i,
                 'connected':    self._connected_per_ace.get(i, False),
@@ -20976,10 +21897,16 @@ class MultiAce:
                 # OTA updater).
                 'model':        (self._ace_models.get(i) or ('', ''))[0],
                 'firmware':     (self._ace_models.get(i) or ('', ''))[1],
+                'community_fw': self._community_fw_kind(i),
                 'status':       info.get('status', 'unknown'),
                 'temp':         info.get('temp', 0),
 
                 'humidity':     info.get('humidity'),
+                # `humidity` above stays the DEVICE's own sensor value (every
+                # existing consumer keeps working); the block below says
+                # which reading control actually uses right now, how old a
+                # pushed one is and where it came from.
+                **_ext,
                 # Effective settings (defaults + this unit's override) plus
                 # whether WE are running it, so the UI can tell an automatic
                 # cycle from one the user started. str keys throughout - the
@@ -20995,6 +21922,10 @@ class MultiAce:
                 'valve_open':   self._dryer_valve_open.get(i, False),
                 'gate_status':  self._gate_status_per_ace.get(i, []),
                 'feed_assist':  self._feed_assist_per_ace.get(i, -1),
+                # Gen-1 tag tunnel (own store, never _info_per_ace):
+                # enabled flag, probe result (None = never probed) and the
+                # last read per slot. Additive; empty reads on a V2.
+                'tag_tunnel':   self._gen1_tunnel_status(i),
                 # For the web backend's ACE 2 OTA updater: which device
                 # node to open once the port is released, and whether the
                 # release hold is active right now.
@@ -21003,12 +21934,15 @@ class MultiAce:
                 'slots':        slots_out,
             })
         ace_heads_now = [h for h in range(4) if self.head_uses_ace(h)]
-        # Candidates a follower can point at: only a connected ACE 2 has a
-        # humidity reading to drive anything. The UI fills its master
-        # dropdown from this instead of re-deriving the rule.
+        # Candidates a follower can point at: only a connected unit with a
+        # humidity reading can drive anything - an ACE 2's own sensor, or a
+        # pushed external reading (ACE_SET_HUMIDITY) for any generation.
+        # The UI fills its master dropdown from this instead of re-deriving
+        # the rule.
         auto_dry_masters = [i for i in range(len(self._ace_devices))
                             if self._connected_per_ace.get(i, False)
-                            and self._is_v2(i)]
+                            and (self._is_v2(i)
+                                 or i in getattr(self, '_external_rh', {}))]
         return {
             'api_version': ACE_API_VERSION,
             'auto_dry_masters': auto_dry_masters,
@@ -21099,6 +22033,9 @@ class MultiAce:
                 ('tag_write_uid_sku',
                  getattr(self, 'tag_write_uid_sku', None),
                  getattr(self, '_tag_write_uid_sku_cfg', None)),
+                ('gen1_tag_tunnel',
+                 getattr(self, 'gen1_tag_tunnel', None),
+                 getattr(self, '_gen1_tag_tunnel_cfg', None)),
             ) if _cfgv is not None and _cur != _cfgv],
             # Spool table: str keys (orjson: int keys shut
             # the printer down), weights are estimates.

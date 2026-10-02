@@ -717,6 +717,34 @@ class AceTagReader:
             detail = (uid1 or '?', uid2 or '?', sel)
         return '', detail
 
+    @staticmethod
+    def uid_from_page0(data):
+        """The 7-byte NTAG UID from a 16-byte page-0..3 read, hex, or ''.
+
+        page0 = U0 U1 U2 BCC0, page1 = U3 U4 U5 U6, page2 byte0 = BCC1.
+        BOTH check bytes are VERIFIED: a read in a shifted reader state came
+        back as 88 04 1C AA 3A 51 C3 = the neighbour's page bytes with the
+        cascade tag 0x88 pushed in front - deterministic, so it passed a
+        two-identical-reads stability check three rounds running and was
+        ingested as a "new MIFARE card"; a field-edge flip (...2A81 read as
+        ...2A00) passed the same way. The BCCs are the tag's own checksum
+        over exactly these bytes; a mismatch is a corrupted read, never a
+        UID. An all-zero UID is rejected too. Shared by this reader and the
+        Gen-1 tunnel client (ace_gen1_tunnel.uid_from_page0)."""
+        try:
+            if not data:
+                return ''
+            bcc0 = 0x88 ^ data[0] ^ data[1] ^ data[2]
+            bcc1 = data[4] ^ data[5] ^ data[6] ^ data[7]
+            if data[3] != bcc0 or data[8] != bcc1:
+                return ''
+            uid = bytes(data[0:3] + data[4:8])
+            if not any(uid):
+                return ''
+            return uid.hex().upper()
+        except (TypeError, IndexError):
+            return ''
+
     def _rc_read_uid(self, idx, slot, respond=None):
         """Read an NTAG's UID from pages 0-1 after a SELECT. A READ (0x30)
         of page 0 returns 16 bytes = pages 0..3; the 7-byte UID is bytes
@@ -740,26 +768,12 @@ class AceTagReader:
         pg = self._rc_read_page(idx, slot, 0, dbg)
         if not any(pg):
             return ''
-        # 7-byte NTAG UID: page0 = U0 U1 U2 BCC0, page1 = U3 U4 U5 U6,
-        # page2 byte0 = BCC1. BOTH check bytes are VERIFIED:
-        # a read in a shifted reader state came back as 88 04 1C AA 3A 51
-        # C3 = the neighbour's page bytes with the cascade tag 0x88 pushed
-        # in front - deterministic, so it passed the two-identical-reads
-        # stability check three rounds running and was ingested as a
-        # "new MIFARE card"; a field-edge flip (…2A81 read as …2A00) passed
-        # the same way. The BCCs are the tag's own checksum over exactly
-        # these bytes; a mismatch is a corrupted read, never a UID.
-        bcc0 = 0x88 ^ pg[0] ^ pg[1] ^ pg[2]
-        bcc1 = pg[4] ^ pg[5] ^ pg[6] ^ pg[7]
-        if pg[3] != bcc0 or pg[8] != bcc1:
+        uid = self.uid_from_page0(pg)
+        if not uid:
             logging.info('[multiACE] [rc522] UID read rejected (BCC '
                          'mismatch) ACE %d slot %d: %s',
                          idx, slot, bytes(pg[0:9]).hex())
-            return ''
-        uid = bytes(pg[0:3] + pg[4:8])
-        if not any(uid):
-            return ''
-        return uid.hex().upper()
+        return uid
 
     @staticmethod
     def _hx(v):

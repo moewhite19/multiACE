@@ -13,7 +13,9 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 [![Guides & Downloads](visitbutton.png)](https://postapocalyptic-diy.com/multiace/)
 
+## What's new in multiACE 1.11b
 
+Fixes a regression in 1.10b: The Snapmaker and Polymaker vendors in the filament picker show again on firmware 1.6.0 and newer. 
 
 
 ## What's new in multiACE 1.10b
@@ -23,6 +25,7 @@ of the same colour on a free slot and the preflight spreads that colour over bot
 so fewer swaps are needed (a 6 colour print with 28 swaps came down to 7). Works in head
 mode and in multi mode, with a max-copies setting and a strict colour switch; the plans
 re-plan live in the browser. Manual heads take part in the multi preflight as pinned heads.
+(Idea: Dragg30 /snapmaker forum)
 
 **Calibrate button in the PA dialog**
 
