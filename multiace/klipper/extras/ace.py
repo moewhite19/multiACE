@@ -13877,10 +13877,23 @@ class MultiAce:
                     si['subtype'] = subtype
                     si['sku'] = sku
                     si['rfid'] = 2
-            self._v2_filament_info_per_ace.setdefault(a, {})[s] = {
+            _prev = ((self._v2_filament_info_per_ace.get(a) or {})
+                     .get(s) or {})
+            _uid = (_prev.get('uid')
+                    or (getattr(self, '_rc_last_uid', None)
+                        or {}).get((a, s)))
+            _ent = {
                 'type': mat, 'color': rgb, 'brand': brand, 'sku': sku,
                 'subtype': subtype, 'host': True, 'fmt': 'spool',
             }
+            if _uid:
+                _ent['uid'] = _uid
+            self._v2_filament_info_per_ace.setdefault(a, {})[s] = _ent
+            # Persist to ace_vars (ace__tag_reads): the boot path restores
+            # that table and surfaces it to the slot/display. Without this
+            # the assigned colour/type lived only in memory, so a restart
+            # left the slot 'unset' (only the tag UID survived).
+            self._persist_tag_reads()
             logging.info(
                 '[multiACE] [spool] synced spool #%s identity to ACE %d '
                 'slot %d (type=%r brand=%r subtype=%r color=%s)',
