@@ -11,6 +11,7 @@ Environment variables:
   MULTIACE_CONFIG_DIR    printer_data/config directory
   MULTIACE_PRINTER_DATA  printer data root
   MULTIACE_CFG_PATH      legacy explicit config-file override
+  MULTIACE_POST_PROCESS_SCRIPT  override path to post_process_virtual_toolheads.py
   MULTIACE_FRONTEND_DIR  default ../frontend (relative to this file)
   MULTIACE_MANAGED       set to 1 when the platform owns installation/updates
   MULTIACE_MANAGED_MARKER durable neutral managed-install marker path
@@ -19,6 +20,7 @@ Environment variables:
 from __future__ import annotations
 
 import ast
+import hashlib
 import asyncio
 import json
 import logging
@@ -28,7 +30,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import websockets
 
@@ -291,6 +293,16 @@ def _int_or(v, default):
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def _tag_read_possible(a: dict) -> bool:
+    fw = str(a.get("firmware", "") or "").strip().upper()
+    if fw.endswith("O"):
+        return True
+    avail = (a.get("tag_tunnel") or {}).get("available")
+    if avail is not None:
+        return bool(avail)
+    return fw.startswith("CV")
 
 
 def _community_fw_kind(fw):
@@ -585,6 +597,9 @@ def _parse_state(status: dict) -> dict:
         aces_out.append({
             "idx":          i,
             "connected":    a.get("connected"),
+            # Last connect failure (Klipper, since 1.20b), e.g.
+            # "[Errno 13] Permission denied"; '' when none or older ace.py.
+            "connect_error": a.get("connect_error") or "",
             "protocol":     a.get("protocol", ""),
             "model":        a.get("model", ""),
             "firmware":     a.get("firmware", ""),
@@ -592,6 +607,11 @@ def _parse_state(status: dict) -> dict:
             # letter O (V1.1.3O) - same rule as ace._is_open_fw_idx. The
             # RC522 tag read/write live only there.
             "open_fw":      str(a.get("firmware", "") or "").strip().upper().endswith("O"),
+            # Tag READ possible on this unit: ACE2-Open, or an ACE Pro on
+            # community firmware (CV...). The tunnel probe runs on the first
+            # read, so an unprobed CV unit shows the button; a failed probe
+            # (available False) hides it again.
+            "tag_read":     _tag_read_possible(a),
             # Display-only badge: 'ace2_open' | 'gen1_cfw' | ''. Klipper sends
             # it since 1.20b; derived here from the firmware string for an
             # older ace.py (same rules).
@@ -1065,6 +1085,24 @@ def _inbox_clear():
 _pp_module = None
 _pp_src_sig = None
 
+def post_process_script_path() -> Optional[Path]:
+    """Resolve the active post_process_virtual_toolheads.py script path.
+
+    Precedence:
+      1. MULTIACE_POST_PROCESS_SCRIPT environment variable (if file exists)
+      2. _CFG_DIR / tools / post_process_virtual_toolheads.py
+      3. Package tools/ directory relative to this file
+    """
+    override = os.environ.get("MULTIACE_POST_PROCESS_SCRIPT", "").strip()
+    if override and os.path.isfile(override):
+        return Path(override)
+    candidates = [
+        Path(_CFG_DIR) / "tools" / "post_process_virtual_toolheads.py",
+        Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
+    ]
+    return next((p for p in candidates if p.is_file()), None)
+
+
 def _load_post_processor():
     """Lazy-load the post-processor as a Python module so its parsing
     and remap helpers can be reused server-side without a subprocess.
@@ -1074,13 +1112,7 @@ def _load_post_processor():
     whenever
     the source file changed (path/mtime/size signature)."""
     global _pp_module, _pp_src_sig
-    candidates = [
-        Path(p) for p in _user_paths(
-            "printer_data/config/tools/post_process_virtual_toolheads.py")
-    ] + [
-        Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
-    ]
-    src = next((p for p in candidates if p.is_file()), None)
+    src = post_process_script_path()
     if src is None:
         raise HTTPException(status_code=503,
                             detail="post-processor script not installed")
@@ -1630,13 +1662,7 @@ async def preflight_pysrc() -> dict:
     """The two Python sources the in-browser Pyodide worker runs: the
     unmodified post-processor + preflight_core. Served so the browser executes
     the SAME code as the backend (one source of truth, no JS re-port/drift)."""
-    candidates = [
-        Path(p) for p in _user_paths(
-            "printer_data/config/tools/post_process_virtual_toolheads.py")
-    ] + [
-        Path(__file__).resolve().parent.parent.parent / "tools" / "post_process_virtual_toolheads.py",
-    ]
-    pp_src = next((p for p in candidates if p.is_file()), None)
+    pp_src = post_process_script_path()
     if pp_src is None:
         raise HTTPException(status_code=503,
                             detail="post-processor script not installed")
@@ -3047,8 +3073,12 @@ async def acefw_upload(file: UploadFile = File(...)) -> dict:
         guess = ace2_ota.guess_version(file.filename or "")
     except Exception:
         pass
+    # md5 of the upload: a Gen-1 image is identified by its bytes, not by
+    # its name (the tunnel build ships as ACE_V1.3.863_tunnel_ops.bin), so
+    # the card preselects the Gen-1 entry by md5.
     return {"ok": True, "name": _acefw["file"], "size": len(data),
-            "version_guess": guess}
+            "version_guess": guess,
+            "md5": hashlib.md5(data).hexdigest()}
 
 
 async def _acefw_run(ace: int, port: str, version: str,
@@ -5239,7 +5269,7 @@ async def ws(websocket: WebSocket) -> None:
 # a 304 with no body - unnoticeable on a LAN. Deliberately only the shell:
 # the vendored Vue bundle and the icons change with a release, and it was
 # the stale shell that hid them.
-_SHELL_PATHS = {"/", "/index.html", "/app.js", "/style.css"}
+_SHELL_PATHS = {"/", "/index.html", "/app.js", "/style.css", "/style-new.css"}
 
 @app.middleware("http")
 async def _shell_revalidate(request: Request, call_next):
