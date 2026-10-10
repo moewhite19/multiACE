@@ -16585,10 +16585,44 @@ class MultiAce:
                 self._spool_sync_to_slot_display(a, sl, self._spools[sid])
             except Exception as _e:
                 logging.info('[multiACE] slot display sync skipped: %s' % _e)
+            # A head LOADED from this slot must follow the new assignment:
+            # the loaded-head display push reads head_source (captured at
+            # load), NOT the slot mirror, so refresh that capture here.
+            # SpoolLink mode had the external resolver set the head identity
+            # for us; in spoolman mode nothing did, so the head tile kept
+            # the previous spool.
+            try:
+                _sp = self._spools[sid]
+                _src_upd = False
+                for _h in range(4):
+                    _src = self._head_source.get(_h)
+                    if (_src and int(_src.get('ace_index', -1)) == a
+                            and int(_src.get('slot', -1)) == sl):
+                        _src['type'] = (_sp.get('material') or '').strip()
+                        _src['color'] = ((_sp.get('color') or '')
+                                         .strip().lstrip('#').upper()[:6])
+                        _src['brand'] = (_sp.get('vendor') or '').strip()
+                        _src['subtype'] = (_sp.get('subtype') or '').strip()
+                        _src_upd = True
+                if _src_upd:
+                    self._save_head_source()
+            except Exception as _e:
+                logging.info('[multiACE] assign head-source refresh skipped: '
+                             '%s' % _e)
             try:
                 self._sync_ptc_to_active_ace()
             except Exception as _e:
                 logging.info('[multiACE] ptc sync skipped: %s' % _e)
+            # Push the fresh identity to the printer NOW: the web picker's
+            # "only the binding changed" path sends no MULTIACE_REFRESH_OVERRIDES,
+            # and the heartbeat display-heal no longer re-pushes on an assign,
+            # so without this the touchscreen keeps the previous spool.
+            if a == self._active_device_index:
+                try:
+                    self._push_rfid_info()
+                except Exception as _e:
+                    logging.info('[multiACE] assign display push skipped: '
+                                 '%s' % _e)
         # SL mode, head bind: hand the spool to SpoolLink right away so a
         # feeder head counts from the moment it is bound (gap-filler only -
         # the send's feeder precedence skips it when the feeder reader
