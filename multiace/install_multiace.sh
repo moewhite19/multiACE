@@ -163,32 +163,23 @@ log "  Klipper extras installed"
 cp "$INSTALL_DIR/klipper/kinematics/extruder_ace.py" "$KINEMATICS_DIR/extruder_ace.py"
 chmod 644 "$KINEMATICS_DIR/extruder_ace.py"
 log "  Klipper kinematics installed"
-# Multi-MCU homing trsync window. Stock 1.4.1 sets TRSYNC_TIMEOUT=0.050; the
-# eddy-current bed probe intermittently exceeds it on a toolhead MCU and trips
-# "Communication timeout during homing" (0003-0528, index:3). We raise it to
-# 0.350 (stock 1.5's own default) to mask it. The standalone web-head daemon
-# (S98multiace-web) reduces but does not eliminate the 0003 (web-preflight
-# bedmesh still trips it), so the mitigation is re-armed here. The root cause -
-# klippy code-page eviction on overlay/SSH installs during the multi-MCU
-# homing-probe window - is tracked separately.
-#
-# ONLY-RAISE: stock 1.5 already ships 0.350 (and a future stock may go higher);
-# never pull the window back DOWN. Patch only when the live value is LOWER than
-# our floor (e.g. 1.4.1's 0.050).
-# TESTING: set TRSYNC_VALUE to "0.050" to observe the real 0003 signal.
-TRSYNC_VALUE="0.350"
+# Multi-MCU homing trsync window. Earlier installs raised TRSYNC_TIMEOUT
+# in mcu.py and kept the stock file as mcu.py.pre_multiace. The window is
+# now set at runtime by ace.py ([ace] trsync_timeout, default off), so the
+# file goes back to its stock value here and is not patched any more.
 MCU_PY="${HOME_DIR}/klipper/klippy/mcu.py"
-if [ -f "$MCU_PY" ] && grep -qE '^TRSYNC_TIMEOUT = ' "$MCU_PY"; then
+if [ -f "$MCU_PY" ] && [ -f "${MCU_PY}.pre_multiace" ]; then
     TRSYNC_CUR="$(grep -oE '^TRSYNC_TIMEOUT = [0-9.]+' "$MCU_PY" | awk '{print $3}')"
-    if [ -n "$TRSYNC_CUR" ] && awk "BEGIN{exit !($TRSYNC_CUR < $TRSYNC_VALUE)}"; then
-        [ -f "${MCU_PY}.pre_multiace" ] || cp "$MCU_PY" "${MCU_PY}.pre_multiace" 2>/dev/null || true
-        sed -i -E "s/^TRSYNC_TIMEOUT = .*/TRSYNC_TIMEOUT = ${TRSYNC_VALUE}/" "$MCU_PY"
-        log "  TRSYNC_TIMEOUT raised ${TRSYNC_CUR} -> ${TRSYNC_VALUE} in mcu.py (backup: ${MCU_PY}.pre_multiace)"
-    else
-        log "  TRSYNC_TIMEOUT already >= ${TRSYNC_VALUE} (${TRSYNC_CUR}) - leaving stock untouched"
+    TRSYNC_STOCK="$(grep -oE '^TRSYNC_TIMEOUT = [0-9.]+' "${MCU_PY}.pre_multiace" | awk '{print $3}')"
+    if [ -n "$TRSYNC_CUR" ] && [ -n "$TRSYNC_STOCK" ] && [ "$TRSYNC_CUR" != "$TRSYNC_STOCK" ]; then
+        if sed -i -E "s/^TRSYNC_TIMEOUT = .*/TRSYNC_TIMEOUT = ${TRSYNC_STOCK}/" "$MCU_PY" 2>/dev/null; then
+            log "  TRSYNC_TIMEOUT restored ${TRSYNC_CUR} -> ${TRSYNC_STOCK} (stock) in mcu.py"
+        else
+            log "  WARNING: could not restore TRSYNC_TIMEOUT in mcu.py (not writable)"
+        fi
     fi
 fi
-# Same 0003/"Timer too close" family as the trsync raise above: pre-warm the
+# 0003/"Timer too close" family: pre-warm the
 # klipper page cache at every boot so the homing/probe window never takes a
 # cold page fault (see the script header for details). Needs root for
 # /etc/init.d; a lava-context web update skips it with a note (the previously
@@ -289,22 +280,32 @@ if [ -d "$INSTALL_DIR/tools" ]; then
     cp "$INSTALL_DIR/tools/"*.py "${HOME_DIR}/printer_data/config/tools/" 2>/dev/null || true
     log "  Tools installed"
 fi
+# The updater is usually the process RUNNING this installer (web update).
+# bash reads a script while executing it, so overwriting that file in
+# place (cp = same inode) makes the running copy continue in the new text
+# at the old offset. A rename (new inode) leaves the running copy on its
+# old file. Also protects updaters older than this fix.
+install_updater_copy() {
+    _dst="$1"
+    _tmp="$_dst.new.$$"
+    cp "$INSTALL_DIR/tools/multiace_update.sh" "$_tmp" 2>/dev/null || return 1
+    chmod 755 "$_tmp" 2>/dev/null || true
+    chown lava:lava "$_tmp" 2>/dev/null || true
+    mv -f "$_tmp" "$_dst" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+    return 0
+}
 if [ -f "$INSTALL_DIR/tools/multiace_update.sh" ]; then
     mkdir -p "$MULTIACE_DIR/.."
-    cp "$INSTALL_DIR/tools/multiace_update.sh" "$HOME_DIR/multiace_update.sh"
-    chmod 755 "$HOME_DIR/multiace_update.sh"
-    chown lava:lava "$HOME_DIR/multiace_update.sh" 2>/dev/null || true
-    log "  Updater installed at $HOME_DIR/multiace_update.sh"
+    install_updater_copy "$HOME_DIR/multiace_update.sh" \
+        && log "  Updater installed at $HOME_DIR/multiace_update.sh" \
+        || log "  WARN: could not install $HOME_DIR/multiace_update.sh"
     # PAXX-baked firmware ships a copy at /home/lava/multiace/tools/
     # from the squashfs. Refresh it too so the Web backend's fallback
     # path doesn't lag behind the canonical one.
     if [ -d "$HOME_DIR/multiace/tools" ]; then
-        cp "$INSTALL_DIR/tools/multiace_update.sh" \
-            "$HOME_DIR/multiace/tools/multiace_update.sh" 2>/dev/null && {
-            chmod 755 "$HOME_DIR/multiace/tools/multiace_update.sh" 2>/dev/null || true
-            chown lava:lava "$HOME_DIR/multiace/tools/multiace_update.sh" 2>/dev/null || true
-            log "  Updater also refreshed at $HOME_DIR/multiace/tools/multiace_update.sh"
-        } || log "  WARN: could not refresh $HOME_DIR/multiace/tools/multiace_update.sh"
+        install_updater_copy "$HOME_DIR/multiace/tools/multiace_update.sh" \
+            && log "  Updater also refreshed at $HOME_DIR/multiace/tools/multiace_update.sh" \
+            || log "  WARN: could not refresh $HOME_DIR/multiace/tools/multiace_update.sh"
     fi
 fi
 if [ -f "$INSTALL_DIR/tools/merge_ace_cfg.py" ]; then
@@ -594,7 +595,12 @@ PYEOF
     else
         log "  Skipped sudoers drop-in update (non-root context)"
     fi
-    if [ "$IS_ROOT" = "1" ] && [ -x "$INITD_SCRIPT" ]; then
+    if [ "$IS_ROOT" = "1" ] && [ -n "$MULTIACE_WEB_PID" ]; then
+        # Web update from a root-owned backend: it re-execs itself (same
+        # PID, S98's pidfile stays valid) once the updater returns. A
+        # stop/start here would kill the caller mid-request.
+        log "  Web update: the backend restarts itself after the install"
+    elif [ "$IS_ROOT" = "1" ] && [ -x "$INITD_SCRIPT" ]; then
         "$INITD_SCRIPT" stop  >>"$LOGFILE" 2>&1 || true
         "$INITD_SCRIPT" start >>"$LOGFILE" 2>&1 || log "  WARN: start failed - see $LOGFILE"
         sleep 1
@@ -609,7 +615,12 @@ PYEOF
             log "  WARN: multiACE Web NOT healthy - check $LOGFILE and $WEB_DEST/backend/"
         fi
     else
-        if pgrep -u lava -f 'uvicorn.*main:app' >/dev/null 2>&1; then
+        if [ -n "$MULTIACE_WEB_PID" ]; then
+            # Called by the web backend's update endpoint: that process
+            # re-execs itself once the updater returns. Killing it here
+            # left the web dead with nobody to restart it (HW 2026-10-10).
+            log "  Web update: the backend restarts itself after the install"
+        elif pgrep -u lava -f 'uvicorn.*main:app' >/dev/null 2>&1; then
             pkill -TERM -u lava -f 'uvicorn.*main:app' 2>/dev/null || true
             log "  Sent SIGTERM to running uvicorn (restart needed for new code)"
         fi
@@ -621,7 +632,7 @@ PYEOF
             log "  WARN: :7126 still served by an instance we cannot replace"
             log "        (root-owned?) - new web code is NOT live until reboot"
         fi
-        log "  Skipped service restart (non-root context) - reboot or use Web Restart"
+        [ -n "$MULTIACE_WEB_PID" ] || log "  Skipped service restart (non-root context) - reboot, or restart S98multiace-web as root"
     fi
 fi
 DATA_DIR="${HOME_DIR}/printer_data"
