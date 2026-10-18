@@ -4896,6 +4896,7 @@ createApp({
       state_debug: false,
       usb_debug: false,
       fa_debug: false,
+      disable_rfid: false,
       perAce: [],
     });
     function _makePerAceEntry() {
@@ -4954,6 +4955,7 @@ createApp({
       configForm.state_debug    = bool('state_debug');
       configForm.usb_debug      = bool('usb_debug');
       configForm.fa_debug       = bool('fa_debug');
+      configForm.disable_rfid   = bool('disable_rfid');
       _ensurePerAceLength();
       const pa = perAceParams || {};
       for (let i = 0; i < configForm.perAce.length; i++) {
@@ -4996,6 +4998,7 @@ createApp({
         state_debug:        configForm.state_debug ? 'true' : 'false',
         usb_debug:          configForm.usb_debug   ? 'true' : 'false',
         fa_debug:           configForm.fa_debug    ? 'true' : 'false',
+        disable_rfid:       configForm.disable_rfid ? 'true' : 'false',
       };
       for (let i = 0; i < configForm.perAce.length; i++) {
         const p = configForm.perAce[i];

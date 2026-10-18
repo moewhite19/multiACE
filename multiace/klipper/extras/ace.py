@@ -1118,6 +1118,16 @@ class MultiAce:
         # not halt.
         config.get('gen1_tag_tunnel', None)
         self.gen1_tag_tunnel = True
+        # Master RFID switch. false (default) = tag reading on, exactly as
+        # before. true = multiACE issues NO AUTOMATIC tag read: the insert
+        # auto-read still performs its verified abort (which stops the ACE
+        # firmware procedure, so the device's OWN read never runs either -
+        # "nothing reads RFID"), then parks the lane at the stock net depth
+        # WITHOUT sweeping; the connect rescan issues no identify. Manual
+        # G-code (ACE_TAG_READ / ACE_TAG_WRITE) is DELIBERATELY unaffected.
+        # Set from the web Config tab (applied on the next Klipper restart,
+        # like the debug flags there).
+        self.disable_rfid = config.getboolean('disable_rfid', False)
 
         # Auto-dry: humidity-controlled drying. Only an ACE 2 can drive it -
         # it is the only one reporting a humidity reading (cmd 6 field 4); an
@@ -3930,6 +3940,19 @@ class MultiAce:
             def _respond(msg):
                 self.log_always('[multiACE] %s' % msg)
                 logging.info('[multiACE] [rc522] %s' % msg)
+
+            if self.disable_rfid:
+                # RFID disabled: the verified abort above already stopped the
+                # firmware procedure, so the device's OWN read never runs;
+                # skip OUR sweep too and just park the lane at the stock net
+                # depth for the pre-load.
+                _respond('rc522: RFID disabled - ACE %d slot %d parked at '
+                         'net depth, no tag read'
+                         % (self._disp(idx), self._disp(slot)))
+                if depth is not None:
+                    reader._correct_to(idx, slot,
+                                       INSERT_PARK_NET - int(depth), _respond)
+                return
 
             _respond('rc522: insert on ACE %d slot %d - transport sweep + '
                      'tag read (UID-first)'
@@ -7378,7 +7401,8 @@ class MultiAce:
         now = time.monotonic()
         slots = result.get('slots') or []
         if slots and self._v2_rfid_rescan_pending.pop(idx, False):
-            self._v2_rfid_boot_rescan(idx, slots)
+            if not self.disable_rfid:
+                self._v2_rfid_boot_rescan(idx, slots)
         for i, slot in enumerate(slots):
             cached = cache.get(i)
             host_read = bool(cached and cached.get('host'))

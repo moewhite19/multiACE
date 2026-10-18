@@ -1894,6 +1894,17 @@
           </label>
         </div>
         <p class="muted small config-row-hint" v-if="state.rc522">{{ t('ui.config.tag_write_hint') }}</p>
+        <!-- RFID master switch (config line disable_rfid): applied on the
+             next Klipper restart, like the debug flags below. Manual
+             ACE_TAG_READ / ACE_TAG_WRITE are never gated by it. -->
+        <div class="config-row">
+          <label>{{ t('ui.config.disable_rfid') }}</label>
+          <label class="config-inline-check">
+            <input type="checkbox" v-model="configForm.disable_rfid">
+            {{ t('ui.config.disable_rfid_label') }}
+          </label>
+        </div>
+        <p class="muted small config-row-hint">{{ t('ui.config.disable_rfid_hint') }}</p>
         <fieldset>
           <legend>{{ t('ui.config.debug_logs') }}</legend>
           <label><input type="checkbox" v-model="configForm.state_debug"> state_debug</label>
