@@ -8,8 +8,6 @@ Started as a SnapACE fork, it has grown to over 5 times the original size, with 
 
 ## What's new in multiACE 1.27b 
 
-This is a prerelease: new features to try out before the next release. Please report anything odd.
-
 **A big thank you to our new collaborators.** Three developers joined the project and brought their own features with them:
 
 - **Simon-CR** - the ACE2-Open community firmware for the ACE 2 Pro, which lets multiACE read and write spool tags. multiACE now also runs on other Klipper printers, not only the Snapmaker U1 (his Voron is the first one), and a watchdog notices when an ACE silently stops answering and reconnects it.
