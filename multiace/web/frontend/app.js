@@ -1,7 +1,10 @@
 const { createApp, ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } = Vue;
-const API = "/multiace/api";
+// Behind nginx the UI lives at /multiace; the dev server serves it from the
+// root. Deriving the base from the path keeps one bundle working in both.
+const BASE = location.pathname.startsWith("/multiace") ? "/multiace" : "";
+const API = BASE + "/api";
 const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://")
-             + location.host + "/multiace/ws";
+             + location.host + BASE + "/ws";
 const SCREEN = "/screen";
 createApp({
   setup() {
@@ -47,6 +50,76 @@ createApp({
           }
         }
       }
+    }
+    // The navigation entries, in order. The top bar renders this list, so
+    // a feature adds a tab by adding one entry here instead of editing the
+    // markup.
+    const navItems = computed(() => {
+      const items = [];
+      if (state.mode !== "normal") {
+        items.push({key: "dashboard", label: t("ui.tabs.dashboard")});
+      }
+      items.push({key: "spools", label: t("ui.tabs.spools")});
+      items.push({key: "config", label: t("ui.tabs.config")});
+      // Calibration hangs off Config: shown only while one of the two is
+      // open, so it cannot vanish under the user once selected.
+      if (CALIBRATION_TAB && state.mode !== "normal"
+          && (tab.value === "config" || tab.value === "calibration")) {
+        items.push({key: "calibration", label: t("ui.tabs.calibration")});
+      }
+      for (const p of plugins.items) {
+        items.push({key: "plugin:" + p.name, label: p.label});
+      }
+      return items;
+    });
+    // Groups of tabs. An entry with `group: "<key>"` is a child of that group:
+    // the top bar shows ONE entry for the group (placed before the entry named
+    // in `before`) and a second row lists the children while one of them is
+    // open. A group with no children is not shown, so adding a feature's tab
+    // is the only thing that makes its group appear.
+    const NAV_GROUPS = [
+      {key: "printhub", labelKey: "ui.tabs.print_hub", before: "spools"},
+    ];
+    const groupLast = reactive({});
+    for (const g of NAV_GROUPS) {
+      try { groupLast[g.key] = localStorage.getItem("multiace.tabGroup." + g.key) || ""; }
+      catch (e) { groupLast[g.key] = ""; }
+    }
+    const groupOf = (key) => {
+      const it = navItems.value.find(i => i.key === key);
+      return it && it.group ? it.group : null;
+    };
+    const activeGroup = computed(() => groupOf(tab.value));
+    // Remember the last child opened in each group, per browser.
+    watch(tab, (v) => {
+      const g = groupOf(v);
+      if (!g) return;
+      groupLast[g] = v;
+      try { localStorage.setItem("multiace.tabGroup." + g, v); } catch (e) {}
+    });
+    const topItems = computed(() => {
+      const out = [];
+      const addGroup = (g) => {
+        const children = navItems.value.filter(i => i.group === g.key);
+        if (children.length) {
+          out.push({key: "group:" + g.key, group: g.key, children, label: t(g.labelKey)});
+        }
+      };
+      for (const it of navItems.value) {
+        if (it.group) continue;
+        for (const g of NAV_GROUPS) if (g.before === it.key) addGroup(g);
+        out.push(it);
+      }
+      return out;
+    });
+    const subItems = computed(() =>
+      activeGroup.value ? navItems.value.filter(i => i.group === activeGroup.value) : []);
+    const topActive = (it) => it.group ? activeGroup.value === it.group : tab.value === it.key;
+    // A group opens the child that was open last, else its first child.
+    function openNav(it) {
+      if (!it.group) { tab.value = it.key; return; }
+      const last = groupLast[it.group];
+      tab.value = (it.children.find(c => c.key === last) || it.children[0]).key;
     }
     function pluginIframeSrc(p) {
       const u = (p && p.ui_url) || "/";
@@ -7414,6 +7487,7 @@ createApp({
       headPlanMapping, multiTopology, slotHead, pinLabel,
       updateState, updateCheck, updateApply,
       debugState, debugEnable, debugDisable,
+      navItems, topItems, subItems, topActive, openNav,
       plugins, refreshPlugins, pluginIframeSrc,
       notifications, notifWarnOnly, notifTime, dismissNotification, dismissAllNotifications,
       confirmDialog, okConfirm, altConfirm, cancelConfirm, confirmInputError,
