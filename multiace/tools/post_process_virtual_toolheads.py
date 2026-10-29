@@ -1407,6 +1407,148 @@ BG_SWAP_COST_INLINE_S = 210
 BG_SWAP_COST_BG_S = 30
 BG_UNLOAD_INLINE_SAVING_S = BG_SWAP_COST_INLINE_S - BG_SWAP_COST_BG_S
 
+# --------------------------------------------------------------------------
+# Swap timeline for the preflight estimate
+# --------------------------------------------------------------------------
+# swap_cost.SwapCostModel is optional: with no model the timeline falls back
+# to the constants above, and an older installed swap_cost.py simply yields
+# a smaller estimate rather than failing a preflight.
+
+def _model_cost(cost_model, kind, ace=None, slot=None):
+    """Seconds for one swap of `kind`, model-first, constants otherwise."""
+    if cost_model is not None:
+        try:
+            return float(cost_model.swap_seconds(kind, ace=ace, slot=slot))
+        except Exception:
+            pass
+    if kind == 'head_change':
+        return 4.2
+    return float(BG_SWAP_COST_BG_S if kind == 'cross_ace_bg'
+                 else BG_SWAP_COST_INLINE_S)
+
+
+def _model_purge_mm(cost_model, flush_matrix, from_t, to_t):
+    """Millimetres to purge for one swap - the same number the rewrite
+    stamps (see _matrix_purge_mm), resolved through the cost model so the
+    estimate never shows a different purge than the engine extrudes."""
+    if cost_model is None:
+        return 0.0
+    try:
+        return float(cost_model.resolve_swap_purge_mm(
+            stamp_mm=_matrix_purge_mm(flush_matrix, from_t, to_t)))
+    except Exception:
+        return 0.0
+
+
+def build_swap_timeline(events, assignment, event_times=None, bg_heads=None,
+                        cost_model=None, flush_matrix=None,
+                        bg_purge_inline=False, copies=None):
+    """Per-toolchange trace of what the plan costs and why.
+
+    One entry per toolchange:
+      {i, t, from_t, head, ace, slot, kind, window_min, seconds, purge_mm,
+       purge_inline, note}
+    where `kind` is one of swap_cost.SWAP_KINDS. A toolchange that needs no
+    filament change (onto a pinned feeder, or onto a head that already holds
+    the right filament) is a 'head_change': only the pick and park, no
+    purge. `flush_matrix` is the
+    stamp-basis matrix (parse_flush_matrix_raw*): with it `purge_mm` is the
+    stamp the engine will write for that (from_t, to_t) pair. With `copies`
+    (colour copies on several heads, see detect_color_copies) the head of
+    each event is the per-event choice of simulate_dynamic_swaps, the same
+    one the rewriter makes.
+
+    `bg_purge_inline` marks background swaps whose flush happens inline
+    anyway (the background load is disabled, so the arrival loads inline).
+    Returns [] rather than raising on anything it cannot classify: an
+    estimate is never worth failing a preflight over.
+    """
+    bg_set = set(bg_heads or [])
+    events = list(events or [])
+    have_t = bool(event_times) and len(event_times) == len(events)
+
+    head_key = {}        # head -> (ace, slot) currently loaded
+    head_color = {}      # head -> the T last loaded there
+    last_use = {}        # head -> index of its last event
+    out = []
+    chosen = None
+    if copies:
+        chosen = simulate_dynamic_swaps(
+            events, _targets_with_copies(assignment, copies), bg_heads)[1]
+
+    def head_change(i, t, e, note):
+        return {
+            'i': i, 't': t, 'from_t': head_color.get(e.get('head')),
+            'head': e.get('head'), 'ace': e.get('ace'), 'slot': e.get('slot'),
+            'kind': 'head_change', 'window_min': None,
+            'seconds': round(_model_cost(cost_model, 'head_change'), 1),
+            'purge_mm': 0.0, 'purge_inline': False, 'note': note}
+
+    for i, t in enumerate(events):
+        e = chosen[i] if chosen else (assignment or {}).get(t)
+        if not e:
+            continue
+        if e.get('kind') == 'pin':
+            out.append(head_change(i, t, e, 'pinned feeder'))
+            continue
+        if e.get('kind') != 'ace':
+            continue
+        head = e.get('head')
+        key = (e.get('ace'), e.get('slot'))
+        prev_key = head_key.get(head)
+        if prev_key == key:
+            out.append(head_change(i, t, e, 'head already holds it'))
+            last_use[head] = i
+            head_color[head] = t
+            continue
+
+        from_t = head_color.get(head)
+        window = None
+        if have_t:
+            j = last_use.get(head)
+            a = event_times[0 if j is None else j + 1]
+            b = event_times[i]
+            if a is not None and b is not None:
+                window = a - b
+
+        if prev_key is None:
+            kind = 'first_load'
+            note = 'first load of head %s' % head
+        else:
+            # Same rule as the rewrite's bg stamp: a bg-enabled head swaps
+            # in the background when its parked window reaches
+            # BG_UNLOAD_MIN_WINDOW_MIN, or when no M73 time is known (the
+            # engine's abort is the safety net there).
+            if head in bg_set and (window is None
+                                   or window >= BG_UNLOAD_MIN_WINDOW_MIN):
+                kind = 'cross_ace_bg'
+                note = ('preloaded in the background (%.1f min window)'
+                        % window if window is not None else
+                        'background swap, window unknown (no M73 time)')
+            elif prev_key[0] == key[0]:
+                kind = 'same_ace'
+                note = 'same ACE, different slot'
+            else:
+                kind = 'cross_ace_inline'
+                note = ('no window before use - degrades to inline'
+                        if head in bg_set else 'inline swap')
+
+        out.append({
+            'i': i, 't': t, 'from_t': from_t, 'head': head,
+            'ace': e.get('ace'), 'slot': e.get('slot'), 'kind': kind,
+            'window_min': (round(window, 2) if window is not None else None),
+            'seconds': round(_model_cost(
+                cost_model, kind, e.get('ace'), e.get('slot')), 1),
+            'purge_mm': round(_model_purge_mm(
+                cost_model, flush_matrix, from_t, t), 1),
+            'purge_inline': bool(kind == 'cross_ace_bg' and bg_purge_inline),
+            'note': note})
+
+        head_key[head] = key
+        head_color[head] = t
+        last_use[head] = i
+    return out
+
 # [PROTOTYPE] Background the initial-load phase. The auto-load
 # block loads every initial ACE head sequentially inline (~90s each). With
 # this on, every SECOND initial head (that is bg-enabled) is stamped as a
@@ -1449,7 +1591,19 @@ BG_INITIAL_LOAD = True
 # 2: standby temperatures that would cool the printing head are dropped
 # instead of remapped (see scan_cooling_standbys). 3: purge stamps sized
 # from the RAW flush matrix. 4: flush_multiplier inherited upward only.
-PP_FORMAT_VERSION = 4
+# 5: the start tool's (ace, slot) is written after the pre-body T
+# (START_TOOL_MARK) so a file whose body has no tool change still gets an
+# auto-load block.
+# 6: stamped ACE_BG_WAIT arrival holds before toolchanges.
+PP_FORMAT_VERSION = 6
+
+# Written by both rewrites right after the pre-body tool select. A one-colour
+# export has no tool change in the body (Orca writes no change_filament_gcode
+# then), so this is the only place the start tool's ACE slot survives into
+# inject_auto_load_to_file.
+START_TOOL_MARK = '; multiACE start tool: HEAD=%d ACE=%d SLOT=%d\n'
+START_TOOL_RE = re.compile(
+    r'^;\s*multiACE start tool: HEAD=(\d+) ACE=(\d+) SLOT=(\d+)')
 
 def detect_processed(text):
     """(processed: bool, fmt: int|None) for a gcode HEAD chunk or plan
@@ -1608,6 +1762,25 @@ def parse_flush_matrix_from_file(in_path):
     except OSError:
         return None
     return _flush_matrix_build(raw, mult)
+
+def parse_flush_matrix_raw(gcode):
+    """Text variant of parse_flush_matrix_raw_from_file (the preflight's
+    plan proxy keeps the flush_ lines)."""
+    raw = None
+    mult = 1.0
+    for line in gcode.splitlines():
+        s = line.strip()
+        m = _FLUSH_MATRIX_RE.match(s)
+        if m:
+            raw = m.group(1)
+            continue
+        m = _FLUSH_MULT_RE.match(s)
+        if m:
+            try:
+                mult = float(m.group(1))
+            except ValueError:
+                mult = 1.0
+    return _flush_matrix_build(raw, max(1.0, mult))
 
 def parse_flush_matrix_raw_from_file(in_path):
     """The stamp basis: pair values as authored, with the file's
@@ -1844,6 +2017,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
     body_tools, body_times, body_lines = _scan_body_tools(in_path)
     bt_idx = 0
     plan = None
+    bg_waiting_heads = set()
     if copies:
         # bg_heads = the same tie-break the preview simulated with, so the
         # stamped plan is the previewed one.
@@ -1959,6 +2133,10 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                         bt_idx += 1
                     last_pr = _emit_progress(progress, seen, total, last_pr)
                     continue
+                if in_body and h in bg_waiting_heads:
+                    fout.write('ACE_BG_WAIT HEAD=%d\n' % h)
+                    bg_waiting_heads.discard(h)
+
                 fout.write('T%d\n' % h)
                 # Background-unload stamp for the head this toolchange just
                 # RELEASED - BEFORE the arrival's own ACE_SWAP_HEAD:
@@ -2041,6 +2219,8 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                                            _fmt_anti_ooze(ao),
                                            (' PURGE=%d' % _bgp)
                                            if _bgp is not None else ''))
+                                    bg_waiting_heads.add(ae_rel[0])
+
                     ae = ace_entry_at(bt_idx)
                     bt_idx += 1
                 else:
@@ -2052,6 +2232,7 @@ def rewrite_head_mode_to_file(in_path, out_path, assignment, ace_head=None,
                     # primed so the first swap BACK to it doesn't prime again.
                     if ae is not None:
                         primed_ace.add(ae[0])
+                        fout.write(START_TOOL_MARK % ae)
                 elif ae is not None:
                     head, a, s = ae
                     if cur.get(head) == (a, s):
@@ -3089,7 +3270,7 @@ def print_recommendation(result, num_aces, file=None):
     overflow = [c for c, info in result['plan'].items() if info.get('role') == 'OVERFLOW']
     if overflow:
         p()
-        p('!! WARNING: %d color(s) exceed ACE capacity (%d slots, %d ACEs)' % (
+        p('!! WARNING: %d color(s) exceed MMU capacity (%d slots, %d MMUs)' % (
             n_colors, max_slots, num_aces))
         p('!! Exceeding colors will NOT be printed.')
 
@@ -3100,7 +3281,7 @@ def print_recommendation(result, num_aces, file=None):
         ace = info.get('ace', c // 4)
         slot = info.get('slot', c % 4)
         role = info.get('role', '')
-        p('  ACE %d Slot %d  T%-2d  %s  (%dx%s)' % (
+        p('  MMU %d Slot %d  T%-2d  %s  (%dx%s)' % (
             ace, slot, c, format_color(c, color_names),
             counts[c], '' if role != 'OVERFLOW' else ' OVERFLOW'))
 
@@ -3169,7 +3350,7 @@ def print_recommendation(result, num_aces, file=None):
                 for c in extras_order:
                     rows.append((extra_ace_of_color[c], head_for_color[c], c, 'swap'))
                 for ace, slot, c, role in sorted(rows):
-                    p('  ACE %d Slot %d  T%-2d  %s  (%s, %dx)' % (
+                    p('  MMU %d Slot %d  T%-2d  %s  (%s, %dx)' % (
                         ace, slot, c, format_color(c, color_names),
                         role, counts[c]))
             else:
@@ -3188,17 +3369,17 @@ def print_recommendation(result, num_aces, file=None):
                 layer_info['layer_swaps'],
                 layer_info['layer_swaps'] * 3.8))
             if fits:
-                p('  ACEs needed: %d (you have %d - fits)' % (
+                p('  MMUs needed: %d (you have %d - fits)' % (
                     aces_needed, num_aces))
             else:
-                p('  ACEs needed: %d (you have %d - DOES NOT FIT, --layer will be skipped)' % (
+                p('  MMUs needed: %d (you have %d - DOES NOT FIT, --layer will be skipped)' % (
                     aces_needed, num_aces))
             preload = layer_info.get('initial_loadout') or {}
             if preload:
 
                 p('  Pre-load these colors before print:')
                 for c, h in sorted(preload.items(), key=lambda kv: kv[1]):
-                    p('    ACE %d Slot %d  T%-2d  %s' % (
+                    p('    MMU %d Slot %d  T%-2d  %s' % (
                         c // 4, c % 4, c, format_color(c, color_names)))
             events = layer_info.get('events') or []
             if events:
@@ -3209,7 +3390,7 @@ def print_recommendation(result, num_aces, file=None):
                     if c_in in seen:
                         continue
                     seen.add(c_in)
-                    p('    ACE %d Slot %d  T%-2d  %s' % (
+                    p('    MMU %d Slot %d  T%-2d  %s' % (
                         c_in // 4, c_in % 4, c_in,
                         format_color(c_in, color_names)))
         else:
@@ -3232,15 +3413,15 @@ def print_recommendation(result, num_aces, file=None):
                     for old, new in moves:
                         old_ace, old_slot = old // 4, old % 4
                         new_ace, new_slot = new // 4, new % 4
-                        p('    T%-2d  %s   ACE %d Slot %d  →  ACE %d Slot %d  (T%d)' % (
+                        p('    T%-2d  %s   MMU %d Slot %d  →  MMU %d Slot %d  (T%d)' % (
                             old, format_color(old, color_names),
                             old_ace, old_slot,
                             new_ace, new_slot, new))
                     p('    %d color(s) need to move; reslice with the new T-indices' % len(moves))
-                    p('    or physically swap cartridges to the suggested ACE/slot.')
+                    p('    or physically swap cartridges to the suggested MMU/slot.')
                 else:
                     p('')
-                    p('  No conflict-free remap found within %d ACE budget.' % num_aces)
+                    p('  No conflict-free remap found within %d MMU budget.' % num_aces)
                     p('  Either reduce the number of colors or increase --aces.')
             else:
                 p('  Feasible: NO')
@@ -3475,7 +3656,7 @@ def rewrite_for_mode(gcode, result, mode='optimize', num_aces=None):
         if not layer_info.get('feasible'):
             raise ValueError('layer mode not feasible for this gcode')
         if num_aces is not None and layer_info.get('aces_needed', 0) > num_aces:
-            raise ValueError('layer mode needs %d ACEs, have %d' % (
+            raise ValueError('layer mode needs %d MMUs, have %d' % (
                 layer_info['aces_needed'], num_aces))
         new_gcode, _loadout = apply_layer_remap(gcode, layer_info)
         return new_gcode
@@ -3798,9 +3979,15 @@ def rewrite_to_file(in_path, out_path, progress=None, pickup_cleaning=False):
                     flush_pending_unmatched(fout)
                 m = bare_hi.match(stripped)
                 if m:
-                    fout.write('T%d\n' % (int(m.group(1)) % 4))
+                    n = int(m.group(1))
+                    fout.write('T%d\n' % (n % 4))
+                    fout.write(START_TOOL_MARK % (n % 4, n // 4, n % 4))
                 else:
                     fout.write(line)
+                    m = bare_lo.match(stripped)
+                    if m:
+                        n = int(m.group(1))
+                        fout.write(START_TOOL_MARK % (n, 0, n))
                 last_pr = _emit_progress(progress, seen, total, last_pr)
                 continue
 
@@ -4014,6 +4201,8 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
     used_heads: set[int] = set()
     pending_t_head: int | None = None
     first_seen_head: int | None = None  # first tool used after the anchor
+    # Start tool selected before the anchor (START_TOOL_MARK), LAST per head.
+    start_sel: dict[int, tuple[int, int]] = {}
 
     if anchor_line_no is not None:
         # Pre-anchor start-selection scan (head mode): a MODIFIED start
@@ -4044,6 +4233,10 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
                 if m_s:
                     initial[int(m_s.group(1))] = (int(m_s.group(2)),
                                                   int(m_s.group(3)))
+                m_st = START_TOOL_RE.match(line.strip())
+                if m_st:
+                    start_sel[int(m_st.group(1))] = (int(m_st.group(2)),
+                                                     int(m_st.group(3)))
         with open(in_path, 'r', encoding='utf-8', errors='replace') as fin:
             for line_no, line in enumerate(fin):
                 if line_no < anchor_line_no:
@@ -4062,6 +4255,16 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
                     # refuses the swap and the print halts). Multi emits no
                     # ACE_BG_ lines so
                     # this is a no-op there (byte-identical, no gating needed).
+                    m_st = START_TOOL_RE.match(stripped)
+                    if m_st and int(m_st.group(1)) == pending_t_head:
+                        # The start tool select sits after the anchor: its
+                        # mark is the pairing a body T gets from its swap.
+                        if pending_t_head not in initial:
+                            initial[pending_t_head] = (int(m_st.group(2)),
+                                                       int(m_st.group(3)))
+                        used_heads.add(pending_t_head)
+                        pending_t_head = None
+                        continue
                     if (stripped == '' or stripped.startswith(';')
                             or stripped.startswith('ACE_BG_')
                             or stripped.startswith('ACE_SET_PURGE')):
@@ -4101,6 +4304,17 @@ def inject_auto_load_to_file(in_path, out_path, progress=None, only_heads=None,
         if pending_t_head is not None and pending_t_head not in initial:
             initial[pending_t_head] = (0, pending_t_head)
             used_heads.add(pending_t_head)
+
+    # The start tool prints (prime line, first layer) even when the body never
+    # changes tool - a one-colour export has no T after the anchor at all, so
+    # without this the start head got no auto-load and printed whatever it
+    # held. Only heads the body did not resolve take the mark.
+    for head, sel in start_sel.items():
+        if head not in used_heads:
+            used_heads.add(head)
+            initial.setdefault(head, sel)
+            if first_seen_head is None:
+                first_seen_head = head
 
     for head in used_heads:
         if head not in initial:
@@ -4388,7 +4602,7 @@ def main():
 
     if num_aces is None:
         num_aces = infer_num_aces(gcode)
-        print('Auto-detected %d ACE(s) from slicer T-index assignment '
+        print('Auto-detected %d MMU(s) from slicer T-index assignment '
               '(override with --aces N if needed)' % num_aces)
 
     if live_lookup_host is not None:
@@ -4420,7 +4634,7 @@ def main():
             material = s['material'] or '?'
             name = approx_color_name(s['color']) if s['color'] else ''
             label = (' %s' % name) if name and name.lower() != (s['color'] or '').lstrip('#').lower() else ''
-            print('  ACE %d Slot %d  %-6s %s%s' % (
+            print('  MMU %d Slot %d  %-6s %s%s' % (
                 s['ace'], s['slot'], material, color_str, label))
         slicer_colors = parse_color_names(gcode)
         slicer_types = parse_filament_types(gcode)
@@ -4470,7 +4684,7 @@ def main():
         by_tier = {}
         for t in sorted(match_info.keys()):
             by_tier.setdefault(match_info[t]['tier'], []).append(t)
-        print('Live-lookup match (slicer T -> physical ACE/Slot):')
+        print('Live-lookup match (slicer T -> physical MMU/Slot):')
 
         order = ('exact_hex', 'name_exact', 'name_base', 'name_canon',
                  'fuzzy', 'loose_exact_hex', 'loose_name_exact',
@@ -4496,7 +4710,7 @@ def main():
                 s = inf['slot']
                 slot_mat = s['material'] or '?'
                 slot_hex = s['color']
-                print('  %sT%-2d %-6s %s  ->  ACE %d Slot %d  %-6s %s' % (
+                print('  %sT%-2d %-6s %s  ->  MMU %d Slot %d  %-6s %s' % (
                     mark, t, mat, format_color_hex_rgb(hex_c),
                     s['ace'], s['slot'], slot_mat,
                     format_color_hex_rgb(slot_hex)))
@@ -4536,7 +4750,7 @@ def main():
             print('Load cartridges per the Pre-load + Additional swap lists above.')
         elif layer_info and layer_info.get('feasible'):
             print()
-            print('--- LAYER MODE skipped: plan needs %d ACEs, you have %d (pass --aces %d to enable) ---' % (
+            print('--- LAYER MODE skipped: plan needs %d MMUs, you have %d (pass --aces %d to enable) ---' % (
                 layer_info['aces_needed'], num_aces, layer_info['aces_needed']))
 
     if optimize and not layer_remap_applied and result is not None:

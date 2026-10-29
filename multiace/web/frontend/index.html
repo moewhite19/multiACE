@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#15bdc6">
-  <title>mUlt1ACE</title>
+  <title>mUlt1ACE+</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/svg+xml" href="icon.svg">
   <link rel="stylesheet" href="style.css">
@@ -43,7 +43,7 @@
   </script>
 </head>
 <body>
-<div id="ma-splash" aria-hidden="true"><div class="ma-logo">m<span>U</span>lt<span>1</span>ACE</div><div class="ma-spin"></div></div>
+<div id="ma-splash" aria-hidden="true"><div class="ma-logo">m<span>U</span>lt<span>1</span>ACE<span>+</span></div><div class="ma-spin"></div></div>
 <script>
   // Backstop independent of app.js: if the app never got far enough to
   // drop the splash (Vue missing, setup threw), say so instead of spinning.
@@ -97,7 +97,7 @@
     </div>
     <template v-if="panelAce">
       <div class="panel-head">
-        <span>ACE {{ dispIdx(panelAce.idx) }}</span>
+        <span>MMU {{ dispIdx(panelAce.idx) }}</span>
         <span class="panel-temp">
           <span v-if="panelAce.connected === false" class="ace-offline-text"
                 :title="panelAce.connect_error || null">{{ t('ui.common.offline') }}</span>
@@ -305,7 +305,7 @@
   </div>
 
   <header v-if="!panelMode">
-    <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE
+    <h1>m<span class="hl">U</span>lt<span class="hl">1</span>ACE<span class="hl">+</span>
       <small>{{ version }}</small>
       <small v-if="printerName" class="printer-tag"
              :title="t('ui.common.firmware') + ' ' + printerFw">· {{ printerName }}</small>
@@ -340,7 +340,13 @@
             :aria-current="tab===it.key ? 'page' : null"
             @click="tab=it.key">{{ it.label }}</button>
   </div>
-  <div v-if="rebootNeeded && !panelMode" class="reboot-banner">{{ t('ui.common.please_restart') }}</div>
+  <div v-if="(rebootNeeded || printerRebootNeeded || restartNotice) && !panelMode" class="reboot-banner">
+    <template v-if="restartNotice">{{ restartNotice }}</template>
+    <template v-else>
+      {{ printerRebootNeeded ? t('ui.config.update_done_reboot') : t('ui.common.please_restart') }}
+      <button v-if="restartOffered" class="restart-now" @click="restartNow('printer')">{{ t('ui.restart.printer_btn') }}</button>
+    </template>
+  </div>
   <div v-if="state.preflight_inbox?.pending && !panelMode" class="inbox-banner">
     <span>{{ t('ui.inbox.banner', {name: state.preflight_inbox?.name}) }}</span>
     <span v-if="!inboxCanStart" class="inbox-wait">{{ t('ui.inbox.waiting') }}</span>
@@ -356,7 +362,7 @@
         <span class="pill" :class="'state-' + (state.printer_state || 'idle')">
           {{ t('ui.dashboard.status_pill') }}: <strong>{{ state.printer_state || '-' }}</strong>
         </span>
-        <span class="pill">{{ t('ui.dashboard.active_pill') }}: <strong>ACE {{ dispIdx(state.active_device) }}</strong></span>
+        <span class="pill">{{ t('ui.dashboard.active_pill') }}: <strong>MMU {{ dispIdx(state.active_device) }}</strong></span>
         <span class="pill">{{ t('ui.dashboard.mode_pill') }}: <strong>{{ state.mode || '-' }}</strong></span>
       </div>
       <div ref="wiringContainerEl" class="ace-th-wrap">
@@ -381,20 +387,24 @@
           <!-- connected === false (explicit): the unit is not connected and
                everything below is its LAST known state, so the card is
                dimmed and says offline. null = older backend, shown as before. -->
-          <article v-for="ace in visibleAces" :key="ace.idx" class="ace-card"
+          <!-- Head mode: a connected ACE no head is wired to shows dimmed
+               and inert behind a "not assigned" tag. -->
+          <article v-for="ace in gridAces" :key="ace.idx" class="ace-card"
                    :class="{primary: ace.idx === state.active_device,
-                            clickable: ace.idx !== state.active_device && ace.connected !== false,
-                            offline: ace.connected === false}"
-                   @click="ace.idx !== state.active_device && ace.connected !== false && switchAce(ace.idx)">
+                            clickable: ace.idx !== state.active_device && ace.connected !== false && !ace._unwired,
+                            offline: ace.connected === false,
+                            unwired: ace._unwired}"
+                   @click="!ace._unwired && ace.idx !== state.active_device && ace.connected !== false && switchAce(ace.idx)">
+            <div v-if="ace._unwired" class="unwired-tag">{{ t('ui.dashboard.unwired_tag') }}</div>
             <h2>
-              <span class="ace-name">ACE {{ dispIdx(ace.idx) }}
+              <span class="ace-name">MMU {{ dispIdx(ace.idx) }}<span v-if="ace.unit_name" class="ace-unit-name" :title="ace.unit_name">· {{ ace.unit_name }}</span>
                 <!-- Firmware rides in the TOOLTIP, not in the visible text: the header is a tight three-column
                      grid, and the version pushed the middle block until
                      "%rH" wrapped. It stays readable on hover and is
                      spelled out in the updater dropdown, where it is
                      actionable. -->
-                <span class="ace-proto" v-if="ace.protocol"
-                      :title="aceProtoTitle(ace)">({{ ace.protocol.toUpperCase() }})</span>
+                <span class="ace-proto" v-if="ace.kind || ace.protocol"
+                      :title="aceProtoTitle(ace)">({{ unitDriverLabel(ace) }})</span>
                 <span class="ace-cfw" v-if="ace.community_fw"
                       :title="aceCfwTitle(ace)">CFW</span>
                 <small v-if="ace.idx === state.active_device">{{ t('ui.common.active') }}</small>
@@ -411,7 +421,7 @@
                 </template>
               </span>
               <span class="ace-card-actions" @click.stop>
-                <button class="ace-dry-btn"
+                <button class="ace-dry-btn" v-if="aceHasDryer(ace)"
                         :class="{active: dryPanelOpen(ace.idx), running: aceDrying(ace)}"
                         @click="toggleDryPanel(ace.idx)"
                         :title="t('ui.dashboard.dryer')">☀</button>
@@ -442,6 +452,7 @@
                   <em v-if="slot.tag_format && !slot.material && slot.state !== 'empty'" class="slot-fmt">{{ tagFormatLabel(slot.tag_format) }}</em>
                   <em v-if="slot.material">{{ slot.material }}</em>
                   <em v-else-if="slot.state === 'empty'" class="empty-label">{{ t('ui.common.empty') }}</em>
+                  <em v-else-if="slot.state === 'nosensor'" class="empty-label">{{ t('ui.common.no_sensor') }}</em>
                   <!-- UID-only read: the chip id takes the identity line, like the material does for RFID. -->
                   <em v-else-if="slot.uid" class="slot-uid" :title="slot.uid">{{ slot.uid }}</em>
                   <em v-else-if="slot.state !== 'unknown'">{{ slot.state }}</em>
@@ -479,7 +490,7 @@
               </div>
             </div>
             <transition name="dry-fade">
-              <div v-if="dryPanelOpen(ace.idx)" class="dry-panel" @click.stop>
+              <div v-if="dryPanelOpen(ace.idx) && aceHasDryer(ace)" class="dry-panel" @click.stop>
                 <div class="dry-row">
                   <!-- ONE drying temperature per unit: the manual Start below
                        and auto-dry both use it, so it lives on the printer
@@ -502,7 +513,7 @@
                 <!-- Humidity control, ACE 2: it has the reading, so it owns
                      the thresholds. An invalid pair frames BOTH fields red
                      and is not sent (autoDryPairInvalid). -->
-                <div class="dry-row auto-dry" v-if="ace.auto_dry && ace.protocol === 'v2'">
+                <div class="dry-row auto-dry" v-if="ace.auto_dry && ace.protocol === 'v2' && aceHasDryer(ace)">
                   <label class="config-inline-check">
                     <input type="checkbox" :checked="ace.auto_dry.enabled"
                            @change="autoDryEnable(ace.idx, $event, ace.auto_dry)">
@@ -527,7 +538,7 @@
                      FOLLOWS one ACE 2 - picked here, with its own drying
                      temperature and its own run-on time (a Pro is sealed
                      worse, so it keeps going after its master is done). -->
-                <div class="dry-row auto-dry" v-if="ace.auto_dry && ace.protocol !== 'v2'">
+                <div class="dry-row auto-dry" v-if="ace.auto_dry && ace.protocol !== 'v2' && aceHasDryer(ace)">
                   <label class="config-inline-check">
                     <!-- No master picked = nothing could ever start this unit,
                          so the box stays out of reach until one is chosen
@@ -544,7 +555,7 @@
                             @change="autoDrySetMaster(ace.idx, $event)">
                       <option :value="-1">{{ t('ui.dashboard.auto_dry_no_master') }}</option>
                       <option v-for="m in autoDryMasters()" :key="m" :value="m">
-                        ACE {{ m + 1 }}</option>
+                        MMU {{ m + 1 }}</option>
                     </select>
                   </label>
                   <label :title="t('ui.dashboard.auto_dry_add_hint')">{{ t('ui.dashboard.auto_dry_add') }}
@@ -609,7 +620,7 @@
                    class="toolhead-card"
                    :class="{empty: !t_.module_exist, present: t_.head_source_known && !t_.load_failed, 'load-failed': t_.load_failed, unknown: !t_.head_source_known && t_.filament_at_extruder && !t_.manual && !t_.feeder, manual: t_.manual, feeder: t_.feeder, 'feeder-empty': t_.feeder && !t_.filament_detected, 'op-loading': toolheadOps[t_.idx] === 'loading', 'op-unloading': toolheadOps[t_.idx] === 'unloading', 'nt-head': state.mode === 'head', 'nt-set-open': !!thSettingsOpen[t_.idx]}">
             <h2>T{{ dispIdx(t_.idx) }}<em v-if="uiTheme === 'new' && state.mode === 'head' && t_.module_exist"
-                class="nt-th-tag" :class="{'nt-tag-feeder': t_.feeder}">{{ t_.feeder ? t('ui.dashboard.feeder') : 'ACE ' + dispIdx(headAceOf(t_.idx)) }}</em>
+                class="nt-th-tag" :class="{'nt-tag-feeder': t_.feeder}">{{ t_.feeder ? t('ui.dashboard.feeder') : 'MMU ' + dispIdx(headAceOf(t_.idx)) }}</em>
               <small v-if="!t_.module_exist">{{ t('ui.common.offline') }}</small>
               <!-- Feeder AND manual heads carry the big feeder-tile instead
                    of this dot (same colour twice reads as two facts). The
@@ -649,7 +660,7 @@
               <span class="muted">{{ toolheadOps[t_.idx] === 'loading' ? t('ui.dashboard.load') : t('ui.dashboard.unload') }}…</span>
             </p>
             <p class="meta" v-else-if="t_.head_source_known">
-              <span v-if="t_.ace != null && t_.slot != null">ACE {{ dispIdx(t_.ace) }} / Slot {{ dispIdx(t_.slot) }}</span>
+              <span v-if="t_.ace != null && t_.slot != null">MMU {{ dispIdx(t_.ace) }} / Slot {{ dispIdx(t_.slot) }}</span>
               <span v-if="t_.material && !t_.load_failed" class="th-meta-mat"> · {{ t_.material }}</span>
               <span v-if="t_.load_failed" class="error-inline"
                     :title="t('ui.dashboard.load_failed_hint')"> · {{ t('ui.dashboard.load_failed') }}</span>
@@ -719,7 +730,7 @@
                           :class="{active: Number(headAceOf(t_.idx)) === Number(o.value)}"
                           :title="o.label"
                           :disabled="o.disabled || t_.head_source_known || t_.filament_at_extruder"
-                          @click.prevent="Number(headAceOf(t_.idx)) !== Number(o.value) && setHeadAce(t_.idx, o.value)">ACE {{ dispIdx(o.value) }}</button>
+                          @click.prevent="Number(headAceOf(t_.idx)) !== Number(o.value) && setHeadAce(t_.idx, o.value)">MMU {{ dispIdx(o.value) }}</button>
                 </span>
                 <select v-if="uiTheme !== 'new'" :value="headAceOf(t_.idx)"
                         :disabled="t_.head_source_known || t_.filament_at_extruder"
@@ -758,7 +769,7 @@
               T{{ dispIdx(t_.idx) }}: {{ t('ui.dashboard.feeder') }}
             </template>
             <template v-else>
-              T{{ dispIdx(t_.idx) }}: ACE {{ dispIdx(t_.ace) }}/{{ dispIdx(t_.slot) }}
+              T{{ dispIdx(t_.idx) }}: MMU {{ dispIdx(t_.ace) }}/{{ dispIdx(t_.slot) }}
             </template>
             <em v-if="t_.material">{{ t_.material }}</em>
           </span>
@@ -769,13 +780,11 @@
       </transition>
     </section>
     <section v-show='tab === `calibration`' class='calibration-page'>
-      <p v-if='calibrationUi.error' class='error'>{{ calibrationUi.error }}</p>
       <div class='calibration-heading'>
         <div>
           <h2>{{ t('ui.calibration.title') }}</h2>
           <p class='muted'>{{ t('ui.calibration.subtitle') }}</p>
         </div>
-        <span class='pill'>{{ t('ui.calibration.session') }} <strong>{{ state.calibration.state || 'idle' }}</strong></span>
       </div>
 
       <div v-if='!connectedCalibrationAces.length' class='error'>{{ t('ui.calibration.no_ace') }}</div>
@@ -783,62 +792,127 @@
         <div class='calibration-workspace'>
           <div class='calibration-route-summary'>
             <div>
-              <strong>ACE {{ dispIdx(calibrationUi.ace) }} · Slot {{ dispIdx(calibrationUi.slot) }}
-                → Toolhead T{{ dispIdx(calibrationUi.head) }}</strong>
+              <strong>MMU {{ dispIdx(calibrationUi.ace) }} · Slot {{ dispIdx(calibrationUi.slot) }}
+                → T{{ dispIdx(calibrationUi.head) }}</strong>
               <small>{{ calibrationTipLabel }}</small>
             </div>
-            <span :class='{ready: calibrationRouteKnown}'>
-              {{ calibrationMoving ? 'Moving'
-                : state.calibration.state === `verify_paused` ? 'Paused'
-                  : calibrationRouteKnown ? t('ui.calibration.route_known') : t('ui.calibration.route_needs') }}
-            </span>
+            <span :class='calibrationStatus.kind'>{{ calibrationStatus.text }}</span>
           </div>
           <div class='calibration-route'
                :class='{moving: calibrationMoving,
-                        paused: state.calibration.state === `verify_paused`,
+                        paused: !!calibrationRecovery,
                         unknown: calibrationTipPositionMm == null}'
+               :style='{"--route-cols": calibrationRouteGrid}'
                :title='calibrationTipLabel' :aria-label='calibrationTipLabel'>
-            <span><strong>ACE {{ dispIdx(calibrationUi.ace) }}</strong>Slot {{ dispIdx(calibrationUi.slot) }}</span>
+            <span><strong>MMU {{ dispIdx(calibrationUi.ace) }} · S{{ dispIdx(calibrationUi.slot) }}</strong>{{ t('ui.calibration.park_sub') }}</span>
             <div class='calibration-route-tube'>
               <b v-if='calibrationTipSegment === `ace`' class='calibration-tip-marker'
                  :style='{"--tip": `${calibrationTipSegmentPercent}%`}'>
-                {{ calibrationTipPositionMm == null ? '?' : '●' }}
+                {{ calibrationTipPositionMm == null ? '?'
+                  : calibrationTipEstimated ? '○' : '●' }}
               </b>
+              <small v-if='calibrationHubMm != null'>{{ Math.round(calibrationHubMm) }} mm</small>
             </div>
-            <span><strong>{{ t('ui.calibration.splitter') }}</strong>{{ t('ui.calibration.splitter_sub') }}</span>
+            <span :class='{unknown: calibrationHubMm == null}'><strong>{{ t('ui.calibration.splitter') }}</strong>{{ calibrationHubMm == null
+              ? t('ui.calibration.splitter_unknown') : t('ui.calibration.splitter_sub') }}</span>
             <div class='calibration-route-tube'>
               <b v-if='calibrationTipSegment === `toolhead`' class='calibration-tip-marker'
-                 :style='{"--tip": `${calibrationTipSegmentPercent}%`}'>●</b>
+                 :style='{"--tip": `${calibrationTipSegmentPercent}%`}'>{{ calibrationTipEstimated ? '○' : '●' }}</b>
+              <small v-if='calibrationHubMm != null'>{{ Math.round(calibrationRouteLengthMm - calibrationHubMm) }} mm</small>
             </div>
-            <span><strong>Toolhead T{{ dispIdx(calibrationUi.head) }}</strong>
-              {{ calibrationSelectedHeadClear ? 'sensor clear'
+            <span><strong>T{{ dispIdx(calibrationUi.head) }}</strong>
+              {{ calibrationSelectedHeadClear ? t('ui.calibration.sensor_clear')
                 : calibrationSelectedToolhead?.filament_at_extruder === true
-                  ? 'filament detected' : 'sensor unavailable' }}</span>
+                  ? t('ui.calibration.sensor_on') : t('ui.calibration.sensor_na') }}</span>
           </div>
           <div class='calibration-route-caption'>
-            <span v-if='calibrationRouteKnown'>
-              {{ t('ui.calibration.anchor_splitter') }} <strong>{{ calibrationRouteAnchors.load - calibrationRouteAnchors.swap }} mm</strong>
+            <span v-if='calibrationHubMm != null'>
+              {{ calibrationRouteAnchors.source === 'measured'
+                ? t('ui.calibration.src_measured') : t('ui.calibration.src_saved') }}:
+              {{ t('ui.calibration.anchor_splitter') }} <strong>{{ Math.round(calibrationHubMm) }} mm</strong>
               · {{ t('ui.calibration.anchor_head') }} <strong>{{ calibrationRouteAnchors.load }} mm</strong>
             </span>
             <span v-else>{{ t('ui.calibration.anchors_none') }}</span>
-            <span>{{ calibrationUi.scope === 'slot'
-              ? 'Slot ' + dispIdx(calibrationUi.slot) + ' override'
-              : t('ui.calibration.scope_ace_short') }}</span>
+            <details class='calibration-glossary'>
+              <summary>{{ t('ui.calibration.glossary') }}</summary>
+              <dl>
+                <dt>{{ t('ui.calibration.g_park') }}</dt><dd>{{ t('ui.calibration.g_park_text') }}</dd>
+                <dt>{{ t('ui.calibration.splitter') }}</dt><dd>{{ t('ui.calibration.g_hub_text') }}</dd>
+                <dt>{{ t('ui.calibration.m_toolhead') }}</dt><dd>{{ t('ui.calibration.g_toolhead_text') }}</dd>
+                <dt>{{ t('ui.calibration.m_splitter') }}</dt><dd>{{ t('ui.calibration.g_clearance_text') }}</dd>
+                <dt>{{ t('ui.calibration.g_margin') }}</dt><dd>{{ t('ui.calibration.g_margin_text') }}</dd>
+              </dl>
+            </details>
+          </div>
+
+          <p v-if='calibrationUi.error' class='error'>{{ calibrationUi.error }}</p>
+
+          <!-- A stopped move is never a dead end. -->
+          <div v-if='calibrationRecovery' class='calibration-recovery'>
+            <div>
+              <strong>{{ t('ui.calibration.rec_title', {mm: Math.round(calibrationTipPositionMm ?? 0)}) }}</strong>
+              <span>{{ calibrationRecovery.canResume
+                ? t('ui.calibration.rec_paused') : t('ui.calibration.rec_ended') }}</span>
+              <span v-if='!calibrationRecovery.canResume && state.calibration.error'
+                    class='muted'>{{ state.calibration.error }}</span>
+            </div>
+            <div class='row'>
+              <button v-if='calibrationRecovery.canResume' class='primary'
+                      :disabled='!!calibrationUi.busy'
+                      @click='calibrationAction(`resume`)'>{{ t('ui.calibration.rec_resume') }}</button>
+              <button :class='{primary: !calibrationRecovery.canResume}'
+                      :disabled='!!calibrationUi.busy'
+                      @click='calibrationAction(`home`)'>{{ t('ui.calibration.rec_home') }}</button>
+              <button v-if='!calibrationRecovery.canResume'
+                      :disabled='!!calibrationUi.busy'
+                      @click='calibrationAction(`reset`)'>{{ t('ui.calibration.rec_forget') }}</button>
+            </div>
+          </div>
+          <div v-else-if='state.calibration.state === `homing`' class='calibration-recovery'>
+            <div>
+              <strong>{{ t('ui.calibration.rec_homing') }}</strong>
+              <span>{{ t('ui.calibration.rec_homing_text', {mm: Math.round(calibrationTipPositionMm ?? 0)}) }}</span>
+            </div>
+            <div class='row'>
+              <button class='warn' :disabled='!!calibrationUi.busy'
+                      @click='calibrationAction(`stop`)'>{{ t('ui.calibration.stop') }}</button>
+            </div>
+          </div>
+
+          <!-- After a clear: outside the panels, so a Setup/Results switch keeps it. -->
+          <div v-if='calibrationClear.undo' class='calibration-undo row' role='status'>
+            <div>
+              <strong>{{ calibrationClear.undo.level === 'slot'
+                ? t('ui.calibration.clear_done_slot', {slot: dispIdx(calibrationClear.undo.slot)})
+                : t('ui.calibration.clear_done_ace', {ace: dispIdx(calibrationClear.undo.ace)}) }}</strong>
+              {{ t('ui.calibration.clear_undo_hint') }}
+            </div>
+            <button :disabled='!!calibrationUi.busy'
+                    @click='calibrationClearUndo'>{{ calibrationUi.busy === 'undo'
+                      ? t('ui.calibration.saving') : t('ui.calibration.clear_undo') }}</button>
+          </div>
+          <div v-else-if='calibrationClear.restored' class='calibration-undo done' role='status'>
+            <div>
+              <strong>{{ t('ui.calibration.clear_undo_done') }}</strong>
+              {{ t('ui.calibration.clear_undo_done_hint') }}
+            </div>
           </div>
 
           <div class='calibration-workflow'>
             <div class='calibration-workflow-tabs' role='tablist'
-                 aria-label=t('ui.calibration.workflow_aria')>
+                 :aria-label='t(`ui.calibration.workflow_aria`)'>
               <button v-for='panel in [`setup`, `calibrate`, `verify`, `results`]'
                       :key='panel' type='button' role='tab'
                       :aria-selected='calibrationUi.panel === panel'
                       :class='{active: calibrationUi.panel === panel}'
                       @click='calibrationSetPanel(panel)'>
-                <strong>{{ panel[0].toUpperCase() + panel.slice(1) }}</strong>
+                <strong>{{ t('ui.calibration.tab_' + panel) }}</strong>
                 <small>{{ calibrationTabStatus[panel] }}</small>
               </button>
             </div>
             <div class='calibration-workflow-body'>
+
+              <!-- SETUP: only which route. Where the result is saved is asked in Results. -->
               <section v-show='calibrationUi.panel === `setup`'
                        class='calibration-panel'>
                 <div class='calibration-task-heading'>
@@ -857,36 +931,15 @@
                             :class='{selected: Number(calibrationUi.ace) === Number(ace.idx)}'
                             :disabled='calibrationRouteLocked || !!calibrationUi.busy'
                             @click='calibrationSelectAce(ace.idx)'>
-                      <strong>ACE {{ dispIdx(ace.idx) }}</strong>
-                      <small>{{ ace.protocol === 'v2'
-                        ? 'ACE 2 Pro · connected' : 'ACE Pro · connected' }}</small>
+                      <strong>MMU {{ dispIdx(ace.idx) }}</strong>
+                      <small>{{ aceHasDecoder(ace)
+                        ? t('ui.calibration.unit_v2') : t('ui.calibration.unit_v1') }}</small>
                     </button>
                   </div>
                 </div>
 
                 <div class='calibration-selector-block'>
-                  <label>{{ t('ui.calibration.scope_label') }}</label>
-                  <div class='calibration-option-grid two'>
-                    <button type='button' class='calibration-route-option'
-                            :class='{selected: calibrationUi.scope === `ace`}'
-                            :disabled='calibrationRouteLocked || !!calibrationUi.busy'
-                            @click='calibrationSetScope(`ace`)'>
-                      <strong>{{ t('ui.calibration.scope_ace') }}</strong>
-                      <small>{{ t('ui.calibration.scope_ace_hint') }}</small>
-                    </button>
-                    <button type='button' class='calibration-route-option'
-                            :class='{selected: calibrationUi.scope === `slot`}'
-                            :disabled='calibrationRouteLocked || !!calibrationUi.busy'
-                            @click='calibrationSetScope(`slot`)'>
-                      <strong>{{ t('ui.calibration.scope_slot') }}</strong>
-                      <small>{{ t('ui.calibration.scope_slot_hint') }}</small>
-                    </button>
-                  </div>
-                </div>
-
-                <div class='calibration-selector-block'>
-                  <label>{{ calibrationUi.scope === 'ace'
-                    ? t('ui.calibration.slot_measure') : 'Bowden tube / filament slot' }}</label>
+                  <label>{{ t('ui.calibration.slot_measure') }}</label>
                   <div class='calibration-option-grid slots'>
                     <button v-for='slot in (calibrationSelectedAce?.slots || [])'
                             :key='slot.idx' type='button'
@@ -896,37 +949,83 @@
                               || slot.state === `empty`'
                             @click='calibrationSelectSlot(slot.idx)'>
                       <strong>Slot {{ dispIdx(slot.idx) }}</strong>
-                      <small>{{ slot.state }}{{ Number(calibrationUi.slot) === Number(slot.idx)
-                        && calibrationRouteKnown ? ' · saved values' : '' }}</small>
+                      <small>{{ calibrationSlotBadge(slot) }}</small>
                     </button>
                   </div>
                 </div>
 
-                <div class='calibration-derived-route'>
-                  <label class='calibration-head-select'>{{ t('ui.calibration.head_label') }}
-                    <select v-model.number='calibrationUi.head'
-                            @change='calibrationSelectHead'
+                <div class='calibration-selector-block'>
+                  <label>{{ t('ui.calibration.head_label') }}</label>
+                  <div class='calibration-option-grid slots'>
+                    <button v-for='head in state.toolheads' :key='head.idx' type='button'
+                            class='calibration-route-option'
+                            :class='{selected: Number(calibrationUi.head) === Number(head.idx)}'
                             :disabled='calibrationRouteLocked || !!calibrationUi.busy
-                              || state.mode === `multi`'>
-                      <option v-for='head in state.toolheads' :key='head.idx'
-                              :value='head.idx'>
-                        T{{ dispIdx(head.idx) }}{{ head.manual ? ' · manual'
-                          : head.feeder ? ' · feeder' : '' }}
-                      </option>
-                    </select>
-                  </label>
-                  <div>
-                    <small>{{ calibrationUi.scope === 'ace'
-                      ? t('ui.calibration.shared_via') : t('ui.calibration.scope_slot_short') }}</small>
-                    <strong>ACE {{ dispIdx(calibrationUi.ace) }} · Slot
-                      {{ dispIdx(calibrationUi.slot) }} → T{{ dispIdx(calibrationUi.head) }}</strong>
+                              || head.manual || head.feeder
+                              || (state.mode === `multi`
+                                  && Number(head.idx) !== Number(calibrationUi.slot))'
+                            @click='calibrationSelectHead(head.idx)'>
+                      <strong>T{{ dispIdx(head.idx) }}</strong>
+                      <small>{{ head.manual ? t('ui.calibration.head_manual')
+                        : head.feeder ? t('ui.calibration.head_feeder')
+                          : t('ui.calibration.head_ace') }}</small>
+                    </button>
                   </div>
                 </div>
 
+                <!-- What is saved for this route, and clearing it. -->
+                <div class='calibration-saved-values'>
+                  <div class='calibration-saved-head'>
+                    <span>{{ t('ui.calibration.values_head') }}</span>
+                    <span class='calibration-badge' :class='calibrationSavedKind'>{{ calibrationSlotBadge(calibrationSelectedSlot) }}</span>
+                  </div>
+                  <table class='calibration-clear-table'>
+                    <thead><tr>
+                      <th></th>
+                      <th>{{ t('ui.calibration.row_load') }}</th>
+                      <th>{{ t('ui.calibration.m_splitter') }}</th>
+                      <th>{{ t('ui.calibration.row_retract') }}</th>
+                    </tr></thead>
+                    <tbody>
+                      <tr v-for='level in calibrationSavedLevels' :key='level.src'
+                          :class='{unset: !level.set, "in-use": level.inUse}'>
+                        <td>{{ level.name }}<span v-if='level.inUse' class='in-use-tag'>{{ t('ui.calibration.values_in_use') }}</span></td>
+                        <td v-for='(value, i) in level.values' :key='i'>{{ value ?? '-' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div class='calibration-selector-block'>
+                    <label>{{ t('ui.calibration.clear_scope_label') }}</label>
+                  </div>
+                  <div class='calibration-clear-row'>
+                    <div class='calibration-option-grid two'>
+                      <button type='button' class='calibration-route-option'
+                              :class='{selected: calibrationUi.scope === `slot`}'
+                              :disabled='!!calibrationUi.busy'
+                              @click='calibrationSetScope(`slot`)'>
+                        <strong>{{ t('ui.calibration.scope_slot', {slot: dispIdx(calibrationUi.slot)}) }}</strong>
+                      </button>
+                      <button type='button' class='calibration-route-option'
+                              :class='{selected: calibrationUi.scope === `ace`}'
+                              :disabled='!!calibrationUi.busy'
+                              @click='calibrationSetScope(`ace`)'>
+                        <strong>{{ t('ui.calibration.scope_ace', {ace: dispIdx(calibrationUi.ace)}) }}</strong>
+                      </button>
+                    </div>
+                    <div class='row calibration-clear-action'>
+                      <button class='warn' :disabled='!!calibrationClearBlocked || !!calibrationUi.busy'
+                              :title='calibrationClearBlocked?.why || null'
+                              :aria-describedby='calibrationClearBlocked ? `calibration-clear-why-setup` : null'
+                              @click='calibrationClearOpen'>{{ calibrationUi.busy === 'clear'
+                                ? t('ui.calibration.saving') : t('ui.calibration.clear') }}</button>
+                    </div>
+                  </div>
+                  <p v-if='calibrationClearBlocked' id='calibration-clear-why-setup'
+                     class='calibration-clear-reason' :class='{blocked: calibrationClearBlocked.blocked}'>{{ calibrationClearBlocked.why }}</p>
+                </div>
+
                 <p v-if='calibrationRouteLocked' class='calibration-warning'>
-                  Route locked to ACE {{ dispIdx(state.calibration.ace) }} · Slot
-                  {{ dispIdx(state.calibration.slot) }} while the tip is away from
-                  preload. Return or clear this route before selecting another spool.
+                  {{ t('ui.calibration.route_locked') }}
                 </p>
 
                 <div class='calibration-checks'>
@@ -934,296 +1033,367 @@
                     && state.printer_state !== `paused`}'>{{ t('ui.calibration.chk_idle') }}</div>
                   <div :class='{ok: !state.swap_in_progress
                     && !(state.bg_swap?.busy || []).length}'>{{ t('ui.calibration.chk_no_move') }}</div>
-                  <div :class='{ok: calibrationSelectedHeadClear}'>
-                    T{{ dispIdx(calibrationUi.head) }} sensor
-                    {{ calibrationSelectedHeadClear ? 'is clear' : 'needs attention' }}
-                  </div>
-                  <div :class='{ok: calibrationSelectedSlot?.state === `ready`}'>
-                    Slot {{ dispIdx(calibrationUi.slot) }}
-                    {{ calibrationSelectedSlot?.state === 'ready'
-                      ? 'is parked at preload' : 'is not ready' }}
-                  </div>
-                </div>
-
-                <div class='calibration-confidence'
-                     :class='{estimate: calibrationSelectedAce?.protocol !== `v2`}'>
-                  <strong>{{ calibrationSelectedAce?.protocol === 'v2'
-                    ? t('ui.calibration.conf_encoder') : t('ui.calibration.conf_estimate') }}</strong>
-                  <span v-if='calibrationSelectedAce?.protocol === `v2`'>
-                    {{ t('ui.calibration.conf_encoder_hint') }}
-                  </span>
-                  <span v-else>{{ t('ui.calibration.conf_estimate_hint') }}</span>
                 </div>
 
                 <div class='row calibration-primary-actions'>
                   <button class='primary' @click='calibrationContinueRoute'>
-                    {{ calibrationRouteKnown
-                      ? t('ui.calibration.go_verify') : t('ui.calibration.go_calibrate') }}
+                    {{ t('ui.calibration.go_route') }}
                   </button>
                 </div>
               </section>
 
+              <!-- CALIBRATE -->
               <section v-show='calibrationUi.panel === `calibrate`'
                        class='calibration-panel'>
-          <template v-if='[`idle`, `cancelled`, `failed`].includes(state.calibration.state)'>
-            <div v-if='calibrationRouteKnown && !calibrationUi.recalibrate'
-                 class='calibration-saved-summary'>
-              <div class='calibration-task-heading'>
-                <div>
-                  <small>{{ t('ui.calibration.tab_calibrate') }}</small>
-                  <h3>{{ t('ui.calibration.have_values') }}</h3>
-                  <p>{{ t('ui.calibration.have_values_hint') }}</p>
-                </div>
-                <span>{{ t('ui.calibration.saved_values') }}</span>
-              </div>
-              <div class='calibration-metrics'>
-                <div><small>{{ t('ui.calibration.m_toolhead') }}</small><strong>{{ calibrationRouteAnchors.load }} mm</strong></div>
-                <div><small>{{ t('ui.calibration.m_splitter') }}</small><strong>{{ calibrationRouteAnchors.swap }} mm</strong></div>
-                <div><small>{{ t('ui.calibration.m_park') }}</small><strong>{{ calibrationRouteAnchors.load }} mm</strong></div>
-              </div>
-              <div class='row calibration-primary-actions'>
-                <button class='primary' @click='calibrationSetPanel(`verify`)'>
-                  {{ t('ui.calibration.verify_saved') }}
-                </button>
-                <button @click='calibrationBeginRecalibration'>{{ t('ui.calibration.recalibrate') }}</button>
-              </div>
-            </div>
-            <template v-else>
-            <h3>{{ t('ui.calibration.step1') }}</h3>
-            <p>{{ t('ui.calibration.step1_hint') }}</p>
-            <div class='calibration-checks'>
-              <div :class='{ok: state.printer_state !== `printing` && state.printer_state !== `paused`}'>{{ t('ui.calibration.chk_idle') }}</div>
-              <div :class='{ok: !state.swap_in_progress && !(state.bg_swap?.busy || []).length}'>{{ t('ui.calibration.chk_no_bg') }}</div>
-              <div :class='{ok: calibrationSelectedHeadClear}'>
-                Selected T{{ dispIdx(calibrationUi.head) }}:
-                {{ calibrationSelectedHeadClear ? 'toolhead sensor is clear'
-                  : calibrationSelectedToolhead?.filament_at_extruder === true
-                    ? 'filament detected at toolhead sensor'
-                    : 'toolhead sensor state unavailable' }}
-              </div>
-              <div :class='{ok: calibrationUi.baselinePrepared}'>
-                {{ calibrationUi.baselinePrepared
-                  ? t('ui.calibration.baseline_ok')
-                  : t('ui.calibration.baseline_wait') }}
-              </div>
-            </div>
-            <p v-if='state.calibration.error' class='error'>{{ state.calibration.error }}</p>
-            <div class='row'>
-              <button class='primary' :disabled='!calibrationCanPrepare || !!calibrationUi.busy || calibrationUi.baselinePrepared'
-                      @click='calibrationSelectedHeadClear
-                        ? calibrationConfirmBaseline() : calibrationPrepare()'>
-                {{ calibrationUi.busy === 'prepare' ? 'Unloading…'
-                  : calibrationUi.busy === 'confirm-baseline' ? 'Confirming…'
-                  : calibrationUi.baselinePrepared ? t('ui.calibration.baseline_ok')
-                  : calibrationSelectedHeadClear
-                    ? `Use clear T${dispIdx(calibrationUi.head)} as starting point`
-                    : calibrationSelectedHeadSensorKnown
-                      ? `Unload selected T${dispIdx(calibrationUi.head)}`
-                      : t('ui.calibration.sensor_na') }}
-              </button>
-              <button v-if='calibrationUi.busy === `prepare`' class='warn'
-                      :disabled='calibrationUi.cancelRequested'
-                      @click='calibrationCancelPrepare'>
-                {{ calibrationUi.cancelRequested ? 'Stopping…' : t('ui.calibration.stop_unload') }}
-              </button>
-              <button v-if='calibrationRouteKnown && !calibrationUi.busy'
-                      @click='calibrationKeepSaved'>
-                {{ t('ui.calibration.keep_saved') }}
-              </button>
-            </div>
+                <template v-if='[`idle`, `cancelled`, `failed`, `homing`].includes(state.calibration.state)'>
+                  <div v-if='calibrationRouteKnown && !calibrationUi.recalibrate'
+                       class='calibration-saved-summary'>
+                    <div class='calibration-task-heading'>
+                      <div>
+                        <small>{{ t('ui.calibration.tab_calibrate') }}</small>
+                        <h3>{{ t('ui.calibration.have_values') }}</h3>
+                        <p>{{ t('ui.calibration.have_values_hint') }}</p>
+                      </div>
+                    </div>
+                    <div class='calibration-metrics two'>
+                      <div><small>{{ t('ui.calibration.m_toolhead') }}</small><strong>{{ calibrationRouteAnchors.load }} mm</strong><span>{{ t('ui.calibration.m_toolhead_sub') }}</span></div>
+                      <div><small>{{ t('ui.calibration.m_splitter') }}</small><strong>{{ calibrationRouteAnchors.swap }} mm</strong><span>{{ t('ui.calibration.m_splitter_sub') }}</span></div>
+                    </div>
+                    <div class='row calibration-primary-actions'>
+                      <button class='primary' @click='calibrationSetPanel(`verify`)'>
+                        {{ t('ui.calibration.verify_saved') }}
+                      </button>
+                      <button @click='calibrationBeginRecalibration'>{{ t('ui.calibration.recalibrate') }}</button>
+                    </div>
+                  </div>
+                  <template v-else>
+                    <div class='calibration-task-heading'>
+                      <div>
+                        <small>{{ t('ui.calibration.tab_calibrate') }}</small>
+                        <h3>{{ t('ui.calibration.measure_head') }}</h3>
+                        <p>{{ t('ui.calibration.measure_hint') }}</p>
+                      </div>
+                    </div>
+                    <div class='calibration-steps'>
+                      <div>1 · {{ t('ui.calibration.step_feed') }}</div>
+                      <div>2 · {{ t('ui.calibration.step_hub') }}</div>
+                      <div>3 · {{ t('ui.calibration.step_return') }}</div>
+                    </div>
+                    <div class='calibration-checks'>
+                      <div :class='{ok: calibrationSelectedHeadClear}'>
+                        {{ calibrationSelectedHeadClear
+                          ? t('ui.calibration.chk_head_clear', {head: dispIdx(calibrationUi.head)})
+                          : calibrationSelectedHeadSensorKnown
+                            ? t('ui.calibration.chk_head_loaded', {head: dispIdx(calibrationUi.head)})
+                            : t('ui.calibration.sensor_na') }}
+                      </div>
+                      <div :class='{ok: calibrationSelectedSlot?.state === `ready`}'>
+                        {{ t('ui.calibration.chk_slot_ready', {slot: dispIdx(calibrationUi.slot)}) }}
+                      </div>
+                      <div :class='{ok: !calibrationRouteOccupied}'>{{ t('ui.calibration.chk_tube_empty') }}</div>
+                      <div class='ok'>{{ t('ui.calibration.chk_cold') }}</div>
+                    </div>
+                    <details class='calibration-details'>
+                      <summary>{{ t('ui.calibration.reinsert_q') }}</summary>
+                      <p>{{ t('ui.calibration.reinsert_a') }}</p>
+                    </details>
+                    <p v-if='!calibrationSelectedHeadClear ? false : calibrationStartBlockedReason'
+                       class='calibration-warning'>{{ calibrationStartBlockedReason }}</p>
+                    <div class='row calibration-primary-actions'>
+                      <button v-if='!calibrationSelectedHeadClear && calibrationSelectedHeadSensorKnown'
+                              class='primary'
+                              :disabled='!calibrationCanPrepare || !!calibrationUi.busy'
+                              @click='calibrationPrepare'>
+                        {{ calibrationUi.busy === 'prepare' ? t('ui.calibration.unloading')
+                          : t('ui.calibration.unload_first', {head: dispIdx(calibrationUi.head)}) }}
+                      </button>
+                      <button v-else class='primary'
+                              :disabled='!calibrationCanStart || !!calibrationUi.busy'
+                              @click='calibrationStart'>
+                        {{ calibrationUi.busy ? t('ui.calibration.starting') : t('ui.calibration.start_measure') }}
+                      </button>
+                      <button v-if='calibrationUi.busy === `prepare`' class='warn'
+                              :disabled='calibrationUi.cancelRequested'
+                              @click='calibrationCancelPrepare'>
+                        {{ calibrationUi.cancelRequested ? t('ui.calibration.stopping') : t('ui.calibration.stop_unload') }}
+                      </button>
+                      <button v-if='[`cancelled`, `failed`].includes(state.calibration.state)
+                                && !calibrationRouteOccupied && !calibrationUi.busy'
+                              @click='calibrationAction(`reset`)'>
+                        {{ t('ui.calibration.discard_run') }}
+                      </button>
+                      <button v-if='calibrationRouteKnown && !calibrationUi.busy'
+                              @click='calibrationKeepSaved'>
+                        {{ t('ui.calibration.keep_saved') }}
+                      </button>
+                    </div>
+                  </template>
+                </template>
 
-            <div class='calibration-prep-next' :class='{locked: !calibrationUi.baselinePrepared}'>
-              <h3>{{ t('ui.calibration.step2') }}</h3>
-              <p>{{ t('ui.calibration.step2_hint') }}</p>
-              <div class='calibration-checks'>
-                <div :class='{ok: calibrationSelectedAce?.connected}'>{{ t('ui.calibration.chk_ace_conn') }}</div>
-                <div :class='{ok: calibrationSelectedAce?.slots?.[calibrationUi.slot]?.state === `ready`}'>{{ t('ui.calibration.chk_slot_ready') }}</div>
-                <div :class='{ok: calibrationSelectedHeadClear}'>
-                  Selected T{{ dispIdx(calibrationUi.head) }} toolhead sensor is clear
-                </div>
-                <div :class='{ok: calibrationUi.routeConfirmed}'>{{ t('ui.calibration.chk_route_ok') }}</div>
-              </div>
-              <div class='mode-row calibration-confirm-row'>
-                <button type='button' :class='{active: calibrationUi.routeConfirmed}'
-                        :disabled='!calibrationUi.baselinePrepared || calibrationMoving'
-                        @click='calibrationConfirmRoute'>
-                  {{ calibrationUi.routeConfirmed ? '✓ Preload reference confirmed' : t('ui.calibration.confirm_route') }}
-                </button>
-              </div>
-              <p class='calibration-warning'>{{ t('ui.calibration.no_heat_hint') }}</p>
-              <div class='row'>
-                <button class='primary' :disabled='!calibrationCanStart || !!calibrationUi.busy'
-                      @click='calibrationStart'>
-                  {{ calibrationUi.busy ? 'Starting…' : t('ui.calibration.start_measure') }}
-                </button>
-                <button v-if='state.calibration.state !== `idle`'
-                        @click='calibrationAction(`reset`)'>{{ t('ui.calibration.reset_session') }}</button>
-              </div>
-            </div>
-            </template>
-          </template>
+                <template v-else-if='calibrationMeasureStep'>
+                  <div class='calibration-task-heading'>
+                    <div>
+                      <small>{{ t('ui.calibration.tab_calibrate') }}</small>
+                      <h3>{{ t('ui.calibration.step' + calibrationMeasureStep + '_head') }}</h3>
+                      <p>{{ t('ui.calibration.step' + calibrationMeasureStep + '_hint') }}</p>
+                    </div>
+                    <span>{{ t('ui.calibration.step_of', {n: calibrationMeasureStep}) }}</span>
+                  </div>
+                  <div class='calibration-steps'>
+                    <div :class='{active: calibrationMeasureStep === 1, done: calibrationMeasureStep > 1}'>1 · {{ t('ui.calibration.step_feed') }}</div>
+                    <div :class='{active: calibrationMeasureStep === 2, done: calibrationMeasureStep > 2}'>2 · {{ t('ui.calibration.step_hub') }}</div>
+                    <div :class='{active: calibrationMeasureStep === 3}'>3 · {{ t('ui.calibration.step_return') }}</div>
+                  </div>
 
-          <template v-else-if='state.calibration.state === `prepared`'>
-            <h3>{{ t('ui.calibration.step3') }}</h3>
-            <p>{{ t('ui.calibration.step3_hint') }}</p>
-          </template>
+                  <template v-if='calibrationMeasureStep === 1'>
+                    <div class='calibration-metrics two'>
+                      <div><small>{{ t('ui.calibration.fed') }}</small><strong>{{ Math.round(state.calibration.tip_position_mm || 0) }} mm</strong>
+                        <span>{{ state.calibration.position_source === 'encoder'
+                          ? t('ui.calibration.src_encoder') : t('ui.calibration.src_time') }}</span></div>
+                      <div><small>{{ t('ui.calibration.stops_at') }}</small><strong>{{ t('ui.calibration.stops_sensor') }}</strong>
+                        <span>{{ t('ui.calibration.stops_limit', {mm: state.calibration.max_feed_mm}) }}</span></div>
+                    </div>
+                    <div class='row'>
+                      <button v-if='state.calibration.state === `feeding`' class='warn'
+                              :disabled='!!calibrationUi.busy'
+                              @click='calibrationAction(`stop`)'>{{ t('ui.calibration.stop') }}</button>
+                    </div>
+                  </template>
 
-          <template v-else-if='state.calibration.state === `feeding`'>
-            <h3>{{ t('ui.calibration.step3_running') }}</h3>
-            <p>{{ t('ui.calibration.step3_running_hint') }}</p>
-            <div class='calibration-metrics'>
-              <div><small>{{ t('ui.calibration.commanded') }}</small><strong>{{ state.calibration.commanded_feed_mm }} mm</strong></div>
-              <div><small>{{ t('ui.calibration.decoder_span') }}</small><strong>{{ state.calibration.decoder_span ?? '-' }}</strong></div>
-              <div><small>{{ t('ui.calibration.safety_limit') }}</small><strong>{{ state.calibration.max_feed_mm }} mm</strong></div>
-            </div>
-          </template>
+                  <template v-else-if='calibrationMeasureStep === 2'>
+                    <div class='calibration-metrics'>
+                      <div><small>{{ t('ui.calibration.m_toolhead') }}</small><strong>{{ state.calibration.load_length_mm }} mm</strong>
+                        <span>{{ (state.calibration.has_decoder ?? state.calibration.protocol === 'v2')
+                          ? t('ui.calibration.src_encoder') : t('ui.calibration.src_time') }}</span></div>
+                      <div><small>{{ t('ui.calibration.pulled_back') }}</small><strong>{{ state.calibration.commanded_retract_mm }} mm</strong>
+                        <span>{{ t('ui.calibration.pulled_back_sub') }}</span></div>
+                      <div><small>{{ t('ui.calibration.tip_now') }}</small><strong>{{ Math.round(state.calibration.tip_position_mm || 0) }} mm</strong>
+                        <span>{{ t('ui.calibration.tip_now_sub') }}</span></div>
+                    </div>
+                    <div class='calibration-track-wrap'>
+                      <p>{{ t('ui.calibration.drag_hint') }}</p>
+                      <div class='calibration-track'
+                           :class='{dragging: calibrationDrag.active,
+                                    disabled: calibrationMoving || !!calibrationUi.busy}'
+                           @pointerdown='calibrationDragStart'
+                           @pointermove='calibrationDragMove'
+                           @pointerup='calibrationDragEnd'
+                           @pointercancel='calibrationDragCancel'>
+                        <span class='calibration-track-fill'
+                              :style='{width: calibrationTrackPercent(calibrationTipNowMm) + `%`}'></span>
+                        <span v-if='calibrationTrackHubMm != null' class='calibration-track-hub'
+                              :style='{left: calibrationTrackPercent(calibrationTrackHubMm) + `%`}'>
+                          <small>{{ t('ui.calibration.hub_saved') }}</small></span>
+                        <span v-if='calibrationDrag.targetMm != null || calibrationDrag.moving'
+                              class='calibration-track-ghost'
+                              :style='{left: calibrationTrackPercent(calibrationDrag.targetMm
+                                ?? calibrationDrag.moving.target) + `%`}'></span>
+                        <span class='calibration-track-handle'
+                              :style='{left: calibrationTrackPercent(calibrationTipNowMm) + `%`}'></span>
+                      </div>
+                      <div class='calibration-track-ends'>
+                        <span>{{ t('ui.calibration.track_park') }}</span>
+                        <span>{{ t('ui.calibration.track_head', {head: dispIdx(calibrationUi.head)}) }}</span>
+                      </div>
+                      <div class='calibration-drag-label'>
+                        <span>{{ calibrationDragLabel }}</span>
+                        <button v-if='[`retracting`, `feed_jogging`].includes(state.calibration.state)'
+                                class='warn' :disabled='!!calibrationUi.busy'
+                                @click='calibrationAction(`stop`)'>{{ t('ui.calibration.stop') }}</button>
+                      </div>
+                    </div>
+                    <div class='calibration-jog-panel'>
+                      <div class='calibration-fine-row'>
+                        <span>{{ t('ui.calibration.toward_ace') }}</span>
+                        <div class='calibration-jogs'>
+                          <button v-for='mm in [5,10,25,100]' :key='`r${mm}`'
+                                  :disabled='calibrationMoving || !!calibrationUi.busy
+                                    || Number(state.calibration.commanded_retract_mm || 0) + mm
+                                      > Number(state.calibration.load_length_mm || 0)'
+                                  @click='calibrationJog(-mm)'>← {{ mm }} mm</button>
+                        </div>
+                      </div>
+                      <div class='calibration-fine-row'>
+                        <span>{{ t('ui.calibration.toward_head') }}</span>
+                        <div class='calibration-jogs'>
+                          <button v-for='mm in [5,10,25]' :key='`f${mm}`'
+                                  :disabled='calibrationMoving || !!calibrationUi.busy
+                                    || Number(state.calibration.commanded_retract_mm || 0) - mm < 0'
+                                  @click='calibrationJog(mm)'>{{ mm }} mm →</button>
+                        </div>
+                      </div>
+                    </div>
+                    <p class='muted calibration-mark-hint'>{{ t('ui.calibration.mark_splitter_hint') }}</p>
+                    <div class='row calibration-primary-actions'>
+                      <button class='primary'
+                              :disabled='calibrationMoving || !!calibrationUi.busy
+                                || state.calibration.state !== `retract_ready`
+                                || Number(state.calibration.commanded_retract_mm || 0) <= 0
+                                || Number(state.calibration.commanded_retract_mm || 0)
+                                  >= Number(state.calibration.load_length_mm || 0)'
+                              @click='calibrationMarkAndReturn'>{{ t('ui.calibration.mark_splitter') }}</button>
+                      <span v-if='state.calibration.state === `retract_ready`
+                                  && Number(state.calibration.commanded_retract_mm || 0)
+                                    >= Number(state.calibration.load_length_mm || 0)'
+                            class='muted'>{{ t('ui.calibration.at_park_hint') }}</span>
+                    </div>
+                  </template>
 
-          <template v-else-if='[`at_sensor`, `retract_ready`, `retracting`, `swap_marked`, `returning`].includes(state.calibration.state)'>
-            <h3>{{ state.calibration.swap_retract_length_mm == null ? '4 · Clear the splitter' : '5 · Return to ACE preload reference' }}</h3>
-            <p v-if='state.calibration.swap_retract_length_mm == null'>{{ t('ui.calibration.retract_hint') }}</p>
-            <p v-else-if='state.calibration.state === `returning`'>{{ t('ui.calibration.return_hint') }}</p>
-            <p v-else>{{ t('ui.calibration.marked_hint') }}</p>
-            <div class='calibration-metrics'>
-              <div><small>{{ t('ui.calibration.load_distance') }}</small><strong>{{ state.calibration.load_length_mm }} mm</strong></div>
-              <div><small>{{ t('ui.calibration.cum_retract') }}</small><strong>{{ state.calibration.commanded_retract_mm }} mm</strong></div>
-              <div><small>{{ t('ui.calibration.swap_point') }}</small><strong>{{ state.calibration.swap_retract_length_mm ?? '-' }} mm</strong></div>
-            </div>
-            <div v-if='state.calibration.swap_retract_length_mm == null' class='calibration-jogs'>
-              <button v-for='mm in [5,10,25,50,100,250,500]' :key='`r${mm}`'
-                      :disabled='calibrationMoving || !!calibrationUi.busy
-                        || Number(state.calibration.commanded_retract_mm || 0) + mm
-                          > Number(state.calibration.load_length_mm || 0)'
-                      @click='calibrationAction(`retract`, mm)'>−{{ mm }} mm</button>
-            </div>
-            <div v-if='state.calibration.swap_retract_length_mm == null
-                       && Number(state.calibration.commanded_retract_mm || 0) > 0'
-                 class='calibration-jogs'>
-              <button v-for='mm in [5,10,25,50]' :key='`f${mm}`'
-                      :disabled='calibrationMoving || !!calibrationUi.busy
-                        || Number(state.calibration.commanded_retract_mm || 0) - mm < 0'
-                      @click='calibrationAction(`feed_jog`, mm)'>+{{ mm }} mm</button>
-            </div>
-            <div class='row'>
-              <button v-if='state.calibration.state === `retract_ready`' class='primary'
-                      @click='calibrationAction(`mark_swap`)'>{{ t('ui.calibration.mark_splitter') }}</button>
-              <button v-if='state.calibration.state === `swap_marked`' class='primary'
-                      @click='calibrationAction(`return_park`)'>{{ t('ui.calibration.return_preload') }}</button>
-            </div>
-          </template>
+                  <template v-else>
+                    <p class='calibration-success'>
+                      {{ t('ui.calibration.marked_at', {mm: state.calibration.swap_retract_length_mm}) }}
+                    </p>
+                    <div class='row calibration-primary-actions'>
+                      <button v-if='state.calibration.state === `swap_marked`' class='primary'
+                              :disabled='!!calibrationUi.busy'
+                              @click='calibrationAction(`return_park`)'>{{ t('ui.calibration.return_preload') }}</button>
+                      <button :disabled='!!calibrationUi.busy'
+                              @click='calibrationUndoMark'>{{ t('ui.calibration.undo_mark') }}</button>
+                      <button v-if='state.calibration.state === `returning`' class='warn'
+                              :disabled='!!calibrationUi.busy'
+                              @click='calibrationAction(`stop`)'>{{ t('ui.calibration.stop') }}</button>
+                    </div>
+                  </template>
+                </template>
 
-          <template v-else>
-            <p class='calibration-notice'>
-              <strong>{{ [`complete`, `verified`].includes(state.calibration.state)
-                ? t('ui.calibration.done_ready')
-                : t('ui.calibration.done_busy') }}</strong>
-              {{ [`complete`, `verified`].includes(state.calibration.state)
-                ? t('ui.calibration.done_ready_hint')
-                : t('ui.calibration.done_busy_hint') }}
-            </p>
-            <div class='row calibration-primary-actions'>
-              <button class='primary'
-                      @click='calibrationSetPanel(
-                        [`complete`, `verified`].includes(state.calibration.state)
-                          ? `results` : `verify`)'>
-                {{ [`complete`, `verified`].includes(state.calibration.state)
-                  ? t('ui.calibration.review_results') : t('ui.calibration.continue_active') }}
-              </button>
-            </div>
-          </template>
-
-                <button v-if='[`feeding`, `retracting`, `returning`]
-                          .includes(state.calibration.state)'
-                        class='calibration-stop'
-                        @click='calibrationAction(`cancel`)'>
-                  {{ t('ui.calibration.stop_cancel') }}
-                </button>
+                <template v-else>
+                  <p class='calibration-notice'>
+                    <strong>{{ [`complete`, `verified`].includes(state.calibration.state)
+                      ? t('ui.calibration.done_ready')
+                      : t('ui.calibration.done_busy') }}</strong>
+                    {{ [`complete`, `verified`].includes(state.calibration.state)
+                      ? t('ui.calibration.done_ready_hint')
+                      : t('ui.calibration.done_busy_hint') }}
+                  </p>
+                  <div class='row calibration-primary-actions'>
+                    <button class='primary'
+                            @click='calibrationSetPanel(
+                              [`complete`, `verified`].includes(state.calibration.state)
+                                ? `results` : `verify`)'>
+                      {{ [`complete`, `verified`].includes(state.calibration.state)
+                        ? t('ui.calibration.review_results') : t('ui.calibration.continue_active') }}
+                    </button>
+                    <button v-if='[`complete`, `verified`].includes(state.calibration.state)'
+                            :disabled='!calibrationCanStart || !!calibrationUi.busy'
+                            @click='calibrationStart'>{{ t('ui.calibration.recalibrate') }}</button>
+                  </div>
+                </template>
               </section>
 
+              <!-- VERIFY -->
               <section v-show='calibrationUi.panel === `verify`'
                        class='calibration-panel'>
                 <div class='calibration-task-heading'>
                   <div>
                     <small>{{ t('ui.calibration.tab_verify') }}</small>
-                    <h3>{{ calibrationVerifyMoving
-                      || [`verify_toolhead`, `verify_toolhead_adjust`,
-                          `verify_toolhead_adjusting`, `verify_splitter`,
-                          `verify_paused`].includes(state.calibration.state)
-                        ? t('ui.calibration.verify_running') : t('ui.calibration.verify_head') }}</h3>
+                    <h3>{{ calibrationVerifyActive
+                      ? t('ui.calibration.verify_running') : t('ui.calibration.verify_head') }}</h3>
                     <p>{{ t('ui.calibration.verify_hint') }}</p>
                   </div>
-                  <span v-if='calibrationRouteKnown'>{{ t('ui.calibration.available') }}</span>
                 </div>
 
-          <template v-if='[`verifying_feed`, `verify_toolhead`, `verify_toolhead_adjust`, `verify_toolhead_adjusting`, `verifying_splitter`, `verify_splitter`, `verifying_return`, `verify_paused`].includes(state.calibration.state)'>
-            <p v-if='state.calibration.state === `verifying_feed`'>{{ t('ui.calibration.v_feed') }}</p>
-            <p v-else-if='state.calibration.state === `verify_toolhead`'>{{ t('ui.calibration.v_at_head') }}</p>
-            <p v-else-if='state.calibration.state === `verify_toolhead_adjust`'>{{ t('ui.calibration.v_adjust') }}</p>
-            <p v-else-if='state.calibration.state === `verify_toolhead_adjusting`'>{{ t('ui.calibration.v_adjusting') }}</p>
-            <p v-else-if='state.calibration.state === `verifying_splitter`'>{{ t('ui.calibration.v_to_splitter') }}</p>
-            <p v-else-if='state.calibration.state === `verify_splitter`'>{{ t('ui.calibration.v_at_splitter') }}</p>
-            <p v-else-if='state.calibration.state === `verifying_return`'>{{ t('ui.calibration.v_returning') }}</p>
-            <p v-else>{{ t('ui.calibration.v_paused') }}</p>
-            <div class='calibration-metrics'>
-              <div><small>{{ t('ui.calibration.tip_from_ace') }}</small><strong>{{ Math.round(calibrationTipPositionMm ?? 0) }} mm</strong></div>
-              <div><small>{{ t('ui.calibration.anchor_head') }}</small><strong>{{ state.calibration.load_length_mm }} mm</strong></div>
-              <div><small>{{ t('ui.calibration.anchor_splitter') }}</small><strong>{{ state.calibration.load_length_mm - state.calibration.swap_retract_length_mm }} mm</strong></div>
-            </div>
-            <p v-if='state.calibration.toolhead_sensor === true && state.calibration.verify_feed_delta_mm != null' class='muted'>Toolhead sensor triggered {{ state.calibration.verify_feed_delta_mm >= 0 ? '+' : '' }}{{ state.calibration.verify_feed_delta_mm }} mm from the calibrated load endpoint (timing estimate).</p>
-            <div v-if='[`verify_toolhead_adjust`, `verify_toolhead_adjusting`].includes(state.calibration.state)'
-                 class='calibration-fine-position'>
-              <div class='calibration-fine-head'>
-                <strong>{{ t('ui.calibration.manual_correction') }}</strong>
-                <span>{{ Number(state.calibration.verify_fine_offset_mm || 0) >= 0 ? '+' : '' }}{{ state.calibration.verify_fine_offset_mm || 0 }} mm · limit ±{{ state.calibration.verify_fine_limit_mm || 50 }} mm</span>
-              </div>
-              <div class='calibration-fine-row'>
-                <span>{{ t('ui.calibration.toward_head') }}</span>
-                <div class='calibration-jogs'>
-                  <button v-for='mm in [1,2,5,10]' :key='`feed-${mm}`'
-                          :disabled='calibrationMoving || !!calibrationUi.busy
-                            || Number(state.calibration.verify_fine_offset_mm || 0) + mm
-                              > Number(state.calibration.verify_fine_limit_mm || 50)'
-                          @click='calibrationAction(`verify_jog`, mm)'>+{{ mm }} mm</button>
-                </div>
-              </div>
-              <div class='calibration-fine-row'>
-                <span>{{ t('ui.calibration.toward_ace') }}</span>
-                <div class='calibration-jogs'>
-                  <button v-for='mm in [1,2,5,10]' :key='`pull-${mm}`'
-                          :disabled='calibrationMoving || !!calibrationUi.busy
-                            || Number(state.calibration.verify_fine_offset_mm || 0) - mm
-                              < -Number(state.calibration.verify_fine_limit_mm || 50)'
-                          @click='calibrationAction(`verify_jog`, -mm)'>−{{ mm }} mm</button>
-                </div>
-              </div>
-            </div>
-            <div class='row'>
-              <button v-if='calibrationVerifyMoving' class='warn'
-                      :disabled='!!calibrationUi.busy'
-                      @click='calibrationAction(`verify_pause`)'>{{ t('ui.calibration.v_pause') }}</button>
-              <button v-if='state.calibration.state === `verify_paused`' class='primary'
-                      :disabled='!!calibrationUi.busy'
-                      @click='calibrationAction(`verify_resume`)'>{{ t('ui.calibration.v_resume') }}</button>
-              <button v-if='state.calibration.state === `verify_toolhead`' class='primary'
-                      :disabled='!!calibrationUi.busy'
-                      @click='calibrationAction(`verify_continue`)'>{{ t('ui.calibration.v_go_splitter') }}</button>
-              <button v-if='state.calibration.state === `verify_splitter`' class='primary'
-                      :disabled='!!calibrationUi.busy'
-                      @click='calibrationAction(`verify_continue`)'>{{ t('ui.calibration.v_go_ace') }}</button>
-            </div>
-          </template>
+                <template v-if='calibrationVerifyActive'>
+                  <div class='calibration-steps'>
+                    <div :class='{active: calibrationVerifyStep === 1, done: calibrationVerifyStep > 1}'>1 · {{ t('ui.calibration.vstep_head') }}</div>
+                    <div :class='{active: calibrationVerifyStep === 2, done: calibrationVerifyStep > 2}'>2 · {{ t('ui.calibration.vstep_hub') }}</div>
+                    <div :class='{active: calibrationVerifyStep === 3}'>3 · {{ t('ui.calibration.vstep_return') }}</div>
+                  </div>
+                  <p v-if='state.calibration.state === `verifying_feed`' class='calibration-notice'>{{ t('ui.calibration.v_feed', {budget: state.calibration.verify_load_budget_mm || state.calibration.load_length_mm}) }}</p>
+                  <p v-else-if='state.calibration.state === `verify_toolhead`' class='calibration-notice'>{{ t('ui.calibration.v_at_head') }}</p>
+                  <p v-else-if='state.calibration.state === `verify_toolhead_adjust`' class='calibration-warning'>{{ t('ui.calibration.v_adjust') }}</p>
+                  <p v-else-if='state.calibration.state === `verify_toolhead_adjusting`' class='calibration-notice'>{{ t('ui.calibration.v_adjusting') }}</p>
+                  <p v-else-if='state.calibration.state === `verifying_splitter`' class='calibration-notice'>{{ t('ui.calibration.v_to_splitter') }}</p>
+                  <p v-else-if='[`verify_splitter`, `verify_splitter_adjusting`].includes(state.calibration.state)' class='calibration-warning'>
+                    {{ calibrationUi.hubAdjust
+                      ? t('ui.calibration.v_hub_adjust')
+                      : t('ui.calibration.v_at_splitter', {mm: state.calibration.verify_swap_mm || state.calibration.swap_retract_length_mm}) }}</p>
+                  <p v-else-if='state.calibration.state === `verifying_return`' class='calibration-notice'>{{ t('ui.calibration.v_returning') }}</p>
+                  <p v-else class='calibration-notice'>{{ t('ui.calibration.v_paused') }}</p>
+
+                  <p v-if='state.calibration.verify_feed_delta_mm != null && calibrationVerifyStep > 1'
+                     :class='calibrationVerifyOutsideTolerance ? `calibration-warning` : `muted`'>
+                    {{ calibrationVerifyOutsideTolerance
+                      ? t('ui.calibration.v_within_margin', {mm: (state.calibration.verify_feed_delta_mm > 0 ? '+' : '') + state.calibration.verify_feed_delta_mm})
+                      : t('ui.calibration.v_confirmed', {mm: (state.calibration.verify_feed_delta_mm >= 0 ? '+' : '') + state.calibration.verify_feed_delta_mm}) }}
+                  </p>
+
+                  <div v-if='[`verify_toolhead_adjust`, `verify_toolhead_adjusting`].includes(state.calibration.state)'
+                       class='calibration-fine-position'>
+                    <div class='calibration-fine-head'>
+                      <strong>{{ t('ui.calibration.manual_correction') }}</strong>
+                      <span>{{ Number(state.calibration.verify_fine_offset_mm || 0) >= 0 ? '+' : '' }}{{ state.calibration.verify_fine_offset_mm || 0 }} mm</span>
+                    </div>
+                    <div class='calibration-fine-row'>
+                      <span>{{ t('ui.calibration.toward_head') }}</span>
+                      <div class='calibration-jogs'>
+                        <button v-for='mm in [1,2,5,10]' :key='`feed-${mm}`'
+                                :disabled='calibrationMoving || !!calibrationUi.busy
+                                  || Number(state.calibration.verify_fine_offset_mm || 0) + mm
+                                    > Number(state.calibration.verify_fine_limit_mm || 50)'
+                                @click='calibrationAction(`verify_jog`, mm)'>{{ mm }} mm</button>
+                      </div>
+                    </div>
+                    <div class='calibration-fine-row'>
+                      <span>{{ t('ui.calibration.toward_ace') }}</span>
+                      <div class='calibration-jogs'>
+                        <button v-for='mm in [1,2,5,10]' :key='`pull-${mm}`'
+                                :disabled='calibrationMoving || !!calibrationUi.busy
+                                  || Number(state.calibration.verify_fine_offset_mm || 0) - mm
+                                    < -Number(state.calibration.verify_fine_limit_mm || 50)'
+                                @click='calibrationAction(`verify_jog`, -mm)'>{{ mm }} mm</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-if='calibrationUi.hubAdjust
+                             && [`verify_splitter`, `verify_splitter_adjusting`].includes(state.calibration.state)'
+                       class='calibration-jog-panel'>
+                    <div class='calibration-fine-row'>
+                      <span>{{ t('ui.calibration.hub_more') }}</span>
+                      <div class='calibration-jogs'>
+                        <button v-for='mm in [5,10,25,50]' :key='`hub-${mm}`'
+                                :disabled='calibrationMoving || !!calibrationUi.busy
+                                  || Number(state.calibration.verify_position_mm || 0) - mm < 10'
+                                @click='calibrationAction(`verify_hub_jog`, mm)'>{{ mm }} mm</button>
+                      </div>
+                    </div>
+                    <div class='calibration-fine-row'>
+                      <span>{{ t('ui.calibration.hub_added') }}</span>
+                      <strong>+{{ state.calibration.verify_hub_extra_mm || 0 }} mm</strong>
+                    </div>
+                  </div>
+
+                  <div class='row calibration-primary-actions'>
+                    <button v-if='state.calibration.state === `verify_splitter`' class='primary'
+                            :disabled='!!calibrationUi.busy'
+                            @click='calibrationAction(`verify_continue`)'>
+                      {{ calibrationUi.hubAdjust ? t('ui.calibration.hub_yes_now') : t('ui.calibration.hub_yes') }}</button>
+                    <button v-if='state.calibration.state === `verify_splitter` && !calibrationUi.hubAdjust'
+                            :disabled='!!calibrationUi.busy'
+                            @click='calibrationUi.hubAdjust = true'>{{ t('ui.calibration.hub_no') }}</button>
+                    <button v-if='state.calibration.state === `verify_toolhead`' class='primary'
+                            :disabled='!!calibrationUi.busy'
+                            @click='calibrationAction(`verify_continue`)'>{{ t('ui.calibration.v_go_splitter') }}</button>
+                    <button v-if='calibrationVerifyMoving' class='warn'
+                            :disabled='!!calibrationUi.busy'
+                            @click='calibrationAction(`stop`)'>{{ t('ui.calibration.stop') }}</button>
+                    <button v-if='[`verify_toolhead`, `verify_toolhead_adjust`, `verify_splitter`].includes(state.calibration.state)'
+                            :disabled='!!calibrationUi.busy'
+                            @click='calibrationAction(`cancel`)'>{{ t('ui.calibration.cancel_run') }}</button>
+                  </div>
+                </template>
 
                 <template v-else-if='calibrationRouteKnown'>
                   <div class='calibration-checks'>
                     <div :class='{ok: calibrationSelectedSlot?.state === `ready`}'>
-                      Slot {{ dispIdx(calibrationUi.slot) }} is
-                      {{ calibrationSelectedSlot?.state === 'ready'
-                        ? 'parked at ACE preload' : calibrationSelectedSlot?.state }}
+                      {{ t('ui.calibration.chk_slot_ready', {slot: dispIdx(calibrationUi.slot)}) }}
                     </div>
                     <div :class='{ok: calibrationSelectedHeadClear}'>
-                      T{{ dispIdx(calibrationUi.head) }} toolhead sensor is
-                      {{ calibrationSelectedHeadClear ? 'clear' : 'not clear' }}
+                      {{ calibrationSelectedHeadClear
+                        ? t('ui.calibration.chk_head_clear', {head: dispIdx(calibrationUi.head)})
+                        : t('ui.calibration.chk_head_loaded', {head: dispIdx(calibrationUi.head)}) }}
                     </div>
-                    <div class='ok'>{{ t('ui.calibration.v_values_ok') }}</div>
+                    <div :class='{ok: !calibrationRouteOccupied}'>{{ t('ui.calibration.chk_tube_empty') }}</div>
                     <div :class='{ok: state.printer_state !== `printing`
                       && state.printer_state !== `paused`
                       && !state.swap_in_progress
@@ -1233,6 +1403,11 @@
                   </div>
                   <p class='calibration-notice'>
                     <strong>{{ t('ui.calibration.v_what') }}</strong>{{ t('ui.calibration.v_what_hint') }}</p>
+                  <p v-if='calibrationVerifyValues' class='calibration-notice'>
+                    <strong>{{ t('ui.calibration.v_values_title') }}</strong>{{ t('ui.calibration.v_values', {
+                      load: calibrationVerifyValues.load_budget,
+                      swap: calibrationVerifyValues.swap,
+                      retract: calibrationVerifyValues.retract}) }}</p>
                   <p v-if='calibrationVerifyBlockedReason'
                      class='calibration-warning'>
                     {{ calibrationVerifyBlockedReason }}
@@ -1243,19 +1418,12 @@
                               || !!calibrationUi.busy'
                             @click='calibrationVerifyConfigured'>
                       {{ calibrationUi.busy === 'verify_start'
-                        ? 'Starting verification…'
+                        ? t('ui.calibration.starting')
                         : state.calibration.state === 'verified'
                           ? t('ui.calibration.v_again') : t('ui.calibration.v_start') }}
                     </button>
                     <button @click='calibrationSetPanel(`setup`)'>{{ t('ui.calibration.review_route') }}</button>
                   </div>
-                  <details class='calibration-details'>
-                    <summary>{{ t('ui.calibration.v_details') }}</summary>
-                    <p>Toolhead {{ calibrationRouteAnchors.load }} mm · splitter
-                      {{ calibrationRouteAnchors.load - calibrationRouteAnchors.swap }} mm
-                      · correction limit ±{{ state.calibration.verify_fine_limit_mm || 50 }} mm.
-                      Encoder telemetry is diagnostic only.</p>
-                  </details>
                 </template>
                 <template v-else>
                   <p class='calibration-warning'>
@@ -1269,71 +1437,163 @@
                     <button @click='calibrationSetPanel(`setup`)'>{{ t('ui.calibration.review_route') }}</button>
                   </div>
                 </template>
-
-                <button v-if='calibrationMoving
-                        || [`verify_toolhead`, `verify_toolhead_adjust`,
-                            `verify_splitter`, `verify_paused`]
-                          .includes(state.calibration.state)'
-                        class='calibration-stop'
-                        @click='calibrationAction(`cancel`)'>
-                  {{ t('ui.calibration.stop_cancel') }}
-                </button>
               </section>
 
+              <!-- RESULTS -->
               <section v-show='calibrationUi.panel === `results`'
                        class='calibration-panel'>
                 <div class='calibration-task-heading'>
                   <div>
                     <small>{{ t('ui.calibration.tab_results') }}</small>
-                    <h3>{{ state.calibration.state === 'verified'
-                      ? t('ui.calibration.r_passed') : t('ui.calibration.r_title') }}</h3>
-                    <p>{{ t('ui.calibration.r_hint') }}</p>
+                    <h3>{{ calibrationResultCase
+                      ? t('ui.calibration.r_head_' + calibrationResultCase)
+                      : t('ui.calibration.r_head_none') }}</h3>
+                    <p>{{ calibrationResultCase
+                      ? t('ui.calibration.r_lead_' + calibrationResultCase)
+                      : t('ui.calibration.r_lead_none') }}</p>
                   </div>
                 </div>
 
-          <template v-if='[`complete`, `verified`].includes(state.calibration.state)'>
-            <p class='calibration-warning'>{{ t('ui.calibration.r_retract_note') }}</p>
-            <p v-if='state.calibration.state === `verified`' class='calibration-success'>{{ t('ui.calibration.r_verified_note') }}</p>
-            <p v-if='state.calibration.state === `verified` && state.calibration.verify_feed_delta_mm != null' class='muted'>Verified toolhead endpoint correction: {{ state.calibration.verify_feed_delta_mm >= 0 ? '+' : '' }}{{ state.calibration.verify_feed_delta_mm }} mm. This diagnostic has not been applied to the calibration values.</p>
-            <p v-if='state.calibration.protocol === `v2`' class='muted'>Encoder return delta: {{ state.calibration.decoder_return_delta ?? '-' }} counts (diagnostic only).</p>
-            <div class='calibration-allowances'>
-              <label>{{ t('ui.calibration.allow_load') }} <input type='number' min='0' max='200' v-model.number='calibrationUi.loadAllowance'> mm</label>
-              <label>{{ t('ui.calibration.allow_splitter') }} <input type='number' min='0' max='200' v-model.number='calibrationUi.swapAllowance'> mm</label>
-            </div>
-            <table class='calibration-review'>
-              <thead><tr><th>{{ t('ui.calibration.col_config') }}</th><th>{{ t('ui.calibration.col_prev') }}</th><th>{{ t('ui.calibration.col_measured') }}</th><th>{{ t('ui.calibration.col_proposed') }}</th></tr></thead>
-              <tbody>
-                <tr><td>load_length</td><td>{{ state.calibration.previous_load_length }}</td><td>{{ state.calibration.load_length_mm }}</td><td>{{ calibrationProposed.load }}</td></tr>
-                <tr><td>swap_retract_length</td><td>{{ state.calibration.previous_swap_retract_length }}</td><td>{{ state.calibration.swap_retract_length_mm }}</td><td>{{ calibrationProposed.swap }}</td></tr>
-                <tr><td>retract_length</td><td>{{ state.calibration.previous_retract_length }}</td><td>{{ state.calibration.retract_length_mm }}</td><td>{{ calibrationProposed.retract }}</td></tr>
-              </tbody>
-            </table>
-            <p v-if='calibrationUi.saved' class='calibration-success'>{{ t('ui.calibration.saved_note') }}</p>
-            <div class='row'>
-              <button :disabled='!!calibrationUi.busy || !calibrationCanVerifyConfigured'
-                      @click='calibrationVerifyConfigured'>
-                {{ state.calibration.state === 'verified' ? t('ui.calibration.v_again') : t('ui.calibration.v_start') }}
-              </button>
-              <button class='primary' :disabled='!!calibrationUi.busy || calibrationUi.saved'
-                      @click='calibrationApply'>
-                {{ calibrationUi.busy === 'apply' ? 'Saving…' : t('ui.calibration.apply_config') }}
-              </button>
-              <button :disabled='!!calibrationUi.busy' @click='calibrationAction(`reset`)'>{{ t('ui.calibration.discard') }}</button>
-            </div>
-          </template>
+                <template v-if='calibrationResultCase'>
+                  <p v-if='calibrationResultCase === `changed`' class='calibration-warning'>
+                    <span v-if='state.calibration.verify_remeasured_mm'>{{ t('ui.calibration.r_remeasured', {mm: (state.calibration.verify_remeasured_mm > 0 ? '+' : '') + state.calibration.verify_remeasured_mm}) }} </span>
+                    <span v-if='state.calibration.verify_hub_extra_mm'>{{ t('ui.calibration.r_hub_extra', {mm: state.calibration.verify_hub_extra_mm}) }}</span>
+                  </p>
+                  <p v-else-if='calibrationResultCase === `passed`' class='calibration-success'>
+                    {{ t('ui.calibration.r_confirmed', {mm: (Number(state.calibration.verify_feed_delta_mm || 0) >= 0 ? '+' : '') + (state.calibration.verify_feed_delta_mm || 0)}) }}
+                  </p>
+                  <p v-else class='calibration-success'>
+                    {{ t('ui.calibration.r_measured', {
+                      load: state.calibration.load_length_mm,
+                      swap: state.calibration.swap_retract_length_mm,
+                      src: (state.calibration.has_decoder ?? state.calibration.protocol === 'v2')
+                        ? t('ui.calibration.src_encoder') : t('ui.calibration.src_time')}) }}
+                  </p>
+
+                  <template v-if='!calibrationNothingToSave'>
+                    <table class='calibration-review'>
+                      <thead><tr>
+                        <th>{{ t('ui.calibration.col_config') }}</th>
+                        <th>{{ t('ui.calibration.col_prev') }}</th>
+                        <th>{{ t('ui.calibration.col_measured') }}</th>
+                        <th>{{ t('ui.calibration.col_margin') }}</th>
+                        <th>{{ t('ui.calibration.col_proposed') }}</th>
+                      </tr></thead>
+                      <tbody>
+                        <tr>
+                          <td>{{ t('ui.calibration.row_load') }}<small>load_length · {{ t('ui.calibration.row_load_sub') }}</small></td>
+                          <td>{{ state.calibration.previous_load_length }}</td>
+                          <td>{{ state.calibration.load_length_mm }}</td>
+                          <td>+ <input type='number' min='0' max='500' step='10'
+                                       :disabled='calibrationUi.saved'
+                                       v-model.number='calibrationUi.loadAllowance'></td>
+                          <td class='save'>{{ calibrationProposed.load }}</td>
+                        </tr>
+                        <tr>
+                          <td>{{ t('ui.calibration.m_splitter') }}<small>swap_retract_length · {{ t('ui.calibration.row_swap_sub') }}</small></td>
+                          <td>{{ state.calibration.previous_swap_retract_length }}</td>
+                          <td>{{ state.calibration.swap_retract_length_mm }}</td>
+                          <td v-if='calibrationProposed.swapFromConfig' class='muted'>{{ t('ui.calibration.margin_included') }}</td>
+                          <td v-else>+ <input type='number' min='0' max='500' step='10'
+                                              :disabled='calibrationUi.saved'
+                                              v-model.number='calibrationUi.swapAllowance'></td>
+                          <td class='save'>{{ calibrationProposed.swap }}</td>
+                        </tr>
+                        <tr>
+                          <td>{{ t('ui.calibration.row_retract') }}<small>retract_length · {{ t('ui.calibration.row_retract_sub') }}</small></td>
+                          <td>{{ state.calibration.previous_retract_length }}</td>
+                          <td>{{ state.calibration.retract_length_mm }}</td>
+                          <td class='muted'>{{ t('ui.calibration.margin_none') }}</td>
+                          <td class='save'>{{ calibrationProposed.retract }}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    <p v-if='calibrationProposed.capped' class='calibration-warning'>
+                      <strong>{{ t('ui.calibration.cap_title') }}</strong> {{ t('ui.calibration.cap_text') }}</p>
+
+                    <div class='calibration-selector-block'>
+                      <label>{{ t('ui.calibration.scope_label') }}</label>
+                      <div class='calibration-option-grid two'>
+                        <button type='button' class='calibration-route-option'
+                                :class='{selected: calibrationUi.scope === `ace`}'
+                                :disabled='!!calibrationUi.busy || calibrationUi.saved'
+                                @click='calibrationSetScope(`ace`)'>
+                          <strong>{{ t('ui.calibration.scope_ace', {ace: dispIdx(state.calibration.ace)}) }}</strong>
+                          <small>{{ t('ui.calibration.scope_ace_hint') }}</small>
+                        </button>
+                        <button type='button' class='calibration-route-option'
+                                :class='{selected: calibrationUi.scope === `slot`}'
+                                :disabled='!!calibrationUi.busy || calibrationUi.saved'
+                                @click='calibrationSetScope(`slot`)'>
+                          <strong>{{ t('ui.calibration.scope_slot', {slot: dispIdx(state.calibration.slot)}) }}</strong>
+                          <small>{{ t('ui.calibration.scope_slot_hint') }}</small>
+                        </button>
+                      </div>
+                    </div>
+                    <p v-if='calibrationUi.scope === `ace` && calibrationOwnValueSlots.length'
+                       class='calibration-warning'>
+                      {{ t('ui.calibration.override_note', {slots: calibrationOwnValueSlots.map(s => dispIdx(s)).join(', ')}) }}
+                    </p>
+
+                    <div v-if='!calibrationUi.saved' class='row calibration-primary-actions'>
+                      <button class='primary' :disabled='!!calibrationUi.busy'
+                              @click='calibrationApply'>
+                        {{ calibrationUi.busy === 'apply' ? t('ui.calibration.saving') : t('ui.calibration.apply_config') }}
+                      </button>
+                      <button v-if='state.calibration.state === `complete`'
+                              :disabled='!!calibrationUi.busy || !calibrationCanVerifyConfigured'
+                              @click='calibrationVerifyConfigured'>{{ t('ui.calibration.verify_first') }}</button>
+                      <button :disabled='!!calibrationUi.busy'
+                              @click='calibrationAction(`reset`)'>{{ t('ui.calibration.discard') }}</button>
+                      <button class='warn' :disabled='!!calibrationClearBlocked || !!calibrationUi.busy'
+                              :title='calibrationClearBlocked?.why || null'
+                              :aria-describedby='calibrationClearBlocked ? `calibration-clear-why-results` : null'
+                              @click='calibrationClearOpen'>{{ calibrationUi.busy === 'clear'
+                                ? t('ui.calibration.saving') : t('ui.calibration.clear') }}</button>
+                    </div>
+                    <template v-else>
+                      <p class='calibration-success'>
+                        <strong>{{ t('ui.calibration.saved_title') }}</strong>
+                        {{ t('ui.calibration.saved_note') }}</p>
+                      <div class='row calibration-primary-actions'>
+                        <button class='primary' :disabled='!!calibrationUi.busy'
+                                @click='calibrationNextRoute'>{{ t('ui.calibration.next_route') }}</button>
+                        <button :disabled='!calibrationCanVerifyConfigured || !!calibrationUi.busy'
+                                @click='calibrationVerifyConfigured'>{{ t('ui.calibration.verify_saved') }}</button>
+                        <button class='warn' :disabled='!!calibrationClearBlocked || !!calibrationUi.busy'
+                                :title='calibrationClearBlocked?.why || null'
+                                :aria-describedby='calibrationClearBlocked ? `calibration-clear-why-results` : null'
+                                @click='calibrationClearOpen'>{{ calibrationUi.busy === 'clear'
+                                  ? t('ui.calibration.saving') : t('ui.calibration.clear') }}</button>
+                      </div>
+                    </template>
+                  </template>
+                  <div v-else class='row calibration-primary-actions'>
+                    <button class='primary' :disabled='!calibrationCanVerifyConfigured || !!calibrationUi.busy'
+                            @click='calibrationVerifyConfigured'>{{ t('ui.calibration.v_again') }}</button>
+                    <button @click='calibrationBeginRecalibration'>{{ t('ui.calibration.recalibrate') }}</button>
+                    <button class='warn' :disabled='!!calibrationClearBlocked || !!calibrationUi.busy'
+                            :title='calibrationClearBlocked?.why || null'
+                            :aria-describedby='calibrationClearBlocked ? `calibration-clear-why-results` : null'
+                            @click='calibrationClearOpen'>{{ calibrationUi.busy === 'clear'
+                              ? t('ui.calibration.saving') : t('ui.calibration.clear') }}</button>
+                  </div>
+                </template>
 
                 <template v-else-if='calibrationRouteKnown'>
-                  <p class='calibration-notice'>
-                    <strong>{{ t('ui.calibration.saved_title') }}</strong>{{ t('ui.calibration.r_none_session') }}</p>
-                  <div class='calibration-metrics'>
-                    <div><small>{{ t('ui.calibration.m_toolhead') }}</small><strong>{{ calibrationRouteAnchors.load }} mm</strong></div>
-                    <div><small>{{ t('ui.calibration.m_splitter') }}</small><strong>{{ calibrationRouteAnchors.swap }} mm</strong></div>
-                    <div><small>{{ t('ui.calibration.final_pos') }}</small><strong>{{ calibrationTipPositionMm === 0 ? 'Parked' : t('ui.calibration.unknown') }}</strong></div>
+                  <div class='calibration-metrics two'>
+                    <div><small>{{ t('ui.calibration.m_toolhead') }}</small><strong>{{ calibrationRouteAnchors.load }} mm</strong><span>{{ t('ui.calibration.m_toolhead_sub') }}</span></div>
+                    <div><small>{{ t('ui.calibration.m_splitter') }}</small><strong>{{ calibrationRouteAnchors.swap }} mm</strong><span>{{ t('ui.calibration.m_splitter_sub') }}</span></div>
                   </div>
                   <div class='row calibration-primary-actions'>
                     <button class='primary'
                             @click='calibrationSetPanel(`verify`)'>{{ t('ui.calibration.verify_saved') }}</button>
                     <button @click='calibrationBeginRecalibration'>{{ t('ui.calibration.recalibrate') }}</button>
+                    <button class='warn' :disabled='!!calibrationClearBlocked || !!calibrationUi.busy'
+                            :title='calibrationClearBlocked?.why || null'
+                            :aria-describedby='calibrationClearBlocked ? `calibration-clear-why-results` : null'
+                            @click='calibrationClearOpen'>{{ calibrationUi.busy === 'clear'
+                              ? t('ui.calibration.saving') : t('ui.calibration.clear') }}</button>
                   </div>
                 </template>
                 <template v-else>
@@ -1344,8 +1604,15 @@
                     <button class='primary'
                             @click='calibrationBeginRecalibration'>{{ t('ui.calibration.start_calibration') }}</button>
                     <button @click='calibrationSetPanel(`setup`)'>{{ t('ui.calibration.review_route') }}</button>
+                    <button class='warn' :disabled='!!calibrationClearBlocked || !!calibrationUi.busy'
+                            :title='calibrationClearBlocked?.why || null'
+                            :aria-describedby='calibrationClearBlocked ? `calibration-clear-why-results` : null'
+                            @click='calibrationClearOpen'>{{ calibrationUi.busy === 'clear'
+                              ? t('ui.calibration.saving') : t('ui.calibration.clear') }}</button>
                   </div>
                 </template>
+                <p v-if='calibrationClearBlocked' id='calibration-clear-why-results'
+                   class='calibration-clear-reason' :class='{blocked: calibrationClearBlocked.blocked}'>{{ calibrationClearBlocked.why }}</p>
               </section>
             </div>
           </div>
@@ -1385,7 +1652,7 @@
           <p v-if="printCtlError" class="error small">{{ printCtlError }}</p>
           <p v-if="printCtlNotice" class="muted small">{{ printCtlNotice }}</p>
           <div class="pc-status">
-            <span class="pill">{{ printCtl.state || '–' }}</span>
+            <span class="pill">{{ printCtl.state || '-' }}</span>
             <span v-if="printCtl.progress" class="pill">{{ printCtl.progress }} %</span>
             <span v-if="printCtl.filename" class="muted small pc-file">{{ printCtl.filename }}</span>
             <span v-if="printCtl.message" class="muted small">{{ printCtl.message }}</span>
@@ -1425,8 +1692,8 @@
 
           <div class="pc-row pc-temps">
             <span>{{ t('ui.control.nozzle') }}</span>
-            <b>{{ printCtl.nozzle.temp !== null ? Math.round(printCtl.nozzle.temp) : '–' }}
-               / {{ printCtl.nozzle.target !== null ? Math.round(printCtl.nozzle.target) : '–' }} °C</b>
+            <b>{{ printCtl.nozzle.temp !== null ? Math.round(printCtl.nozzle.temp) : '-' }}
+               / {{ printCtl.nozzle.target !== null ? Math.round(printCtl.nozzle.target) : '-' }} °C</b>
             <input type="number" class="pc-temp-in"
                    min="0" :max="printCtlLimits.nozzle.max"
                    :placeholder="t('ui.control.target')"
@@ -1437,8 +1704,8 @@
           </div>
           <div class="pc-row pc-temps">
             <span>{{ t('ui.control.bed') }}</span>
-            <b>{{ printCtl.bed.temp !== null ? Math.round(printCtl.bed.temp) : '–' }}
-               / {{ printCtl.bed.target !== null ? Math.round(printCtl.bed.target) : '–' }} °C</b>
+            <b>{{ printCtl.bed.temp !== null ? Math.round(printCtl.bed.temp) : '-' }}
+               / {{ printCtl.bed.target !== null ? Math.round(printCtl.bed.target) : '-' }} °C</b>
             <input type="number" class="pc-temp-in"
                    min="0" :max="printCtlLimits.bed.max"
                    :placeholder="t('ui.control.target')"
@@ -1450,7 +1717,7 @@
 
           <div class="pc-row pc-temps" v-if="printCtl.enclosure">
             <span>{{ t('ui.control.chamber') }}</span>
-            <b>{{ printCtl.enclosure.temp !== null ? Math.round(printCtl.enclosure.temp) : '–' }} °C</b>
+            <b>{{ printCtl.enclosure.temp !== null ? Math.round(printCtl.enclosure.temp) : '-' }} °C</b>
           </div>
 
           <div class="pc-row pc-light" :class="{on: printCtl.light > 0}" v-if="printCtl.light !== null">
@@ -1581,13 +1848,13 @@
         <table class="history-table">
           <thead>
             <tr>
-              <th>{{ t('ui.history.date') }}</th>
-              <th>{{ t('ui.history.file') }}</th>
-              <th>{{ t('ui.history.duration') }}</th>
-              <th>{{ t('ui.history.colors') }}</th>
-              <th>{{ t('ui.history.swaps') }}</th>
-              <th>{{ t('ui.history.filament') }}</th>
-              <th>{{ t('ui.history.result') }}</th>
+              <th>{{ t('ui.history.date') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('date', $event)">i</button></th>
+              <th>{{ t('ui.history.file') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('file', $event)">i</button></th>
+              <th>{{ t('ui.history.duration') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('duration', $event)">i</button></th>
+              <th>{{ t('ui.history.colors') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('colors', $event)">i</button></th>
+              <th>{{ t('ui.history.swaps') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('swaps', $event)">i</button></th>
+              <th>{{ t('ui.history.filament') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('filament', $event)">i</button></th>
+              <th>{{ t('ui.history.result') }}<button type="button" class="info-btn" :aria-label="t('ui.history.info_label')" @click.stop="historyColumnInfo('result', $event)">i</button></th>
               <th></th>
             </tr>
           </thead>
@@ -1603,11 +1870,11 @@
                 <td>
                   <span v-for="c in historyColors(row)" :key="'hc-'+c.head"
                         class="swatch" :style="{background: c.color}"
-                        :title="'T' + c.head + ' · ACE ' + c.ace + ' / slot ' + c.slot"></span>
+                        :title="'T' + c.th + ' · MMU ' + c.ace + ' / slot ' + c.slot"></span>
                 </td>
-                <td>{{ row.multiace ? row.multiace.toolchanges : '–' }}</td>
-                <td>{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '–' }}</td>
-                <td><span class="pill">{{ row.status || '–' }}</span></td>
+                <td>{{ row.multiace && row.multiace.toolchanges != null ? row.multiace.toolchanges : '-' }}</td>
+                <td>{{ row.filament_used ? Math.round(row.filament_used / 1000) + ' m' : '-' }}</td>
+                <td><span class="pill">{{ row.status || '-' }}</span></td>
                 <td>
                   <button v-if="row.filename" class="reprint-btn"
                           :disabled="isPrinting || history.reprinting !== ''"
@@ -1621,12 +1888,12 @@
               <tr v-if="history.detail === historyRowKey(row)" class="history-detail">
                 <td colspan="8">
                   <div v-if="row.multiace">
-                    <p><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '–' }}
+                    <p v-if="row.multiace.plan || row.multiace.load_retries != null"><b>{{ t('ui.history.plan') }}:</b> {{ row.multiace.plan || '-' }}
                        · <b>{{ t('ui.history.retries') }}:</b> {{ row.multiace.load_retries }}</p>
                     <table class="history-swaps" v-if="(row.multiace.swaps || []).length">
                       <tr v-for="(sw, i) in row.multiace.swaps" :key="'sw-'+i">
                         <td>{{ sw.kind }}</td>
-                        <td>T{{ sw.head }} · ACE {{ sw.ace }} / {{ sw.slot }}</td>
+                        <td>T{{ sw.head }} · MMU {{ sw.ace }} / {{ sw.slot }}</td>
                         <td>{{ Math.round(sw.seconds) }} s</td>
                       </tr>
                     </table>
@@ -1643,6 +1910,11 @@
             </template>
           </tbody>
         </table>
+      </div>
+      <div v-if="history.info" class="info-banner" role="note" @click.stop
+           :style="{left: history.info.left + 'px', top: history.info.top + 'px'}">
+        <b>{{ t('ui.history.' + history.info.col) }}</b>
+        <div>{{ t('ui.history.' + history.info.col + '_info') }}</div>
       </div>
     </section>
     <section v-show="tab==='spools'" class="nt-spools-tab">
@@ -1923,6 +2195,10 @@
       <p v-if="state.mode === 'head'" class="muted small">{{ t('ui.config.head_mode_hint') }}</p>
       </div>
       </div>
+      <!-- D11 Devices: the unit table. One row per place (MMU 1-4) and one
+           per detected unit without a place. The dropdown writes
+           ACE_UNIT_ASSIGN, "Forget" ACE_UNIT_FORGET; both take effect at the
+           next firmware restart, the hint row says so. -->
       <div class="nt-behave">
       <div class="nt-tile">
       <h3>{{ t('ui.config.confirm_commands') }}</h3>
@@ -1974,6 +2250,31 @@
       </div>
       </div>
 
+      <template v-if="ORCA_SECTION">
+      <h3>{{ t('ui.config.orca_profile') }}</h3>
+      <button type="button" @click="orcaProfile()">{{ t('ui.config.orca_profile_btn') }}</button>
+      <p class="muted small">{{ t('ui.config.orca_profile_hint') }}</p>
+      <div class="tool-map" v-if="virtualTools().length">
+        <p class="muted small">{{ t('ui.config.orca_tool_map_hint') }}</p>
+        <div class="tool-map-head">{{ t('ui.config.orca_tool_map_head') }}</div>
+        <div class="tool-map-groups">
+          <div class="tool-map-group" v-for="g in virtualToolGroups()" :key="g.ace">
+            <div class="tool-map-row" v-for="vt in g.tools" :key="vt.tool">
+              <span class="tool-map-name">{{ vt.tool + 1 }}</span>
+              <select class="tool-map-target" :value="vt.ace + ':' + vt.slot"
+                      :style="vt.color ? {background: vt.color, color: textOn(vt.color)} : {}"
+                      @change="setToolMapTarget(vt.tool, $event.target.value)">
+                <option v-for="o in toolTargetOptions(vt)" :key="o.value" :value="o.value"
+                        :style="o.color ? {background: o.color, color: textOn(o.color)} : {}">{{ o.label }}</option>
+              </select>
+              <button type="button" v-if="vt.mapped" class="tool-map-reset" @click="resetToolMap(vt.tool)" :title="t('ui.config.orca_tool_reset')">&#x21BA;</button>
+              <span v-else class="tool-map-reset"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      </template>
+
       <h3>{{ t('ui.config.fluidd_panel') }}</h3>
       <div class="row">
         <button @click="addFluiddCamera" :disabled="fluiddCamBusy">
@@ -1986,13 +2287,16 @@
       <h3>{{ t('ui.config.parameters') }}</h3>
       <div class="config-form">
         <div class="nt-pgroup nt-pg-ace">
-        <div class="config-row">
+        <!-- ace_device_count and v2_order left the form with D11: the unit
+             table (Devices above) is the expectation and the order; both
+             options are still read by the engine for existing configs. -->
+        <div class="config-row" v-if="false">
           <label>{{ t('ui.config.ace_count') }}</label>
           <select v-model.number="configForm.ace_device_count">
             <option v-for="n in [1,2,3,4]" :key="n" :value="n">{{ n }}</option>
           </select>
         </div>
-        <div class="config-row">
+        <div class="config-row" v-if="false">
           <label>{{ t('ui.config.ace2_order') }}</label>
           <select v-model="configForm.v2_order">
             <option value="first">{{ t('ui.config.ace2_before') }}</option>
@@ -2205,8 +2509,8 @@
       </div>
       <h3>{{ t('ui.config.per_ace') }}</h3>
       <div class="per-ace-grid">
-        <div class="per-ace-card" v-for="i in configForm.ace_device_count" :key="i-1">
-          <h4>ACE {{ dispIdx(i-1) }}</h4>
+        <div class="per-ace-card" v-for="i in perAceCount()" :key="i-1">
+          <h4>MMU {{ dispIdx(i-1) }}</h4>
           <div class="per-ace-row">
             <label>{{ t('ui.config.dryer_temp_override') }}
               <input type="number" v-model.number="configForm.perAce[i-1].dryer_temp"
@@ -2278,15 +2582,16 @@
       <div class="row nt-cfg-save">
         <button @click="loadConfig">{{ t('ui.common.reload') }}</button>
         <button @click="saveConfigForm" class="primary">{{ t('ui.config.save_restart') }}</button>
-        <button @click="showRawConfig = !showRawConfig">{{ showRawConfig ? t('ui.config.form_view') : t('ui.config.raw_view') }}</button>
+        <button @click="toggleRawConfig()">{{ showRawConfig ? t('ui.config.form_view') : t('ui.config.raw_view') }}</button>
       </div>
       <!-- Result AT the button: the config form is long, so the top reboot
            banner was only visible after scrolling up. The
            hint above it repeats the banner in warning colours - inside the
            grey log block the restart line went unnoticed. -->
-      <p v-if="rebootNeeded" class="config-restart-hint">⚠ {{ t('ui.common.please_restart') }}</p>
+      <p v-if="rebootNeeded" class="config-restart-hint">⚠ {{ t('ui.common.please_restart') }}
+        <button v-if="restartOffered" class="restart-now" @click="restartNow('printer')">{{ t('ui.restart.printer_btn') }}</button></p>
       <pre v-if="configLog" class="config-log-inline">{{ configLog }}</pre>
-      <details v-if="showRawConfig">
+      <details v-if="showRawConfig" id="raw-config">
         <summary>{{ t('ui.config.raw_editor') }}</summary>
         <textarea v-model="config.content" rows="30" spellcheck="false"></textarea>
         <!-- No "restart Klipper" option: it worked only sometimes (a bare
@@ -2358,7 +2663,8 @@
         </div>
         <p v-if="tipform.error" class="error">{{ tipform.error }}</p>
         <pre v-else-if="tipform.savedMsg" class="config-log-inline">{{ tipform.savedMsg }}</pre>
-        <p v-if="tipformRestartPending" class="tipform-pending">⚠ {{ t('ui.config.tipform_restart_pending') }}</p>
+        <p v-if="tipformRestartPending" class="tipform-pending">⚠ {{ t('ui.config.tipform_restart_pending') }}
+          <button v-if="restartOffered" class="restart-now" @click="restartNow('firmware')">{{ t('ui.restart.firmware_btn') }}</button></p>
         <p class="muted small">{{ t('ui.config.tipform_syntax') }}</p>
       </div>
       <p v-else class="muted small">{{ t('ui.config.tipform_unsupported') }}</p>
@@ -2414,6 +2720,86 @@ reboot</pre>
         </div>
         <pre v-if="updateState.log" class="update-log">{{ updateState.log }}</pre>
       </div>
+    </section>
+    <section v-show="tab==='devices'" class="nt-config-tab nt-devices-tab">
+      <div class="nt-devices">
+      <h3>{{ t('ui.config.devices') }}</h3>
+      <p class="muted small">{{ t('ui.config.devices_hint') }}</p>
+      <table class="devices-table" v-if="state.devices && state.devices.length">
+        <thead>
+          <tr>
+            <th>{{ t('ui.config.dev_place') }}</th>
+            <th>{{ t('ui.config.dev_driver') }}</th>
+            <th>{{ t('ui.config.dev_name') }}</th>
+            <th>{{ t('ui.config.dev_key') }}</th>
+            <th>{{ t('ui.config.dev_status') }}</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="dev in state.devices" :key="(dev.place ?? 'x') + ':' + dev.key"
+              :class="{'dev-absent': dev.key && !dev.present, 'dev-free': !dev.key}">
+            <td>
+              <select v-if="dev.key" :value="dev.place ?? ''"
+                      :disabled="isPrinting"
+                      @change="assignUnit(dev.key, $event.target.value)">
+                <option value="">{{ t('ui.config.dev_none') }}</option>
+                <option v-for="n in [0,1,2,3]" :key="n" :value="n">MMU {{ dispIdx(n) }}</option>
+              </select>
+              <span v-else class="muted">MMU {{ dispIdx(dev.place) }} · {{ t('ui.config.dev_free') }}</span>
+            </td>
+            <td>{{ deviceDriver(dev) }}</td>
+            <td>
+              <input v-if="dev.key && dev.place !== null && dev.place !== undefined && dev.present"
+                     class="dev-name" type="text" maxlength="32"
+                     :value="devNameValue(dev)" :disabled="isPrinting"
+                     :placeholder="t('ui.config.dev_name_placeholder')"
+                     @input="devNameInput(dev, $event)"
+                     @change="devNameCommit(dev, $event)">
+              <span v-else>{{ dev.name }}</span>
+            </td>
+            <td class="dev-key" :title="dev.path">{{ dev.key }}<span v-if="dev.path" class="muted small"> · {{ dev.path }}</span></td>
+            <td>{{ dev.key ? deviceStatus(dev) : '' }}</td>
+            <td>
+              <button v-if="dev.key && dev.present && dev.connected && dev.place !== null && dev.place !== undefined"
+                      class="small" :disabled="isPrinting || state.locate_busy" @click="locateUnit(dev)">{{ t('ui.config.dev_locate') }}</button>
+              <button v-if="dev.key && !dev.present" class="small danger"
+                      :disabled="isPrinting" @click="forgetUnit(dev)">{{ t('ui.config.dev_forget') }}</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="muted small">{{ t('ui.config.dev_empty') }}</p>
+      <p v-if="state.units_restart_needed" class="restart-hint">
+        {{ t('ui.config.dev_restart_hint') }}
+        <button class="small" :disabled="isPrinting" @click="restartNow('firmware')">{{ t('ui.restart.firmware_btn') }}</button>
+      </p>
+      <template v-if="state.driver_switches && state.driver_switches.length">
+        <h3>{{ t('ui.config.drivers') }}</h3>
+        <p class="muted small">{{ t('ui.config.drivers_hint') }}</p>
+        <table class="devices-table drivers-table">
+          <tbody>
+            <tr v-for="drv in state.driver_switches" :key="drv.name"
+                :class="{'dev-absent': !drv.enabled}">
+              <td>
+                <label class="drv-switch">
+                  <input type="checkbox" :checked="drv.enabled"
+                         :disabled="isPrinting || driverOnlyActive(drv)"
+                         @change="driverToggle(drv, $event)">
+                  {{ drv.label }}
+                </label>
+              </td>
+              <td class="muted small">{{ driverNote(drv) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="driversRestartNeeded && !state.units_restart_needed" class="restart-hint">
+          {{ t('ui.config.driver_restart_hint') }}
+          <button class="small" :disabled="isPrinting" @click="restartNow('firmware')">{{ t('ui.restart.firmware_btn') }}</button>
+        </p>
+      </template>
+      </div>
+      <h3>{{ t('ui.config.acefw_title') }}</h3>
       <!-- ACE 2 firmware (OTA). Flash engine based on hakimio's updater -
            DEV-pending, ships only with his license OK. Testlauf = the
            identical chain (port release, version query, image parse)
@@ -2510,6 +2896,7 @@ reboot</pre>
                 >{{ acefwStatusText }}</span>
         </div>
       </div>
+      <p v-if="!acefwCandidates.length" class="muted small">{{ t('ui.config.acefw_none') }}</p>
     </section>
     <section v-for="p in plugins.items" :key="'sec-'+p.name"
              v-show="tab===('plugin:'+p.name)"
@@ -2559,6 +2946,8 @@ reboot</pre>
            :class="['notif-item', (n.level === 'warn') ? 'notif-warn' : '', (n.level === 'info') ? 'notif-info' : '']">
         <span class="notif-time">{{ notifTime(n) }}</span>
         <span class="notif-msg">{{ n.msg }}</span>
+        <button v-if="notifWantsReboot(n) && restartOffered" class="restart-now"
+                @click="restartNow('printer')">{{ t('ui.restart.printer_btn') }}</button>
         <button class="notif-dismiss" @click="dismissNotification(n.id)"
                 :title="t('ui.common.cancel')">×</button>
       </div>
@@ -2973,6 +3362,47 @@ reboot</pre>
       </div>
     </div>
   </div>
+  <!-- Calibration: clear saved values. Its own dialog, the generic one
+       cannot hold the per-key table. -->
+  <div v-if="calibrationClear.open" class="overlay overlay-top" @click.self="calibrationClear.open = false">
+    <div class="dialog nt-confirm calibration-clear-dialog" role="dialog" aria-modal="true"
+         aria-labelledby="calibration-clear-title">
+      <h3 id="calibration-clear-title">{{ calibrationClearPlan.level === 'slot'
+        ? t('ui.calibration.clear_title_slot', {slot: dispIdx(calibrationClearPlan.slot)})
+        : t('ui.calibration.clear_title_ace', {ace: dispIdx(calibrationClearPlan.ace)}) }}</h3>
+      <p>{{ calibrationClearLead }}</p>
+      <p v-if="calibrationClearPlan.keeps.length">{{ t('ui.calibration.clear_keeps_own', {
+        slots: calibrationClearPlan.keeps.map(s => dispIdx(s)).join(', ')}) }}</p>
+      <table class="calibration-clear-table">
+        <thead><tr>
+          <th>{{ t('ui.calibration.col_config') }}</th>
+          <th>{{ t('ui.calibration.col_prev') }}</th>
+          <th>{{ t('ui.calibration.clear_after') }}</th>
+        </tr></thead>
+        <tbody>
+          <tr v-for="row in calibrationClearPlan.rows" :key="row.key">
+            <td>{{ t('ui.calibration.' + row.label) }}<small>{{ row.config }}</small></td>
+            <td>{{ row.old ?? '-' }}</td>
+            <td :class="{changed: row.after !== row.old}">{{ row.after ?? '-' }}<small>{{ row.src === 'ace'
+              ? t('ui.calibration.clear_src_ace', {ace: dispIdx(calibrationClearPlan.ace)})
+              : t('ui.calibration.clear_src_default') }}</small></td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-if="calibrationClearSession && calibrationClearSession.mm > 0" class="calibration-warning">
+        <strong>{{ t('ui.calibration.clear_filament_out', {mm: calibrationClearSession.mm}) }}</strong>
+        {{ t('ui.calibration.clear_filament_out_hint') }}</p>
+      <p v-if="calibrationClearSession?.action" class="calibration-warning">{{ calibrationUi.panel === 'results' && calibrationResultCase
+        ? t('ui.calibration.clear_run_reset_results') : t('ui.calibration.clear_run_reset') }}</p>
+      <p class="calibration-notice">{{ t('ui.calibration.clear_restart') }}</p>
+      <div class="row nt-dlg-foot">
+        <button class="nt-cancel-r" @click="calibrationClear.open = false">{{ t('ui.common.cancel') }}</button>
+        <button class="warn nt-main calibration-clear-confirm"
+                :disabled="!!calibrationClearBlocked || !!calibrationUi.busy"
+                @click="calibrationClearConfirm">{{ t('ui.calibration.clear_confirm') }}</button>
+      </div>
+    </div>
+  </div>
   <div v-if="preflight.open && !panelMode" class="overlay" @click.self="closePreflight">
     <div class="dialog preflight-dialog">
       <h3>
@@ -3063,7 +3493,7 @@ reboot</pre>
                 {{ g.heads.map(h => dispIdx(h)).join(' + ') }}</b>
               <b v-else class="warn">{{ t('ui.preflight.forca_no_head') }}</b>
               <span v-if="forcaGroupAces(g)" class="muted small">
-                &middot; ACE {{ forcaGroupAces(g).join(' + ') }}</span>
+                &middot; MMU {{ forcaGroupAces(g).join(' + ') }}</span>
               <span v-if="g.dia" class="muted small">{{ g.dia }} mm</span>
               <span v-else class="muted small">
                 {{ t('ui.preflight.forca_no_head_hint') }}
@@ -3128,7 +3558,7 @@ reboot</pre>
                              v-for="u in unsetSlotsForT(c.t)"
                              :key="'fhu-'+c.t+'-'+u.ace+'-'+u.slot">
                           <span class="hm-dd-chip" style="background:var(--nt-nocolor, #444)"></span>
-                          <span>ACE {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }}
+                          <span>MMU {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }}
                             &middot; {{ t('ui.preflight.slot_not_set') }}</span>
                         </div>
                       </div>
@@ -3143,12 +3573,12 @@ reboot</pre>
                       <option v-for="opt in slicerSlotOptions(c.t)"
                               :key="'fo-'+c.t+'-'+slotKey(opt)"
                               :value="slotKey(opt)">
-                        ACE {{ dispIdx(opt.ace) }} / {{ dispIdx(opt.slot) }}
+                        MMU {{ dispIdx(opt.ace) }} / {{ dispIdx(opt.slot) }}
                         - {{ opt.name || opt.color }}
                       </option>
                       <option v-for="u in unsetSlotsForT(c.t)" disabled
                               :key="'fu-'+c.t+'-'+u.ace+'-'+u.slot">
-                        ACE {{ dispIdx(u.ace) }} / {{ dispIdx(u.slot) }}
+                        MMU {{ dispIdx(u.ace) }} / {{ dispIdx(u.slot) }}
                         - {{ t('ui.preflight.slot_not_set') }}
                       </option>
                     </select>
@@ -3210,7 +3640,7 @@ reboot</pre>
             <div class="preflight-swatch"
                  :style="{background: chipBg(s.color)}"></div>
             <div class="preflight-meta">
-              <div><strong>ACE {{ dispIdx(s.ace) }} · Slot {{ dispIdx(s.slot) }}</strong></div>
+              <div><strong>MMU {{ dispIdx(s.ace) }} · Slot {{ dispIdx(s.slot) }}</strong></div>
               <div class="muted small">{{ s.material || '?' }}</div>
               <div class="small">{{ s.name }}</div>
               <div class="muted small">{{ s.color || '?' }}<br>RGB({{ rgbDec(s.color) }})</div>
@@ -3252,9 +3682,45 @@ reboot</pre>
             <span v-if="pfPlanFeasible(p)" class="nt-pc-nums">
               <span><b>{{ pfPlanSwaps(p) }}</b><small>{{ t('ui.preflight.swaps_label') }}</small></span>
               <span v-if="pfPlanFlush(p) !== null"><b>{{ pfPlanFlush(p) }}<i>g</i></b><small>{{ t('ui.preflight.nt_contamination') }}</small></span>
+              <span v-if="pfPlanBg(p)"><b>{{ pfPlanBg(p).bg_ok }}<i>/{{ pfPlanBg(p).unloads }}</i></b><small>{{ t('ui.preflight.nt_bg_swaps') }}</small></span>
             </span>
             <span v-else class="nt-pc-off">{{ t('ui.preflight.not_feasible') }}</span>
           </button>
+        </div>
+        <!-- The plan head carrying the full bg line is hidden in the new
+             design; repeat it for the selected plan under the cards. -->
+        <p v-if="uiTheme === 'new' && pfSelected() && pfPlanFeasible(pfSelected()) && pfPlanBg(pfSelected())"
+           class="muted small nt-pf-bg">{{ headPlanBgLabel(pfSelected()) }}</p>
+        <div v-if="uiTheme === 'new' && pfSelected() && pfPlanFeasible(pfSelected()) && pfEst(pfSelected())"
+             class="pf-est" :class="{stale: pfEstStale}">
+          <div class="pf-est-head">
+            <b>{{ t('ui.preflight.est_title') }}</b>
+            <span class="pf-est-tag">{{ t('ui.preflight.est_badge') }}</span>
+            <span v-if="pfEst(pfSelected()).confidence !== 'modelled'" class="pf-est-tag warn">{{ t('ui.preflight.est_conf_' + pfEst(pfSelected()).confidence) }}</span>
+            <span v-if="pfEstStale" class="muted small">{{ t('ui.preflight.est_updating') }}</span>
+          </div>
+          <div class="pf-est-nums">
+            <span v-if="pfEst(pfSelected()).base_s !== null"><small>{{ t('ui.preflight.est_slicer') }}</small><b>{{ fmtDuration(pfEst(pfSelected()).base_s) }}</b></span>
+            <span v-if="pfEst(pfSelected()).total_s !== null"><small>{{ t('ui.preflight.est_total') }}</small><b>{{ fmtDuration(pfEst(pfSelected()).total_s) }}</b><i>{{ pfEstDelta(pfEst(pfSelected())) }}</i></span>
+            <span v-else><small>{{ t('ui.preflight.est_added') }}</small><b>{{ pfEstDelta(pfEst(pfSelected())) }}</b></span>
+            <span><small>{{ t('ui.preflight.est_filament') }}</small><b>{{ pfEst(pfSelected()).totals.g }}<u>g</u></b><i>{{ pfEst(pfSelected()).totals.m }} m</i></span>
+            <span><small>{{ t('ui.preflight.est_purge') }}</small><b>{{ pfEst(pfSelected()).purge.g }}<u>g</u></b><i>{{ pfEst(pfSelected()).purge.mm }} mm</i></span>
+          </div>
+          <p v-if="pfEstCounts(pfEst(pfSelected()))" class="muted small pf-est-counts">{{ pfEstCounts(pfEst(pfSelected())) }}<template v-if="pfEst(pfSelected()).unknown_window_swaps"> · {{ pfEst(pfSelected()).unknown_window_swaps }} {{ t('ui.preflight.est_no_window') }}</template></p>
+          <div v-if="pfTimelineSegs(pfSelected()).length" class="pf-est-tl" :aria-label="t('ui.preflight.est_timeline')">
+            <span v-for="sg in pfTimelineSegs(pfSelected())" :key="sg.key" class="pf-tl-seg" :class="'k-' + sg.kind"
+                  :style="{flexBasis: sg.pct + '%'}" :title="sg.tip"></span>
+          </div>
+          <table v-if="pfEst(pfSelected()).per_color && pfEst(pfSelected()).per_color.length" class="pf-est-tbl">
+            <thead><tr><th>{{ t('ui.preflight.est_colour') }}</th><th>{{ t('ui.preflight.est_print') }}</th><th>{{ t('ui.preflight.est_purge') }}</th><th>{{ t('ui.preflight.est_sum') }}</th></tr></thead>
+            <tbody><tr v-for="c in pfEst(pfSelected()).per_color" :key="'ec-' + c.t">
+              <td>T{{ dispIdx(c.t) }}</td><td>{{ c.print_g }} g</td><td>{{ c.purge_g }} g</td><td>{{ (c.print_g + c.purge_g).toFixed(1) }} g</td>
+            </tr></tbody>
+          </table>
+          <details v-if="pfEst(pfSelected()).assumptions && pfEst(pfSelected()).assumptions.length" class="pf-est-ass">
+            <summary>{{ t('ui.preflight.est_assumptions') }}</summary>
+            <ul><li v-for="(a, i) in pfEst(pfSelected()).assumptions" :key="'as-' + i">{{ a }}</li></ul>
+          </details>
         </div>
         <template v-for="mode in ['slicer', 'optimize', 'layer']"
                   :key="'plan-' + mode">
@@ -3266,6 +3732,7 @@ reboot</pre>
                     class="muted small">
                 {{ mode === 'slicer' ? slicerSwapsDisplay() : preflight.report.plans[mode].swaps }}
                 {{ t('ui.preflight.swaps_label') }}
+                <span v-if="uiTheme === 'classic' && pfEst(mode) && pfEst(mode).total_s !== null">· ≈ {{ fmtDuration(pfEst(mode).total_s) }} ({{ pfEstDelta(pfEst(mode)) }}, {{ t('ui.preflight.est_badge') }})</span>
               </span>
               <span v-else class="preflight-infeasible">
                 {{ t('ui.preflight.not_feasible') }}
@@ -3297,18 +3764,18 @@ reboot</pre>
                                 :key="'opt-'+m.t+'-'+slotKey(opt)"
                                 :value="slotKey(opt)"
                                 :style="{background: chipBg(opt.color), color: textOn(opt.color)}">
-                          ACE {{ dispIdx(opt.ace) }} Slot {{ dispIdx(opt.slot) }} · {{ opt.material || '?' }}
+                          MMU {{ dispIdx(opt.ace) }} Slot {{ dispIdx(opt.slot) }} · {{ opt.material || '?' }}
                         </option>
                         <option v-for="u in unsetSlotsForT(m.t)" disabled
                                 :key="'optu-'+m.t+'-'+u.ace+'-'+u.slot">
-                          ACE {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }} · {{ t('ui.preflight.slot_not_set') }}
+                          MMU {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }} · {{ t('ui.preflight.slot_not_set') }}
                         </option>
                       </select>
                     </template>
                     <template v-else>
                       <span class="preflight-dot"
                             :style="{background: chipBg(m.slot.color)}"></span>
-                      ACE {{ dispIdx(m.slot.ace) }} Slot {{ dispIdx(m.slot.slot) }}
+                      MMU {{ dispIdx(m.slot.ace) }} Slot {{ dispIdx(m.slot.slot) }}
                       <span class="muted small">· {{ m.slot.material || '?' }}</span>
                     </template>
                   </td>
@@ -3352,7 +3819,7 @@ reboot</pre>
           </h4>
           <h4 v-else>
             {{ t('ui.preflight.head_mode_title') }}
-            <span class="muted small">- {{ t('ui.preflight.feeder') }} + ACE {{ t('ui.preflight.head') }} {{ (preflight.report.ace_heads && preflight.report.ace_heads.length ? preflight.report.ace_heads : [preflight.report.ace_head]).map(h => 'T' + dispIdx(h)).join(', ') }}</span>
+            <span class="muted small">- {{ t('ui.preflight.feeder') }} + MMU {{ t('ui.preflight.head') }} {{ (preflight.report.ace_heads && preflight.report.ace_heads.length ? preflight.report.ace_heads : [preflight.report.ace_head]).map(h => 'T' + dispIdx(h)).join(', ') }}</span>
           </h4>
 
           <div class="nt-pf-top"><div class="nt-pf-col">
@@ -3418,9 +3885,45 @@ reboot</pre>
             <span v-if="pfPlanFeasible(p)" class="nt-pc-nums">
               <span><b>{{ pfPlanSwaps(p) }}</b><small>{{ t('ui.preflight.swaps_label') }}</small></span>
               <span v-if="pfPlanFlush(p) !== null"><b>{{ pfPlanFlush(p) }}<i>g</i></b><small>{{ t('ui.preflight.nt_contamination') }}</small></span>
+              <span v-if="pfPlanBg(p)"><b>{{ pfPlanBg(p).bg_ok }}<i>/{{ pfPlanBg(p).unloads }}</i></b><small>{{ t('ui.preflight.nt_bg_swaps') }}</small></span>
             </span>
             <span v-else class="nt-pc-off">{{ t('ui.preflight.not_feasible') }}</span>
           </button>
+        </div>
+        <!-- The plan head carrying the full bg line is hidden in the new
+             design; repeat it for the selected plan under the cards. -->
+        <p v-if="uiTheme === 'new' && pfSelected() && pfPlanFeasible(pfSelected()) && pfPlanBg(pfSelected())"
+           class="muted small nt-pf-bg">{{ headPlanBgLabel(pfSelected()) }}</p>
+        <div v-if="uiTheme === 'new' && pfSelected() && pfPlanFeasible(pfSelected()) && pfEst(pfSelected())"
+             class="pf-est" :class="{stale: pfEstStale}">
+          <div class="pf-est-head">
+            <b>{{ t('ui.preflight.est_title') }}</b>
+            <span class="pf-est-tag">{{ t('ui.preflight.est_badge') }}</span>
+            <span v-if="pfEst(pfSelected()).confidence !== 'modelled'" class="pf-est-tag warn">{{ t('ui.preflight.est_conf_' + pfEst(pfSelected()).confidence) }}</span>
+            <span v-if="pfEstStale" class="muted small">{{ t('ui.preflight.est_updating') }}</span>
+          </div>
+          <div class="pf-est-nums">
+            <span v-if="pfEst(pfSelected()).base_s !== null"><small>{{ t('ui.preflight.est_slicer') }}</small><b>{{ fmtDuration(pfEst(pfSelected()).base_s) }}</b></span>
+            <span v-if="pfEst(pfSelected()).total_s !== null"><small>{{ t('ui.preflight.est_total') }}</small><b>{{ fmtDuration(pfEst(pfSelected()).total_s) }}</b><i>{{ pfEstDelta(pfEst(pfSelected())) }}</i></span>
+            <span v-else><small>{{ t('ui.preflight.est_added') }}</small><b>{{ pfEstDelta(pfEst(pfSelected())) }}</b></span>
+            <span><small>{{ t('ui.preflight.est_filament') }}</small><b>{{ pfEst(pfSelected()).totals.g }}<u>g</u></b><i>{{ pfEst(pfSelected()).totals.m }} m</i></span>
+            <span><small>{{ t('ui.preflight.est_purge') }}</small><b>{{ pfEst(pfSelected()).purge.g }}<u>g</u></b><i>{{ pfEst(pfSelected()).purge.mm }} mm</i></span>
+          </div>
+          <p v-if="pfEstCounts(pfEst(pfSelected()))" class="muted small pf-est-counts">{{ pfEstCounts(pfEst(pfSelected())) }}<template v-if="pfEst(pfSelected()).unknown_window_swaps"> · {{ pfEst(pfSelected()).unknown_window_swaps }} {{ t('ui.preflight.est_no_window') }}</template></p>
+          <div v-if="pfTimelineSegs(pfSelected()).length" class="pf-est-tl" :aria-label="t('ui.preflight.est_timeline')">
+            <span v-for="sg in pfTimelineSegs(pfSelected())" :key="sg.key" class="pf-tl-seg" :class="'k-' + sg.kind"
+                  :style="{flexBasis: sg.pct + '%'}" :title="sg.tip"></span>
+          </div>
+          <table v-if="pfEst(pfSelected()).per_color && pfEst(pfSelected()).per_color.length" class="pf-est-tbl">
+            <thead><tr><th>{{ t('ui.preflight.est_colour') }}</th><th>{{ t('ui.preflight.est_print') }}</th><th>{{ t('ui.preflight.est_purge') }}</th><th>{{ t('ui.preflight.est_sum') }}</th></tr></thead>
+            <tbody><tr v-for="c in pfEst(pfSelected()).per_color" :key="'ec-' + c.t">
+              <td>T{{ dispIdx(c.t) }}</td><td>{{ c.print_g }} g</td><td>{{ c.purge_g }} g</td><td>{{ (c.print_g + c.purge_g).toFixed(1) }} g</td>
+            </tr></tbody>
+          </table>
+          <details v-if="pfEst(pfSelected()).assumptions && pfEst(pfSelected()).assumptions.length" class="pf-est-ass">
+            <summary>{{ t('ui.preflight.est_assumptions') }}</summary>
+            <ul><li v-for="(a, i) in pfEst(pfSelected()).assumptions" :key="'as-' + i">{{ a }}</li></ul>
+          </details>
         </div>
           <template v-for="hp in ['loadout', 'optimize', 'layer', 'color']"
                     :key="'hplan-'+hp">
@@ -3432,6 +3935,7 @@ reboot</pre>
                   {{ headPlanSwaps(hp) }}<template v-if="hp === 'loadout' && headCopyPlan().suggestions.length"> → {{ headCopyPlan().swaps_after }}</template> {{ t('ui.preflight.swaps_label') }}
                   <span v-if="headPlanBg(hp)">· {{ headPlanBgLabel(hp) }}</span>
                   <span v-if="headPlanFlushG(hp) !== null">· {{ headPlanFlushG(hp) }} {{ t('ui.preflight.flush_g_label') }}</span>
+                  <span v-if="uiTheme === 'classic' && pfEst(hp) && pfEst(hp).total_s !== null">· ≈ {{ fmtDuration(pfEst(hp).total_s) }} ({{ pfEstDelta(pfEst(hp)) }}, {{ t('ui.preflight.est_badge') }})</span>
                 </span>
                 <span v-else class="preflight-infeasible">
                   {{ t('ui.preflight.not_feasible') }}
@@ -3489,7 +3993,7 @@ reboot</pre>
                                v-for="u in unsetSlotsForT(c.t)"
                                :key="'hmu-'+c.t+'-'+u.ace+'-'+u.slot">
                             <span class="hm-dd-chip" style="background:var(--nt-nocolor, #444)"></span>
-                            <span>ACE {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }}
+                            <span>MMU {{ dispIdx(u.ace) }} Slot {{ dispIdx(u.slot) }}
                               &middot; {{ t('ui.preflight.slot_not_set') }}</span>
                           </div>
                         </div>

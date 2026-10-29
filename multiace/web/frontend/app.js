@@ -8,10 +8,11 @@ const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://")
 const SCREEN = "/screen";
 createApp({
   setup() {
-    // Bowden-path calibration tab (physicsG port): hidden for now, also on
-    // dev (Dirk 2026-09-25). The code stays; flip to true to show it.
-    const CALIBRATION_TAB = false;
-    const _validTabs = new Set(["dashboard", "control", "history", "spools", "config"]);
+    // Bowden-path calibration tab (physicsG, #168).
+    const CALIBRATION_TAB = true;
+    // Orca profile section in Config (profile download + tool map).
+    const ORCA_SECTION = true;
+    const _validTabs = new Set(["dashboard", "control", "history", "spools", "config", "devices"]);
     if (CALIBRATION_TAB) _validTabs.add("calibration");
     const _storedTab = localStorage.getItem("multiace.tab");
     const _isPluginTab = (s) => typeof s === "string" && s.startsWith("plugin:");
@@ -65,12 +66,13 @@ createApp({
       items.push({key: "history", group: "printhub",
                   label: t("ui.tabs.history")});
       items.push({key: "spools", label: t("ui.tabs.spools")});
-      items.push({key: "config", label: t("ui.tabs.config")});
-      // Calibration hangs off Config: shown only while one of the two is
-      // open, so it cannot vanish under the user once selected.
-      if (CALIBRATION_TAB && state.mode !== "normal"
-          && (tab.value === "config" || tab.value === "calibration")) {
-        items.push({key: "calibration", label: t("ui.tabs.calibration")});
+      // Config children: Settings (the tab key stays "config"), Devices
+      // (unit places, names, firmware flash) and Calibration (bowden path).
+      items.push({key: "config", group: "config", label: t("ui.tabs.settings")});
+      items.push({key: "devices", group: "config", label: t("ui.tabs.devices")});
+      if (CALIBRATION_TAB && state.mode !== "normal") {
+        items.push({key: "calibration", group: "config",
+                    label: t("ui.tabs.calibration")});
       }
       for (const p of plugins.items) {
         items.push({key: "plugin:" + p.name, label: p.label});
@@ -84,6 +86,7 @@ createApp({
     // is the only thing that makes its group appear.
     const NAV_GROUPS = [
       {key: "printhub", labelKey: "ui.tabs.print_hub", before: "spools"},
+      {key: "config", labelKey: "ui.tabs.config", after: "spools"},
     ];
     const groupLast = reactive({});
     for (const g of NAV_GROUPS) {
@@ -114,6 +117,7 @@ createApp({
         if (it.group) continue;
         for (const g of NAV_GROUPS) if (g.before === it.key) addGroup(g);
         out.push(it);
+        for (const g of NAV_GROUPS) if (g.after === it.key) addGroup(g);
       }
       return out;
     });
@@ -257,6 +261,7 @@ createApp({
       pickup_cleaning: false,
       preflight_max_copies: 1,
       preflight_copies_strict: false,
+      tool_map: {},
       confirm_commands: false,
       spoolman_url: "",
       spoolman_auto: false,
@@ -270,6 +275,8 @@ createApp({
       // Default TRUE, like the engine, for the pre-first-state instant.
       pa_sync: true,
       rc522: false,
+      devices: [], units_restart_needed: false, driver_switches: [],
+      locate_busy: false,
       tag_write_format: "openspool",
       tag_write_uid_sku: true,
       tag_op: {busy: false, kind: "", seq: 0, result: null},
@@ -360,7 +367,7 @@ createApp({
       const el = document.createElement("div");
       el.id = "ma-splash";
       el.setAttribute("aria-hidden", "true");
-      el.innerHTML = '<div class="ma-logo">m<span>U</span>lt<span>1</span>ACE</div>'
+      el.innerHTML = '<div class="ma-logo">m<span>U</span>lt<span>1</span>ACE<span>+</span></div>'
         + '<div class="ma-spin"></div>';
       document.body.appendChild(el);
     }
@@ -418,9 +425,11 @@ createApp({
         // A restart is in progress -> the pending config/mode change is being
         // applied; drop the persistent "restart needed" banner.
         rebootNeeded.value = false;
+        restartNoteDown();
         return;
       }
       if (loadError.value === t('ui.common.please_restart')) loadError.value = "";
+      restartNoteBack();
       state.ace_status    = s.ace_status ?? null;
       state.ace_temp      = s.ace_temp ?? null;
       state.printer_state = s.printer_state ?? null;
@@ -430,6 +439,7 @@ createApp({
       state.pickup_cleaning = !!s.pickup_cleaning;
       state.preflight_max_copies = Math.max(1, Math.min(4, Number(s.preflight_max_copies || 1)));
       state.preflight_copies_strict = !!s.preflight_copies_strict;
+      state.tool_map = (s.tool_map && typeof s.tool_map === "object") ? s.tool_map : {};
       state.confirm_commands = !!s.confirm_commands;
       state.spoolman_url = s.spoolman_url || "";
       state.spoolman_auto = !!s.spoolman_auto;
@@ -463,6 +473,11 @@ createApp({
       // Feeder-reader card per non-ACE head; the head picker's Read button
       // judges its result by this field.
       state.head_tag_seen = s.head_tag_seen || {};
+      state.devices = Array.isArray(s.devices) ? s.devices : [];
+      devNameSettle(state.devices);
+      state.units_restart_needed = !!s.units_restart_needed;
+      state.driver_switches = Array.isArray(s.driver_switches) ? s.driver_switches : [];
+      state.locate_busy = !!s.locate_busy;
       state.auto_dry_masters = Array.isArray(s.auto_dry_masters)
         ? s.auto_dry_masters : [];
       // What Klipper RUNS (the cfg side comes from /api/tipform). Missing
@@ -698,18 +713,42 @@ createApp({
 
     const calibrationUi = reactive({
       ace: 0, slot: 0, head: 0, scope: 'ace',
-      loadAllowance: 20, swapAllowance: 20,
-      baselinePrepared: false, routeConfirmed: false,
+      // ACE transport varies run to run, so the saved values carry a
+      // generous margin: the load is stopped by the toolhead sensor
+      // anyway, and a swap retract that runs long only costs seconds
+      // while one that stops short leaves filament in the hub.
+      loadAllowance: 150, swapAllowance: 100,   // load: 200 without encoder (below)
       panel: 'setup', panelTouched: false, recalibrate: false,
       busy: '', cancelRequested: false, error: '', saved: false,
+      hubAdjust: false,
     });
     const calibrationSelectionTouched = reactive({
       ace: false, slot: false, head: false,
     });
+    const CAL_MEASURING = ['prepared', 'feeding', 'feed_paused', 'at_sensor',
+      'retract_ready', 'retracting', 'feed_jogging', 'swap_marked',
+      'returning', 'return_paused'];
+    const CAL_VERIFYING = ['verifying_feed', 'verify_toolhead',
+      'verify_toolhead_adjust', 'verify_toolhead_adjusting',
+      'verifying_splitter', 'verify_splitter', 'verify_splitter_adjusting',
+      'verifying_return', 'verify_paused'];
+    const CAL_MOVING = ['feeding', 'retracting', 'returning', 'feed_jogging',
+      'homing', 'verifying_feed', 'verifying_splitter', 'verifying_return',
+      'verify_toolhead_adjusting', 'verify_splitter_adjusting'];
+    const CAL_PARKED = ['idle', 'complete', 'verified'];
+    // Stopped mid-way with the position kept: can be carried on.
+    const CAL_PAUSED = ['feed_paused', 'return_paused', 'verify_paused'];
     const connectedCalibrationAces = computed(() =>
       state.aces.filter(a => a && a.connected));
     const calibrationSelectedAce = computed(() =>
       state.aces.find(a => Number(a.idx) === Number(calibrationUi.ace)) || null);
+    // Load margin default per unit: without an encoder the feed slips
+    // while it pushes into the head (ACE Pro: ~4% of the route, +100 mm on
+    // 2.3 m), so the budget gets more room there. Set only when the kind of
+    // the selected unit changes, so a typed value stays.
+    watch(() => aceHasDecoder(calibrationSelectedAce.value), (hasEncoder) => {
+      calibrationUi.loadAllowance = hasEncoder ? 150 : 200;
+    }, {immediate: true});
     const calibrationSelectedToolhead = computed(() =>
       state.toolheads.find(
         h => Number(h.idx) === Number(calibrationUi.head)) || null);
@@ -719,84 +758,103 @@ createApp({
     const calibrationVerifyMoving = computed(() =>
       ['verifying_feed', 'verifying_splitter', 'verifying_return']
         .includes(state.calibration?.state));
+    const calibrationVerifyActive = computed(() =>
+      CAL_VERIFYING.includes(state.calibration?.state));
     const calibrationMoving = computed(() =>
-      ['feeding', 'retracting', 'returning', 'feed_jogging']
-        .includes(state.calibration?.state)
-        || calibrationVerifyMoving.value
-        || state.calibration?.state === 'verify_toolhead_adjusting');
-    const calibrationRouteLocked = computed(() => {
+      CAL_MOVING.includes(state.calibration?.state));
+    // Calibration filament is (believed to be) somewhere in the tube.
+    const calibrationRouteOccupied = computed(() => {
       const c = state.calibration || {};
       const position = Number(c.tip_position_mm);
-      const tipAwayFromPark = Number.isFinite(position) && position > 0;
-      const nonParkedState = [
-        'feeding', 'at_sensor', 'retract_ready', 'retracting',
-        'swap_marked', 'returning', 'feed_jogging', 'verifying_feed',
-        'verify_toolhead', 'verify_toolhead_adjust',
-        'verify_toolhead_adjusting', 'verifying_splitter', 'verify_splitter',
-        'verifying_return', 'verify_paused', 'cancelled', 'failed',
-      ].includes(c.state);
+      return !CAL_PARKED.includes(c.state || 'idle')
+        && Number.isFinite(position) && position > 0;
+    });
+    const calibrationRouteLocked = computed(() => {
+      const c = state.calibration || {};
       return c.ace != null && c.slot != null && c.head != null
-        && (tipAwayFromPark || nonParkedState);
+        && (calibrationRouteOccupied.value
+          || !CAL_PARKED.includes(c.state || 'idle'));
     });
     const calibrationSelectedHeadSensorKnown = computed(() =>
       typeof calibrationSelectedToolhead.value?.filament_at_extruder === 'boolean');
     const calibrationSelectedHeadClear = computed(() =>
       calibrationSelectedToolhead.value?.filament_at_extruder === false);
+    const calibrationPrinterFree = computed(() =>
+      state.mode !== 'normal'
+        && !['printing', 'paused'].includes(state.printer_state)
+        && !state.swap_in_progress
+        && !(state.bg_swap?.busy || []).length);
     const calibrationCanPrepare = computed(() => {
       const ace = calibrationSelectedAce.value;
       const toolhead = calibrationSelectedToolhead.value;
       return !!ace && ace.connected
         && !!toolhead && !toolhead.manual && !toolhead.feeder
         && calibrationSelectedHeadSensorKnown.value
-        && state.mode !== 'normal'
-        && !['printing', 'paused'].includes(state.printer_state)
-        && !state.swap_in_progress
-        && !(state.bg_swap?.busy || []).length
+        && calibrationPrinterFree.value
         && !calibrationMoving.value;
     });
-    const calibrationCanStart = computed(() => {
-      const ace = calibrationSelectedAce.value;
-      const toolhead = calibrationSelectedToolhead.value;
-      const slot = ace?.slots?.find(
-        s => Number(s.idx) === Number(calibrationUi.slot));
-      return !!ace && ace.connected
-        && calibrationUi.baselinePrepared
-        && calibrationUi.routeConfirmed
-        && calibrationSelectedHeadClear.value
-        && state.mode !== 'normal'
-        && !['printing', 'paused'].includes(state.printer_state)
-        && !state.swap_in_progress
-        && !(state.bg_swap?.busy || []).length
-        && !!slot && slot.state === 'ready'
-        && toolhead?.filament_at_extruder === false
-        && !toolhead?.manual && !toolhead?.feeder
-        && !calibrationMoving.value;
+    // Why a new measurement cannot start right now ('' = it can).
+    const calibrationStartBlockedReason = computed(() => {
+      if (calibrationRouteOccupied.value) return t('ui.calibration.blk_occupied');
+      if (!calibrationSelectedAce.value?.connected) return t('ui.calibration.blk_ace_off');
+      if (calibrationSelectedSlot.value?.state !== 'ready') {
+        return t('ui.calibration.blk_slot_ready');
+      }
+      if (!calibrationSelectedHeadSensorKnown.value) {
+        return t('ui.calibration.blk_sensor_na');
+      }
+      if (calibrationSelectedToolhead.value?.manual
+          || calibrationSelectedToolhead.value?.feeder) {
+        return t('ui.calibration.blk_not_ace_head');
+      }
+      if (!calibrationSelectedHeadClear.value) return t('ui.calibration.blk_head_loaded');
+      if (state.mode === 'normal') return t('ui.calibration.blk_normal_mode');
+      if (['printing', 'paused'].includes(state.printer_state)) {
+        return t('ui.calibration.blk_printing');
+      }
+      if (state.swap_in_progress || (state.bg_swap?.busy || []).length) {
+        return t('ui.calibration.blk_busy');
+      }
+      if (![...CAL_PARKED, 'cancelled', 'failed']
+          .includes(state.calibration?.state || 'idle')) {
+        return t('ui.calibration.blk_session');
+      }
+      return '';
     });
-    const calibrationCanVerifyConfigured = computed(() => {
-      const ace = calibrationSelectedAce.value;
-      const toolhead = calibrationSelectedToolhead.value;
-      const slot = calibrationSelectedSlot.value;
-      return ['idle', 'cancelled', 'failed', 'complete', 'verified']
-        .includes(state.calibration?.state)
-        && calibrationRouteKnown.value
-        && !!ace && ace.connected
-        && !!slot && slot.state === 'ready'
-        && calibrationSelectedHeadClear.value
-        && !!toolhead && !toolhead.manual && !toolhead.feeder
-        && state.mode !== 'normal'
-        && !['printing', 'paused'].includes(state.printer_state)
-        && !state.swap_in_progress
-        && !(state.bg_swap?.busy || []).length
-        && !calibrationMoving.value;
+    const calibrationCanStart = computed(() =>
+      !calibrationStartBlockedReason.value && !calibrationMoving.value);
+    const calibrationVerifyBlockedReason = computed(() => {
+      if (!calibrationRouteKnown.value) return t('ui.calibration.blk_no_values');
+      // Klipper still runs the values from before the save.
+      return calibrationStartBlockedReason.value;
     });
+    const calibrationCanVerifyConfigured = computed(() =>
+      !calibrationVerifyBlockedReason.value && !calibrationMoving.value);
     const calibrationProposed = computed(() => {
       const c = state.calibration || {};
+      const allowance = (v) => Math.max(0, Number(v) || 0);
+      const retract = c.retract_length_mm == null ? null : Number(c.retract_length_mm);
+      // A session primed from saved values already carries its margin;
+      // adding it again would grow the value on every verify + save.
+      const swapFromConfig = c.values_source === 'saved';
+      let swap = null, capped = false;
+      if (c.swap_retract_length_mm != null) {
+        const base = Number(c.swap_retract_length_mm);
+        // plus whatever was pulled back further at the hub stop in verify
+        swap = (swapFromConfig
+          ? base : base + allowance(calibrationUi.swapAllowance))
+          + Math.max(0, Number(c.verify_hub_extra_mm) || 0);
+        // The hub clearance must stay short of the full retract.
+        if (retract != null) {
+          const cap = Math.max(base, retract - 10);
+          capped = swap > cap;
+          swap = Math.min(swap, cap);
+        }
+      }
       return {
         load: c.load_length_mm == null ? null
-          : Number(c.load_length_mm) + Math.max(0, Number(calibrationUi.loadAllowance) || 0),
-        swap: c.swap_retract_length_mm == null ? null
-          : Number(c.swap_retract_length_mm) + Math.max(0, Number(calibrationUi.swapAllowance) || 0),
-        retract: c.retract_length_mm == null ? null : Number(c.retract_length_mm),
+          : Number(c.load_length_mm) + allowance(calibrationUi.loadAllowance),
+        swap, retract, capped, swapFromConfig,
       };
     });
     const calibrationConfiguredRoute = computed(() => {
@@ -821,8 +879,7 @@ createApp({
       const c = state.calibration || {};
       return Number(c.ace) === Number(calibrationUi.ace)
         && Number(c.slot) === Number(calibrationUi.slot)
-        && Number(c.head) === Number(calibrationUi.head)
-        && String(c.scope || 'ace') === String(calibrationUi.scope || 'ace');
+        && Number(c.head) === Number(calibrationUi.head);
     });
     const calibrationRouteAnchors = computed(() => {
       const c = state.calibration || {};
@@ -831,30 +888,48 @@ createApp({
       const measuredSwap = !calibrationSessionMatchesSelection.value
         || c.swap_retract_length_mm == null
         ? null : Number(c.swap_retract_length_mm);
+      // Saved values only stand in when this route really is calibrated
+      // (per slot or per MMU). The global [ace] defaults would otherwise
+      // draw a hub position nobody measured.
+      const cfg = calibrationRouteCalibrated.value
+        ? calibrationConfiguredRoute.value : {};
       const load = Number.isFinite(measuredLoad) && measuredLoad > 0
-        ? measuredLoad : calibrationConfiguredRoute.value.load;
+        ? measuredLoad : (cfg.load ?? null);
       const swap = Number.isFinite(measuredSwap) && measuredSwap > 0
-        ? measuredSwap : calibrationConfiguredRoute.value.swap;
+        ? measuredSwap : (cfg.swap ?? null);
       return {load, swap, source: measuredLoad > 0 && measuredSwap > 0
         ? 'measured' : 'configured'};
     });
+    const _calSavedAt = (cfg, key) => cfg && cfg[key] !== '' && cfg[key] != null
+      && Number.isFinite(Number(cfg[key])) && Number(cfg[key]) > 0;
     // A route counts as CALIBRATED only when a value was actually SAVED at
     // the per-ACE or per-slot level - NOT the shipped global [ace] default
     // (retract_length/swap_retract_length), which is always present and
-    // otherwise makes every fresh install read as "Route known" and pushes
-    // the user to verify instead of a first calibration.
-    // Scope-independent for the question "is this route calibrated": a
-    // per-slot value OR the per-ACE value that the slot inherits both count.
+    // otherwise makes every fresh install read as calibrated.
     const calibrationRouteCalibrated = computed(() => {
-      const ace = Number(calibrationUi.ace);
-      const slot = Number(calibrationUi.slot);
-      const aceCfg = configForm.perAce?.[ace] || {};
-      const slotCfg = aceCfg.perSlot?.[slot] || {};
-      const saved = (key) => [slotCfg[key], aceCfg[key]].some(
-        v => v !== '' && v != null && Number.isFinite(Number(v))
-          && Number(v) > 0);
+      const aceCfg = configForm.perAce?.[Number(calibrationUi.ace)] || {};
+      const slotCfg = aceCfg.perSlot?.[Number(calibrationUi.slot)] || {};
+      const saved = (key) => _calSavedAt(slotCfg, key) || _calSavedAt(aceCfg, key);
       return saved('retract_length') && saved('swap_retract_length');
     });
+    // Slots of the selected ACE that carry their own values.
+    const calibrationOwnValueSlots = computed(() => {
+      const aceCfg = configForm.perAce?.[Number(calibrationUi.ace)] || {};
+      return (aceCfg.perSlot || [])
+        .map((slotCfg, idx) => ({slotCfg, idx}))
+        .filter(({slotCfg}) => ['load_length', 'swap_retract_length', 'retract_length']
+          .some(key => _calSavedAt(slotCfg, key)))
+        .map(({idx}) => idx);
+    });
+    function calibrationSlotBadge(slot) {
+      if (!slot || slot.state !== 'ready') return slot?.state || '';
+      const aceCfg = configForm.perAce?.[Number(calibrationUi.ace)] || {};
+      if (calibrationOwnValueSlots.value.includes(Number(slot.idx))) {
+        return t('ui.calibration.slot_own');
+      }
+      if (_calSavedAt(aceCfg, 'retract_length')) return t('ui.calibration.slot_shared');
+      return t('ui.calibration.slot_none');
+    }
     const calibrationRouteKnown = computed(() => {
       const {load, swap} = calibrationRouteAnchors.value;
       const valid = Number.isFinite(load) && Number.isFinite(swap)
@@ -865,122 +940,191 @@ createApp({
       return calibrationRouteAnchors.value.source === 'measured'
         || calibrationRouteCalibrated.value;
     });
-    const calibrationVerifyBlockedReason = computed(() => {
-      if (!calibrationRouteKnown.value) return t('ui.calibration.blk_no_values');
-      if (!calibrationSelectedAce.value?.connected) return t('ui.calibration.blk_ace_off');
-      if (calibrationSelectedSlot.value?.state !== 'ready') {
-        return t('ui.calibration.blk_slot_ready');
-      }
-      if (!calibrationSelectedHeadSensorKnown.value) {
-        return t('ui.calibration.blk_sensor_na');
-      }
-      if (!calibrationSelectedHeadClear.value) return t('ui.calibration.blk_head_loaded');
-      if (calibrationSelectedToolhead.value?.manual
-          || calibrationSelectedToolhead.value?.feeder) {
-        return t('ui.calibration.blk_not_ace_head');
-      }
-      if (state.mode === 'normal') return t('ui.calibration.blk_normal_mode');
-      if (['printing', 'paused'].includes(state.printer_state)) {
-        return t('ui.calibration.blk_printing');
-      }
-      if (state.swap_in_progress || (state.bg_swap?.busy || []).length) {
-        return t('ui.calibration.blk_busy');
-      }
-      if (!['idle', 'cancelled', 'failed', 'complete', 'verified']
-          .includes(state.calibration?.state)) {
-        return t('ui.calibration.blk_session');
-      }
-      return '';
+    const calibrationMeasureStep = computed(() => {
+      const s = state.calibration?.state;
+      if (['prepared', 'feeding', 'feed_paused'].includes(s)) return 1;
+      if (['at_sensor', 'retract_ready', 'retracting', 'feed_jogging'].includes(s)) return 2;
+      if (['swap_marked', 'returning', 'return_paused'].includes(s)) return 3;
+      return 0;
+    });
+    const calibrationVerifyStep = computed(() => {
+      const c = state.calibration || {};
+      const s = c.state === 'verify_paused' ? c.verify_paused_from : c.state;
+      if (['verifying_feed', 'verify_toolhead', 'verify_toolhead_adjust',
+        'verify_toolhead_adjusting'].includes(s)) return 1;
+      if (['verifying_splitter', 'verify_splitter',
+        'verify_splitter_adjusting'].includes(s)) return 2;
+      if (s === 'verifying_return') return 3;
+      return 0;
     });
     const calibrationTabStatus = computed(() => {
       const c = state.calibration || {};
-      const measuring = ['prepared', 'feeding', 'at_sensor', 'retract_ready',
-        'retracting', 'swap_marked', 'returning'].includes(c.state);
-      const verifying = ['verifying_feed', 'verify_toolhead',
-        'verify_toolhead_adjust', 'verify_toolhead_adjusting',
-        'verifying_splitter', 'verify_splitter', 'verifying_return',
-        'verify_paused'].includes(c.state);
+      const measuring = CAL_MEASURING.includes(c.state);
+      const verifying = CAL_VERIFYING.includes(c.state);
       return {
-        setup: calibrationRouteKnown.value ? t('ui.calibration.st_route_ready') : t('ui.calibration.st_choose_route'),
+        setup: t('ui.calibration.st_route_ready'),
         calibrate: measuring ? t('ui.calibration.st_running')
           : calibrationRouteKnown.value ? t('ui.calibration.st_values') : t('ui.calibration.st_required'),
         verify: verifying ? t('ui.calibration.st_running')
           : c.state === 'verified' ? t('ui.calibration.st_passed')
-            : calibrationRouteKnown.value ? 'Available' : t('ui.calibration.st_needs_values'),
-        results: c.state === 'verified' ? t('ui.calibration.st_passed')
-          : c.state === 'complete' ? t('ui.calibration.st_review') : t('ui.calibration.st_no_result'),
+            : calibrationRouteKnown.value ? t('ui.calibration.st_available') : t('ui.calibration.st_needs_values'),
+        results: calibrationUi.saved ? t('ui.calibration.st_saved')
+          : calibrationResultCase.value === 'passed' ? t('ui.calibration.st_passed')
+            : calibrationResultCase.value ? t('ui.calibration.st_review') : t('ui.calibration.st_no_result'),
       };
     });
-    const calibrationTipPositionMm = computed(() => {
-      if (!calibrationRouteKnown.value) return null;
-      const c = state.calibration || {};
-      const load = calibrationRouteAnchors.value.load;
-      if (c.tip_position_mm != null && Number.isFinite(Number(c.tip_position_mm))) {
-        const fineLimit = Math.max(0, Number(c.verify_fine_limit_mm) || 50);
-        return Math.max(0, Math.min(load + fineLimit, Number(c.tip_position_mm)));
+    // One human-readable status for the route header.
+    const calibrationStatus = computed(() => {
+      const s = state.calibration?.state || 'idle';
+      if (CAL_MOVING.includes(s)) return {text: t('ui.calibration.status_moving'), kind: 'busy'};
+      if (CAL_PAUSED.includes(s)
+          || (['cancelled', 'failed'].includes(s) && calibrationRouteOccupied.value)) {
+        return {text: t('ui.calibration.status_stopped'), kind: 'attention'};
       }
+      if (['at_sensor', 'retract_ready', 'swap_marked', 'verify_toolhead',
+        'verify_toolhead_adjust', 'verify_splitter'].includes(s)) {
+        return {text: t('ui.calibration.status_waiting'), kind: 'attention'};
+      }
+      return calibrationRouteKnown.value
+        ? {text: t('ui.calibration.route_known'), kind: 'ready'}
+        : {text: t('ui.calibration.route_needs'), kind: 'attention'};
+    });
+    // A stopped move is never a dead end: null, or what the user can do.
+    const calibrationRecovery = computed(() => {
+      const c = state.calibration || {};
+      if (CAL_PAUSED.includes(c.state)) return {canResume: true};
+      if (['cancelled', 'failed'].includes(c.state)
+          && calibrationRouteOccupied.value) return {canResume: false};
+      return null;
+    });
+    const calibrationNothingToSave = computed(() => {
+      const c = state.calibration || {};
+      return c.state === 'verified' && c.values_source === 'saved'
+        && !c.verify_remeasured_mm && !c.verify_hub_extra_mm;
+    });
+    // The verify keeps the saved values; this only flags a run whose sensor
+    // came outside the tolerance but inside the margin.
+    const calibrationVerifyOutsideTolerance = computed(() =>
+      !!(state.calibration || {}).verify_outside_tolerance);
+    const calibrationResultCase = computed(() => {
+      const c = state.calibration || {};
+      if (!['complete', 'verified'].includes(c.state)) return '';
+      if (c.state === 'complete') return 'measured';
+      if (calibrationNothingToSave.value) return 'passed';
+      return c.verify_remeasured_mm || c.verify_hub_extra_mm
+        ? 'changed' : 'measured';
+    });
+    const calibrationTipPositionMm = computed(() => {
+      if (!calibrationRouteKnown.value
+          && !CAL_MEASURING.includes(state.calibration?.state)
+          && !calibrationRouteOccupied.value) return null;
+      const c = state.calibration || {};
+      if (c.tip_position_mm != null && Number.isFinite(Number(c.tip_position_mm))) {
+        return Math.max(0, Number(c.tip_position_mm));
+      }
+      const load = calibrationRouteAnchors.value.load;
       if (calibrationSelectedToolhead.value?.filament_at_extruder === true) return load;
       if (['complete', 'verified'].includes(c.state)) return 0;
-      const slot = calibrationSelectedAce.value?.slots?.find(
-        item => Number(item.idx) === Number(calibrationUi.slot));
-      if (slot?.state === 'ready'
+      if (calibrationSelectedSlot.value?.state === 'ready'
           && calibrationSelectedToolhead.value?.filament_at_extruder === false) return 0;
       return null;
     });
-    const calibrationTipSegment = computed(() => {
+    // Where the marker is DRAWN. A position taken from the lane encoder is
+    // drawn as is. A time estimate runs ahead of the filament (the ACE
+    // starts late), so while moving the marker is held back by a margin and
+    // does not show the hub as passed before the filament is there.
+    const CALIBRATION_ESTIMATE_MARGIN_MM = 75;
+    const calibrationTipEstimated = computed(() =>
+      calibrationMoving.value
+        && state.calibration?.position_source !== 'encoder');
+    const calibrationTipDrawnMm = computed(() => {
       const position = calibrationTipPositionMm.value;
-      if (position == null) return 'ace';
+      if (position == null || !calibrationTipEstimated.value) return position;
+      const feeding = ['feeding', 'feed_jogging', 'verifying_feed']
+        .includes(state.calibration?.state);
+      const load = calibrationRouteAnchors.value.load;
+      return feeding
+        ? Math.max(0, position - CALIBRATION_ESTIMATE_MARGIN_MM)
+        : Math.min(Number.isFinite(load) ? load : position,
+                   position + CALIBRATION_ESTIMATE_MARGIN_MM);
+    });
+    // Hub position on the route, in mm from the park position (null while
+    // it is not known yet, e.g. during the first measurement).
+    const calibrationHubMm = computed(() => {
       const {load, swap} = calibrationRouteAnchors.value;
-      const splitter = load - swap;
-      return position <= splitter ? 'ace' : 'toolhead';
+      return Number.isFinite(load) && Number.isFinite(swap) && swap > 0 && swap < load
+        ? load - swap : null;
+    });
+    const calibrationRouteLengthMm = computed(() => {
+      const c = state.calibration || {};
+      const load = calibrationRouteAnchors.value.load;
+      if (Number.isFinite(load) && load > 0) return load;
+      return Number(c.max_feed_mm) > 0 ? Number(c.max_feed_mm) : null;
+    });
+    const calibrationTipSegment = computed(() => {
+      const position = calibrationTipDrawnMm.value;
+      const hub = calibrationHubMm.value;
+      if (position == null) return 'ace';
+      // Hub not measured yet: the two tubes are just the two halves of
+      // the route, so the marker still ends at the toolhead.
+      if (hub == null) {
+        const total = calibrationRouteLengthMm.value;
+        return total > 0 && position / total > 0.5 ? 'toolhead' : 'ace';
+      }
+      return position <= hub ? 'ace' : 'toolhead';
     });
     const calibrationTipSegmentPercent = computed(() => {
-      const position = calibrationTipPositionMm.value;
+      const position = calibrationTipDrawnMm.value;
       if (position == null) return 50;
-      const {load, swap} = calibrationRouteAnchors.value;
-      const splitter = load - swap;
-      const percent = position <= splitter
-        ? (splitter > 0 ? 100 * position / splitter : 0)
-        : (swap > 0 ? 100 * (position - splitter) / swap : 0);
+      const hub = calibrationHubMm.value;
+      const total = calibrationRouteLengthMm.value;
+      let percent = 0;
+      if (hub == null) {
+        const fraction = total > 0 ? position / total : 0;
+        percent = fraction <= 0.5 ? 200 * fraction : 200 * (fraction - 0.5);
+      } else if (position <= hub) {
+        percent = hub > 0 ? 100 * position / hub : 0;
+      } else {
+        percent = total - hub > 0 ? 100 * (position - hub) / (total - hub) : 0;
+      }
       return Math.max(0, Math.min(100, percent));
+    });
+    // Tube columns sized from the real distances, so the marker moves at
+    // one speed along the whole route.
+    const calibrationRouteGrid = computed(() => {
+      const hub = calibrationHubMm.value;
+      const total = calibrationRouteLengthMm.value;
+      if (hub == null || !(total > hub)) return 'auto 1fr auto 1fr auto';
+      return `auto minmax(56px, ${Math.round(hub)}fr) auto `
+        + `minmax(56px, ${Math.round(total - hub)}fr) auto`;
     });
     const calibrationTipLabel = computed(() => {
       const c = state.calibration || {};
       const position = calibrationTipPositionMm.value;
-      if (!calibrationRouteKnown.value) return t('ui.calibration.tip_no_anchors');
-      if (position == null) return t('ui.calibration.tip_pos_na');
-      if (c.state === 'verify_paused') {
-        return t('ui.calibration.tip_paused', {mm: Math.round(position)});
+      if (position == null) {
+        return calibrationRouteKnown.value
+          ? t('ui.calibration.tip_pos_na') : t('ui.calibration.tip_no_anchors');
       }
-      if (c.state === 'verify_toolhead_adjust') {
-        const offset = Number(c.verify_fine_offset_mm) || 0;
-        return t('ui.calibration.tip_adjust', {mm: (offset >= 0 ? '+' : '') + offset});
-      }
-      if (c.state === 'verify_toolhead_adjusting') {
-        return t('ui.calibration.tip_fine', {mm: Math.round(position)});
-      }
-      if (c.state === 'verify_toolhead') return t('ui.calibration.tip_at_head');
-      if (c.state === 'verify_splitter') return t('ui.calibration.tip_at_splitter');
-      if (c.state === 'verified') return t('ui.calibration.tip_verified');
-      if (c.state === 'complete') return t('ui.calibration.tip_parked');
+      const mm = Math.round(position);
+      if (c.state === 'homing') return t('ui.calibration.tip_homing', {mm});
       if (calibrationMoving.value) {
-        return t('ui.calibration.tip_moving', {mm: Math.round(position)});
+        return t(calibrationTipEstimated.value
+          ? 'ui.calibration.tip_moving' : 'ui.calibration.tip_moving_enc', {mm});
       }
-      const source = calibrationRouteAnchors.value.source === 'configured'
-        ? t('ui.calibration.tip_src_config') : t('ui.calibration.tip_src_measured');
-      return t('ui.calibration.tip_estimate', {source: source, mm: Math.round(position)});
+      if (calibrationRecovery.value) return t('ui.calibration.tip_stopped', {mm});
+      if (['at_sensor', 'verify_toolhead'].includes(c.state)) return t('ui.calibration.tip_at_head');
+      if (c.state === 'verify_splitter') return t('ui.calibration.tip_at_splitter');
+      if (mm <= 0) return t('ui.calibration.tip_parked');
+      return t('ui.calibration.tip_at', {mm});
     });
 
     watch(() => state.calibration?.state, (next, previous) => {
-      const verifying = ['verifying_feed', 'verify_toolhead',
-        'verify_toolhead_adjust', 'verify_toolhead_adjusting',
-        'verifying_splitter', 'verify_splitter', 'verifying_return',
-        'verify_paused'];
-      const measuring = ['prepared', 'feeding', 'at_sensor', 'retract_ready',
-        'retracting', 'swap_marked', 'returning'];
-      if (verifying.includes(next)) {
+      if (!['verify_splitter', 'verify_splitter_adjusting'].includes(next)) {
+        calibrationUi.hubAdjust = false;
+      }
+      if (CAL_VERIFYING.includes(next)) {
         calibrationSetPanel('verify', false);
-      } else if (measuring.includes(next)) {
+      } else if (CAL_MEASURING.includes(next)) {
         calibrationSetPanel('calibrate', false);
       } else if (next === 'verified' && previous && previous !== 'verified') {
         calibrationSetPanel('results', false);
@@ -989,10 +1133,6 @@ createApp({
       }
     });
 
-    function calibrationResetPreparation() {
-      calibrationUi.baselinePrepared = false;
-      calibrationUi.routeConfirmed = false;
-    }
     function calibrationSetPanel(panel, touched=true) {
       if (!['setup', 'calibrate', 'verify', 'results'].includes(panel)) return;
       calibrationUi.panel = panel;
@@ -1010,18 +1150,11 @@ createApp({
       calibrationUi.recalibrate = false;
       calibrationUi.error = '';
     }
+    // Where the result is saved - decided on the Results panel, at the
+    // moment of saving, not before anything has been measured.
     function calibrationSetScope(scope) {
-      if (calibrationRouteLocked.value || calibrationUi.busy
-          || !['ace', 'slot'].includes(scope)) return;
+      if (calibrationUi.busy || !['ace', 'slot'].includes(scope)) return;
       calibrationUi.scope = scope;
-      calibrationResetPreparation();
-      calibrationUi.recalibrate = false;
-    }
-    function calibrationRouteChanged() {
-      if (!calibrationRouteLocked.value) {
-        calibrationResetPreparation();
-        calibrationUi.recalibrate = false;
-      }
     }
 
     function syncCalibrationDefaults() {
@@ -1030,7 +1163,6 @@ createApp({
         calibrationUi.ace = Number(c.ace);
         calibrationUi.slot = Number(c.slot);
         calibrationUi.head = Number(c.head);
-        calibrationUi.scope = c.scope === 'slot' ? 'slot' : 'ace';
         return;
       }
       const connected = state.aces.filter(ace => ace?.connected);
@@ -1063,20 +1195,13 @@ createApp({
         calibrationUi.head = Number(mapped);
       }
     }
+    // Unload the selected toolhead so the measurement starts from a clear
+    // sensor. Has its own out-of-band cancel (calibrationCancelPrepare).
     async function calibrationPrepare() {
       calibrationUi.busy = 'prepare';
       calibrationUi.cancelRequested = false;
       calibrationUi.error = '';
-      calibrationResetPreparation();
       try {
-        if (['cancelled', 'failed'].includes(state.calibration?.state)) {
-          const resetOk = await calibrationRequest('action', {
-            action: 'reset',
-            session_id: Number(state.calibration?.session_id || 0),
-          }, 'prepare');
-          calibrationUi.busy = 'prepare';
-          if (!resetOk) return;
-        }
         if (calibrationSelectedHeadClear.value) return;
         const ok = await run('ACE_UNLOAD_HEAD', {
           HEAD: Number(calibrationUi.head),
@@ -1100,33 +1225,6 @@ createApp({
         calibrationUi.cancelRequested = false;
       }
     }
-    async function calibrationConfirmBaseline() {
-      if (!calibrationCanPrepare.value || !calibrationSelectedHeadClear.value
-          || calibrationUi.busy) return;
-      calibrationUi.busy = 'confirm-baseline';
-      calibrationUi.error = '';
-      calibrationResetPreparation();
-      try {
-        if (['cancelled', 'failed'].includes(state.calibration?.state)) {
-          const resetOk = await calibrationRequest('action', {
-            action: 'reset',
-            session_id: Number(state.calibration?.session_id || 0),
-          }, 'confirm-baseline');
-          calibrationUi.busy = 'confirm-baseline';
-          if (!resetOk) return;
-        }
-        await reloadState();
-        if (!calibrationSelectedHeadClear.value) {
-          throw new Error(
-            t('ui.calibration.err_head_not_clear'));
-        }
-        calibrationUi.baselinePrepared = true;
-      } catch (e) {
-        calibrationUi.error = String(e?.message || e);
-      } finally {
-        calibrationUi.busy = '';
-      }
-    }
     async function calibrationCancelPrepare() {
       if (calibrationUi.busy !== 'prepare' || calibrationUi.cancelRequested) return;
       calibrationUi.cancelRequested = true;
@@ -1141,43 +1239,36 @@ createApp({
         calibrationUi.error = String(e?.message || e);
       }
     }
-    function calibrationConfirmRoute() {
-      if (!calibrationUi.baselinePrepared || calibrationMoving.value) return;
-      calibrationUi.routeConfirmed = !calibrationUi.routeConfirmed;
-      calibrationUi.error = '';
-    }
 
+    function _calibrationRouteReset() {
+      calibrationUi.error = '';
+      calibrationUi.saved = false;
+      calibrationUi.recalibrate = false;
+    }
     function calibrationSelectAce(idx) {
       if (calibrationRouteLocked.value || calibrationUi.busy) return;
       calibrationSelectionTouched.ace = true;
       calibrationUi.ace = Number(idx);
-      calibrationResetPreparation();
       if (state.mode === 'head') {
         const h = (state.ace_heads || []).find(
           head => Number(state.head_ace?.[String(head)] ?? state.head_ace?.[head] ?? head)
             === Number(idx));
         if (h != null) calibrationUi.head = Number(h);
       }
-      calibrationUi.error = '';
-      calibrationUi.saved = false;
-      calibrationUi.recalibrate = false;
+      _calibrationRouteReset();
     }
     function calibrationSelectSlot(idx) {
       if (calibrationRouteLocked.value || calibrationUi.busy) return;
       calibrationSelectionTouched.slot = true;
       calibrationUi.slot = Number(idx);
-      calibrationResetPreparation();
       if (state.mode === 'multi') calibrationUi.head = Number(idx);
-      calibrationUi.error = '';
-      calibrationUi.saved = false;
-      calibrationUi.recalibrate = false;
+      _calibrationRouteReset();
     }
-    function calibrationSelectHead() {
+    function calibrationSelectHead(idx) {
       if (calibrationRouteLocked.value || calibrationUi.busy) return;
       calibrationSelectionTouched.head = true;
-      calibrationRouteChanged();
-      calibrationUi.error = '';
-      calibrationUi.saved = false;
+      calibrationUi.head = Number(idx);
+      _calibrationRouteReset();
     }
     async function calibrationRequest(path, body, busy) {
       calibrationUi.busy = busy;
@@ -1205,6 +1296,16 @@ createApp({
         calibrationUi.busy = '';
       }
     }
+    // Poll until the session state satisfies `done` (a stop is booked a
+    // moment after the command returns, once the lane has come to rest).
+    async function _calibrationWaitState(done, timeoutMs=4000) {
+      const until = Date.now() + timeoutMs;
+      while (!done(state.calibration?.state) && Date.now() < until) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        await reloadState();
+      }
+      return done(state.calibration?.state);
+    }
     async function calibrationStart() {
       calibrationUi.saved = false;
       calibrationSetPanel('calibrate', false);
@@ -1212,32 +1313,174 @@ createApp({
         ace: Number(calibrationUi.ace),
         slot: Number(calibrationUi.slot),
         head: Number(calibrationUi.head),
-        scope: calibrationUi.scope,
+        scope: 'ace',
       }, 'start');
       if (ok) await calibrationAction('feed');
     }
+    // What a verification tests: the values Save would write (margins
+    // included) when this route has a result in the session, otherwise the
+    // saved ones from the config form - which is also what makes a just
+    // saved route verifiable before the printer has restarted.
+    const calibrationVerifyValues = computed(() => {
+      const c = state.calibration || {};
+      if (['complete', 'verified'].includes(c.state)
+          && calibrationSessionMatchesSelection.value) {
+        const p = calibrationProposed.value;
+        if (p.load != null && p.swap != null && p.retract != null) {
+          return {load_budget: Math.max(p.load, p.retract), swap: p.swap,
+                  retract: p.retract};
+        }
+      }
+      const cfg = calibrationConfiguredRoute.value;
+      if (!(cfg.load > 0 && cfg.swap > 0)) return null;
+      return {load_budget: Math.max(Number(cfg.feedLimit) || 0, cfg.load),
+              swap: cfg.swap, retract: cfg.load};
+    });
     async function calibrationVerifyConfigured() {
       if (!calibrationCanVerifyConfigured.value) return false;
+      // A verify run can re-measure the toolhead distance, so its result
+      // has to be applicable again.
+      calibrationUi.saved = false;
       calibrationSetPanel('verify', false);
+      // Where the result gets saved is a UI choice made at save time; the
+      // printer must not read a different choice as a different route.
+      const sessionScope = calibrationSessionMatchesSelection.value
+        ? (state.calibration?.scope || 'ace') : 'ace';
       return calibrationRequest('action', {
         action: 'verify_start',
         session_id: Number(state.calibration?.session_id || 0),
         ace: Number(calibrationUi.ace),
         slot: Number(calibrationUi.slot),
         head: Number(calibrationUi.head),
-        scope: calibrationUi.scope,
+        scope: sessionScope,
+        ...(calibrationVerifyValues.value || {}),
       }, 'verify_start');
     }
     async function calibrationAction(action, length=null) {
-      const ok = await calibrationRequest('action', {
+      return calibrationRequest('action', {
         action, length,
         session_id: Number(state.calibration?.session_id || 0),
       }, action);
-      if (ok && ['cancel', 'reset'].includes(action)) {
-        calibrationResetPreparation();
+    }
+    // Hub mark and return in one go - after marking there is nothing else
+    // the user could want to do.
+    async function calibrationMarkAndReturn() {
+      if (await calibrationAction('mark_swap')) {
+        await calibrationAction('return_park');
+      }
+    }
+    async function calibrationUndoMark() {
+      if (state.calibration?.state === 'returning') {
+        if (!await calibrationAction('stop')) return;
+        await _calibrationWaitState(s => s !== 'returning');
+      }
+      await calibrationAction('mark_undo');
+    }
+    // Drag handle on the "clear the hub" step: nothing moves while
+    // dragging; on release ONE bounded move covers the difference (a
+    // pull-back never past the park position, a forward move never past the
+    // toolhead-sensor start). Below 5 mm nothing is sent.
+    const CALIBRATION_MIN_MOVE_MM = 5;
+    // `moving` is the move a release or a step button started: its target,
+    // length and direction, shown until the ACE has stopped.
+    const calibrationDrag = reactive({active: false, targetMm: null, moving: null});
+    const CAL_TRACK_MOVES = ['retracting', 'feed_jogging'];
+    const calibrationTipNowMm = computed(() => {
+      const c = state.calibration || {};
+      // while a move runs the session reports the tip live
+      if (CAL_TRACK_MOVES.includes(c.state) && c.tip_position_mm != null) {
+        return Math.max(0, Number(c.tip_position_mm));
+      }
+      return Math.max(0, Number(c.load_length_mm || 0)
+        - Number(c.commanded_retract_mm || 0));
+    });
+    // The saved hub clearance point as a reference mark, if there is one.
+    // Only a hub clearance really saved for this route is drawn; the global
+    // default says nothing about where this route's hub is.
+    const calibrationTrackHubMm = computed(() => {
+      if (!calibrationRouteCalibrated.value) return null;
+      const load = Number(state.calibration?.load_length_mm || 0);
+      const swap = calibrationConfiguredRoute.value.swap;
+      return load > 0 && swap > 0 && swap < load ? load - swap : null;
+    });
+    function calibrationTrackPercent(mm) {
+      const load = Number(state.calibration?.load_length_mm || 0);
+      return load > 0 ? Math.max(0, Math.min(100, 100 * Number(mm) / load)) : 0;
+    }
+    const calibrationDragLabel = computed(() => {
+      const moving = calibrationDrag.moving;
+      if (moving && calibrationDrag.targetMm == null) {
+        return t('ui.calibration.drag_moving', {
+          mm: moving.mm, dir: t(moving.dir),
+          left: Math.round(Math.abs(moving.target - calibrationTipNowMm.value)),
+        });
+      }
+      if (calibrationDrag.targetMm == null) return '';
+      const diff = calibrationDrag.targetMm - calibrationTipNowMm.value;
+      if (Math.abs(diff) < CALIBRATION_MIN_MOVE_MM) return t('ui.calibration.drag_small');
+      return t('ui.calibration.drag_release', {
+        mm: Math.abs(Math.round(diff)),
+        dir: t(diff < 0 ? 'ui.calibration.dir_ace' : 'ui.calibration.dir_head'),
+      });
+    });
+    function _calibrationTrackMm(evt) {
+      const rect = evt.currentTarget.getBoundingClientRect();
+      const load = Number(state.calibration?.load_length_mm || 0);
+      const fraction = rect.width > 0 ? (evt.clientX - rect.left) / rect.width : 0;
+      return Math.round(Math.max(0, Math.min(1, fraction)) * load);
+    }
+    function _calibrationCanDrag() {
+      return ['at_sensor', 'retract_ready'].includes(state.calibration?.state)
+        && !calibrationMoving.value && !calibrationUi.busy;
+    }
+    function calibrationDragStart(evt) {
+      if (!_calibrationCanDrag()) return;
+      evt.preventDefault();
+      try { evt.currentTarget.setPointerCapture(evt.pointerId); } catch (_) {}
+      calibrationDrag.active = true;
+      calibrationDrag.targetMm = _calibrationTrackMm(evt);
+    }
+    function calibrationDragMove(evt) {
+      if (calibrationDrag.active) calibrationDrag.targetMm = _calibrationTrackMm(evt);
+    }
+    function calibrationDragCancel() {
+      calibrationDrag.active = false;
+      calibrationDrag.targetMm = null;
+    }
+    async function calibrationDragEnd() {
+      if (!calibrationDrag.active) return;
+      const target = calibrationDrag.targetMm;
+      calibrationDragCancel();
+      if (target != null) await calibrationMoveTo(target);
+    }
+    async function calibrationMoveTo(targetMm) {
+      const c = state.calibration || {};
+      const load = Number(c.load_length_mm || 0);
+      const retract = Number(c.commanded_retract_mm || 0);
+      const target = Math.max(0, Math.min(load, Math.round(targetMm)));
+      const diff = target - (load - retract);
+      if (Math.abs(diff) < CALIBRATION_MIN_MOVE_MM) return false;
+      const mm = diff < 0 ? -diff : Math.min(diff, retract);
+      calibrationDrag.moving = {
+        target: (load - retract) + Math.sign(diff) * mm, mm,
+        dir: diff < 0 ? 'ui.calibration.dir_ace' : 'ui.calibration.dir_head',
+      };
+      const ok = await calibrationAction(diff < 0 ? 'retract' : 'feed_jog', mm);
+      if (!ok || !CAL_TRACK_MOVES.includes(state.calibration?.state)) {
+        calibrationDrag.moving = null;
       }
       return ok;
     }
+    // The step buttons go through the same path, so they get the same
+    // "moving" label.
+    function calibrationJog(mm) {
+      return calibrationMoveTo(calibrationTipNowMm.value + mm);
+    }
+    watch(() => state.calibration?.state, (s) => {
+      if (calibrationDrag.moving && !CAL_TRACK_MOVES.includes(s)) {
+        calibrationDrag.moving = null;
+      }
+    });
     async function calibrationApply() {
       const c = state.calibration || {};
       const v = calibrationProposed.value;
@@ -1264,7 +1507,7 @@ createApp({
         calibrationUi.error = t('ui.calibration.err_no_section');
         return;
       }
-      if (c.scope === 'slot') {
+      if (calibrationUi.scope === 'slot') {
         target.perSlot[slot].load_length = v.load;
         target.perSlot[slot].swap_retract_length = v.swap;
         target.perSlot[slot].retract_length = v.retract;
@@ -1276,10 +1519,215 @@ createApp({
       calibrationUi.busy = 'apply';
       await saveConfigForm();
       calibrationUi.busy = '';
-      calibrationUi.saved = rebootNeeded.value;
+      // saveConfigForm reports through configLog: a line starting with the
+      // check mark is the only success it writes. It overwrites the log
+      // first, so an earlier save's identical line cannot pass for this one.
+      calibrationUi.saved = String(configLog.value || '').startsWith('✓');
       if (!calibrationUi.saved) {
         calibrationUi.error = configLog.value || t('ui.calibration.err_save');
+      } else {
+        _calibrationClearBarClose();
       }
+    }
+
+    // After saving: on to the next slot or ACE. The saved values reach
+    // loads and swaps with the next printer restart, which can wait until
+    // everything is calibrated; verification already uses them (it sends
+    // the values from the page).
+    async function calibrationNextRoute() {
+      await calibrationAction('reset');
+      calibrationUi.saved = false;
+      calibrationUi.recalibrate = false;
+      calibrationSetPanel('setup');
+    }
+
+    // Clearing saved values: the three keys go blank at the level Save
+    // writes (this slot's own values or the ACE's shared ones), through the
+    // same config save. No G-code; like Save it takes effect with the next
+    // printer restart. Undo writes the old values back to that same level.
+    const CAL_CLEAR_KEYS = [
+      {key: 'load_length', label: 'row_load'},
+      {key: 'swap_retract_length', label: 'm_splitter'},
+      {key: 'retract_length', label: 'row_retract'},
+    ];
+    const calibrationClear = reactive({
+      open: false, undo: null, restored: false, sha1: '',
+    });
+    let _calibrationRestoredTimer = null;
+    // Where the selected slot gets its values: own, the ACE's shared, none.
+    const calibrationSavedKind = computed(() => {
+      const aceCfg = configForm.perAce?.[Number(calibrationUi.ace)] || {};
+      if (calibrationOwnValueSlots.value.includes(Number(calibrationUi.slot))) return 'own';
+      return _calSavedAt(aceCfg, 'retract_length') ? 'shared' : 'none';
+    });
+    // The three values at each level for the selected route, the level
+    // each one is taken from marked as in use.
+    const calibrationSavedLevels = computed(() => {
+      const ace = Number(calibrationUi.ace);
+      const slot = Number(calibrationUi.slot);
+      const aceCfg = configForm.perAce?.[ace] || {};
+      const slotCfg = aceCfg.perSlot?.[slot] || {};
+      const levels = [
+        {src: 'slot', cfg: slotCfg,
+         name: t('ui.calibration.values_level_slot', {slot: dispIdx(slot)})},
+        {src: 'ace', cfg: aceCfg,
+         name: t('ui.calibration.values_level_ace', {ace: dispIdx(ace)})},
+        {src: 'default', cfg: configForm,
+         name: t('ui.calibration.values_level_default')},
+      ];
+      const inUse = CAL_CLEAR_KEYS.map(({key}) =>
+        levels.find(level => _calSavedAt(level.cfg, key))?.src);
+      return levels.map(level => ({
+        src: level.src, name: level.name,
+        values: CAL_CLEAR_KEYS.map(({key}) =>
+          _calSavedAt(level.cfg, key) ? Number(level.cfg[key]) : null),
+        set: CAL_CLEAR_KEYS.some(({key}) => _calSavedAt(level.cfg, key)),
+        inUse: inUse.includes(level.src),
+      }));
+    });
+    function _calibrationSlotList(slots) {
+      const names = slots.map(slot => dispIdx(slot));
+      if (names.length < 2) return names.join('');
+      return t('ui.calibration.clear_list_and', {
+        rest: names.slice(0, -1).join(', '), last: names[names.length - 1]});
+    }
+    // What a clear at the current scope removes, and what each key falls
+    // back to afterwards. Calibrated or not follows calibrationRouteCalibrated.
+    const calibrationClearPlan = computed(() => {
+      const ace = Number(calibrationUi.ace);
+      const slot = Number(calibrationUi.slot);
+      const level = calibrationUi.scope === 'slot' ? 'slot' : 'ace';
+      const aceCfg = configForm.perAce?.[ace] || {};
+      const slotCfg = aceCfg.perSlot?.[slot] || {};
+      const levelCfg = level === 'slot' ? slotCfg : aceCfg;
+      const rows = CAL_CLEAR_KEYS.map(({key, label}) => {
+        const fromAce = level === 'slot' && _calSavedAt(aceCfg, key);
+        const after = fromAce ? Number(aceCfg[key])
+          : _calSavedAt(configForm, key) ? Number(configForm[key]) : null;
+        return {
+          key, label, config: level === 'slot' ? `${key}_${slot}` : key,
+          old: _calSavedAt(levelCfg, key) ? Number(levelCfg[key]) : null,
+          after, src: fromAce ? 'ace' : 'default',
+        };
+      });
+      const calibrated = (own, shared) => ['retract_length', 'swap_retract_length']
+        .every(key => _calSavedAt(own, key) || _calSavedAt(shared, key));
+      const affected = [], keeps = [];
+      if (level === 'ace') {
+        (aceCfg.perSlot || []).forEach((own, idx) => {
+          if (calibrated(own, aceCfg) && !calibrated(own, null)) affected.push(idx);
+          else if (calibrationOwnValueSlots.value.includes(idx)) keeps.push(idx);
+        });
+      }
+      return {
+        level, ace, slot, rows,
+        saved: rows.some(row => row.old != null),
+        staysCalibrated: level === 'slot' && calibrated(null, aceCfg),
+        affected, keeps,
+      };
+    });
+    // Why Clear cannot run right now (null = it can). `blocked` marks the
+    // reasons that are a temporary refusal rather than nothing to clear.
+    const calibrationClearBlocked = computed(() => {
+      const plan = calibrationClearPlan.value;
+      if (calibrationMoving.value) {
+        return {blocked: true, why: t('ui.calibration.clear_blk_moving', {
+          ace: dispIdx(state.calibration?.ace ?? plan.ace)})};
+      }
+      if (!plan.saved) {
+        return {blocked: false, why: plan.level === 'slot'
+          ? t('ui.calibration.clear_blk_none_slot')
+          : t('ui.calibration.clear_blk_none_ace', {ace: dispIdx(plan.ace)})};
+      }
+      return null;
+    });
+    // The open run of this route goes with the values it was measured
+    // against. Filament still out of the ACE: the run is cancelled instead,
+    // which keeps the tip position, so the return to the ACE stays offered.
+    const calibrationClearSession = computed(() => {
+      const c = state.calibration || {};
+      if (!calibrationSessionMatchesSelection.value || calibrationMoving.value
+          || (c.state || 'idle') === 'idle') return null;
+      if (calibrationRouteOccupied.value) {
+        return {
+          action: ['cancelled', 'failed'].includes(c.state) ? '' : 'cancel',
+          mm: Math.round(Number(c.tip_position_mm) || 0),
+        };
+      }
+      return {action: 'reset', mm: 0};
+    });
+    const calibrationClearLead = computed(() => {
+      const plan = calibrationClearPlan.value;
+      if (plan.level === 'slot') {
+        return plan.staysCalibrated
+          ? t('ui.calibration.clear_falls_ace', {ace: dispIdx(plan.ace)})
+          : t('ui.calibration.clear_falls_default');
+      }
+      if (!plan.affected.length) {
+        return t('ui.calibration.clear_affected_none', {ace: dispIdx(plan.ace)});
+      }
+      return t(plan.affected.length === 1
+        ? 'ui.calibration.clear_affected_one' : 'ui.calibration.clear_affected_many',
+      {slots: _calibrationSlotList(plan.affected)});
+    });
+    function calibrationClearOpen() {
+      if (calibrationClearBlocked.value || calibrationUi.busy) return;
+      calibrationClear.open = true;
+    }
+    function _calibrationClearBarClose() {
+      calibrationClear.undo = null;
+      calibrationClear.restored = false;
+      clearTimeout(_calibrationRestoredTimer);
+    }
+    // Writes the three keys at one level and saves the config the way Save
+    // does. On a failed save the form gets its previous values back.
+    async function _calibrationWriteLevel(level, ace, slot, values, busy) {
+      const aceCfg = configForm.perAce?.[ace];
+      const target = level === 'slot' ? aceCfg?.perSlot?.[slot] : aceCfg;
+      if (!target) {
+        calibrationUi.error = t('ui.calibration.err_no_section');
+        return false;
+      }
+      const previous = {};
+      for (const {key} of CAL_CLEAR_KEYS) {
+        previous[key] = target[key];
+        target[key] = values[key];
+      }
+      calibrationUi.busy = busy;
+      calibrationUi.error = '';
+      await saveConfigForm();
+      calibrationUi.busy = '';
+      const ok = String(configLog.value || '').startsWith('✓');
+      if (!ok) {
+        Object.assign(target, previous);
+        calibrationUi.error = configLog.value || t('ui.calibration.err_save');
+      }
+      return ok;
+    }
+    async function calibrationClearConfirm() {
+      const plan = calibrationClearPlan.value;
+      const session = calibrationClearSession.value;
+      if (calibrationClearBlocked.value || calibrationUi.busy) return;
+      calibrationClear.open = false;
+      const old = {};
+      for (const row of plan.rows) old[row.key] = row.old == null ? '' : row.old;
+      const blank = {load_length: '', swap_retract_length: '', retract_length: ''};
+      if (!await _calibrationWriteLevel(plan.level, plan.ace, plan.slot, blank, 'clear')) return;
+      _calibrationClearBarClose();
+      calibrationClear.undo = {level: plan.level, ace: plan.ace, slot: plan.slot, values: old};
+      calibrationClear.sha1 = config.sha1;
+      calibrationUi.saved = false;
+      if (session?.action) await calibrationAction(session.action);
+    }
+    // Config only: a run reset by the clear stays gone.
+    async function calibrationClearUndo() {
+      const undo = calibrationClear.undo;
+      if (!undo || calibrationUi.busy) return;
+      if (!await _calibrationWriteLevel(undo.level, undo.ace, undo.slot, undo.values, 'undo')) return;
+      _calibrationClearBarClose();
+      calibrationClear.restored = true;
+      calibrationClear.sha1 = config.sha1;
+      _calibrationRestoredTimer = setTimeout(() => { calibrationClear.restored = false; }, 6000);
     }
 
     function clearAllErrors() {
@@ -1355,7 +1803,7 @@ createApp({
         case 'ACE_UNLOAD_ALL_HEADS':
           return t('ui.queue.lbl_unload_all');
         case 'ACE_SWITCH':
-          return `ACE ${di(a.TARGET ?? 0)}`
+          return `MMU ${di(a.TARGET ?? 0)}`
             + ((a.AUTOLOAD == 1 || a.AUTOLOAD === true)
                ? ' ' + t('ui.queue.lbl_autoload') : '');
         case 'ACE_DRY':
@@ -1366,7 +1814,7 @@ createApp({
       return null;
     }
     function slotTitle(ace, slot) {
-      const bits = [`ACE ${dispIdx(ace.idx)} / Slot ${dispIdx(slot.idx)}`];
+      const bits = [`MMU ${dispIdx(ace.idx)} / Slot ${dispIdx(slot.idx)}`];
       if (slot.material) bits.push(slot.material);
       if (slot.brand) bits.push(slot.brand);
       bits.push(slot.state);
@@ -1687,13 +2135,13 @@ createApp({
           // The head is what you look for; if the armed slot feeds none
           // (possible between a swap's unload and load), name the unit
           // instead of inventing a head.
-          main: head === null ? "ACE " + dispIdx(a.idx) : "T" + dispIdx(head),
+          main: head === null ? "MMU " + dispIdx(a.idx) : "T" + dispIdx(head),
           sub: slot.material || "",
         };
       }
       // Nothing armed: idle, or a print that has not reached its first load.
       return {color: null,
-              main: shown ? "ACE " + dispIdx(shown.idx) : "multiACE", sub: ""};
+              main: shown ? "MMU " + dispIdx(shown.idx) : "multiACE", sub: ""};
     });
     // Ask back before anything that moves filament, when the printer has
     // "confirm commands" on. Deliberately the native confirm(): it blocks,
@@ -1756,7 +2204,28 @@ createApp({
     function slotIsEmpty(aceIdx, slotIdx) {
       const a = (state.aces || []).find(x => x.idx === aceIdx);
       const sl = a && (a.slots || []).find(s => s.idx === slotIdx);
-      return !!sl && sl.state === 'empty';
+      // 'nosensor': a unit without presence gate (caps) - nothing to load
+      // from here, the lane has no truth to offer.
+      return !!sl && (sl.state === 'empty' || sl.state === 'nosensor');
+    }
+    // Capability helpers: the backend derives these from the engine's caps
+    // block when present and from protocol/firmware otherwise (older ace.py);
+    // the fallbacks here cover a backend that predates the fields.
+    function aceFlashEngine(a) {
+      if (!a) return "";
+      if (a.flash_engine !== undefined) return a.flash_engine || "";
+      const p = (a.protocol || "").toLowerCase();
+      return p === "v1" ? "iap_v1" : p === "v2" ? "ota_v2" : "";
+    }
+    function aceHasDryer(a) {
+      if (!a) return false;
+      if (a.has_dryer !== undefined) return !!a.has_dryer;
+      return ["v1", "v2"].includes((a.protocol || "").toLowerCase());
+    }
+    function aceHasDecoder(a) {
+      if (!a) return false;
+      if (a.has_decoder !== undefined) return !!a.has_decoder;
+      return (a.protocol || "").toLowerCase() === "v2";
     }
     // multi: slot N feeds head N. A head without ACE (manual/feeder) takes
     // nothing from a slot - a slot load there would load the head from its
@@ -2517,11 +2986,11 @@ createApp({
     // runs - never a user flag.
     const acefwCandidates = computed(() =>
       (state.aces || [])
-        .filter(a => ["v1", "v2"].includes((a.protocol || "").toLowerCase()))
+        .filter(a => ["iap_v1", "ota_v2"].includes(aceFlashEngine(a)))
         .map(a => {
-          const v1 = (a.protocol || "").toLowerCase() === "v1";
+          const v1 = aceFlashEngine(a) === "iap_v1";
           return {value: a.idx, v1: v1,
-                  label: "ACE " + dispIdx(a.idx)
+                  label: "MMU " + dispIdx(a.idx)
                          + " · " + t(v1 ? "ui.config.acefw_gen1"
                                         : "ui.config.acefw_gen2")
                          + (a.firmware && a.firmware !== "Unknown"
@@ -3152,7 +3621,7 @@ createApp({
         return `T${dispIdx(h)} · ${t(th.manual ? "ui.dashboard.manual" : "ui.dashboard.feeder")}`;
       }
       const [a, sl] = key.split("_").map(Number);
-      return `ACE ${dispIdx(a)} / ${dispIdx(sl)}`;
+      return `MMU ${dispIdx(a)} / ${dispIdx(sl)}`;
     }
     // Remaining weight is an estimate (extruded length x density), but it
     // renders WITHOUT a ~ (Spoolman/SpoolLink show plain grams too).
@@ -3185,6 +3654,21 @@ createApp({
       await spoolMacro("ACE_SET_SPOOLMAN", {MODE: v});
     }
     const spoolAddBusy = ref(false);
+    // The sentence out of a failed /api/macro: Moonraker answers with a
+    // JSON envelope (message + traceback) or Klipper's "Error on '...':"
+    // wrapper; only the message is for the user.
+    function macroErrorText(detail) {
+      const d = String(detail || "");
+      try {
+        const j = JSON.parse(d);
+        const m = j && j.error && j.error.message;
+        if (m) return String(m);
+      } catch (e) {}
+      const jm = d.match(/"message":\s*"((?:[^"\\]|\\.)*)"/);
+      if (jm) return jm[1].replace(/\\"/g, '"');
+      const km = d.match(/[Ee]rror on '[^']*':\s*(.*)/);
+      return (km ? km[1] : d).slice(0, 300);
+    }
     async function spoolMacro(name, args) {
       // One ACE_SPOOL_ADD at a time: /api/macro blocks while the printer
       // runs long gcode (a swap holds the script queue ~150s), so every
@@ -3210,10 +3694,7 @@ createApp({
         if (!ok) {
           const body = await r.json().catch(() => ({}));
           const detail = String(body.detail || `HTTP ${r.status}`);
-          // Klipper's error text carries the reason; strip the wrapper so
-          // the banner shows the sentence, not a JSON envelope.
-          const m = detail.match(/[Ee]rror on '[^']*':\s*(.*)/);
-          setMacroLog(`${name}: ${(m ? m[1] : detail).slice(0, 200)}`);
+          setMacroLog(`${name}: ${macroErrorText(detail).slice(0, 200)}`);
         }
       } catch (e) {
         setMacroLog(`${name}: ${e}`);
@@ -3308,7 +3789,7 @@ createApp({
         for (const sl of (a.slots || [])) {
           const key = `${a.idx}_${sl.idx}`;
           out.push({key, taken: bound.has(key),
-                    label: `ACE ${dispIdx(a.idx)} / ${dispIdx(sl.idx)}`});
+                    label: `MMU ${dispIdx(a.idx)} / ${dispIdx(sl.idx)}`});
         }
       }
       // Feeder/manual heads take a spool too (bound to the head, 'h<n>') -
@@ -3472,7 +3953,7 @@ createApp({
       if (picker.weight !== "") parts.push(picker.weight + " g");
       const isHead = picker.head !== null && picker.head !== undefined;
       parts.push(isHead ? `T${dispIdx(picker.head)}`
-                        : `ACE ${dispIdx(picker.ace)} / ${dispIdx(picker.slot)}`);
+                        : `MMU ${dispIdx(picker.ace)} / ${dispIdx(picker.slot)}`);
       return base + " · " + parts.join(" · ");
     }
     async function spoolCreateFromPicker() {
@@ -3699,6 +4180,122 @@ createApp({
     function spoolExport() {
       window.open(`${API}/spools/export`, "_blank");
     }
+    // Orca printer profile with virtual tools (T4.. = ACE/slot). Built on
+    // the backend from the live state; the browser just downloads it.
+    function orcaProfile() {
+      window.open(`${API}/orca/profile`, "_blank");
+    }
+    // Virtual tools 4.. with their current ACE/slot target (tool_map entry
+    // or the formula), for the Config-tab list. Display numbers 1-based.
+    function virtualTools() {
+      const count = Math.max(1, Math.min(8, Number(state.device_count || 1)));
+      const out = [];
+      // Tools 0-3 are the heads; tool n >= 4 = ACE (n-4)/4, slot (n-4)%4.
+      for (let n = 4; n < Math.min(32, 4 + 4 * count); n++) {
+        const ent = state.tool_map && state.tool_map[String(n)];
+        const mapped = Array.isArray(ent) && ent.length === 2;
+        const ace = mapped ? Number(ent[0]) : Math.floor((n - 4) / 4);
+        const slot = mapped ? Number(ent[1]) : (n - 4) % 4;
+        const a = (state.aces || [])[ace];
+        const sl = a && a.slots ? a.slots[slot] : null;
+        out.push({tool: n, ace, slot, mapped,
+                  color: sl && sl.color ? sl.color : null,
+                  material: sl ? (sl.material || sl.type || "") : ""});
+      }
+      return out;
+    }
+    // The same list in blocks of four (filaments 5-8, 9-12, ...) for the
+    // 2x2 layout. No ACE label on a block: an entry can point elsewhere.
+    function virtualToolGroups() {
+      const groups = [];
+      for (const vt of virtualTools()) {
+        const g = Math.floor((vt.tool - 4) / 4);
+        if (!groups[g]) groups[g] = {ace: g, tools: []};
+        groups[g].tools.push(vt);
+      }
+      return groups.filter(Boolean);
+    }
+    // Approximate colour name for the tool-map list, from hue and lightness
+    // ("dark purple", "light blue"). Slots only store a hex value, so this
+    // is a reading aid next to the colour itself, not an identity.
+    function colorName(hex) {
+      const h6 = _hex6(hex);
+      if (h6.length !== 7) return "";
+      const [r, g, b] = [1, 3, 5].map(i => parseInt(h6.slice(i, i + 2), 16) / 255);
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      const l = (max + min) / 2;
+      const d = max - min;
+      const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+      let hue = 0;
+      if (d) {
+        if (max === r) hue = 60 * (((g - b) / d) % 6);
+        else if (max === g) hue = 60 * ((b - r) / d + 2);
+        else hue = 60 * ((r - g) / d + 4);
+        if (hue < 0) hue += 360;
+      }
+      const name = (k) => t("ui.config.orca_color." + k);
+      if (l < 0.1) return name("black");
+      if (l > 0.93) return name("white");
+      if (sat < 0.15) {
+        if (l < 0.35) return t("ui.config.orca_color.dark", {c: name("gray")});
+        if (l > 0.7) return t("ui.config.orca_color.light", {c: name("gray")});
+        return name("gray");
+      }
+      let key;
+      if (hue < 15 || hue >= 345) key = "red";
+      else if (hue < 40) key = l < 0.35 ? "brown" : "orange";
+      else if (hue < 68) key = l < 0.3 ? "brown" : "yellow";
+      else if (hue < 165) key = "green";
+      else if (hue < 195) key = "turquoise";
+      else if (hue < 255) key = "blue";
+      else if (hue < 290) key = "purple";
+      else key = "pink";
+      // Pale warm tones read as beige, pale reds as pink, not "light red".
+      if ((key === "orange" || key === "yellow") && l > 0.72 && sat < 0.6) key = "beige";
+      if (key === "red" && l > 0.65) key = "pink";
+      if (key === "brown" || key === "beige") return name(key);
+      if (l < 0.3) return t("ui.config.orca_color.dark", {c: name(key)});
+      if (l > 0.72 && key !== "pink") return t("ui.config.orca_color.light", {c: name(key)});
+      return name(key);
+    }
+    // Every slot of every ACE as one target list: "ACE 1 / 2: PLA red".
+    function toolTargetOptions(vt) {
+      const out = [];
+      const count = Math.max(1, Math.min(8, Number(state.device_count || 1)));
+      for (let a = 0; a < count; a++) {
+        const ace = (state.aces || [])[a];
+        for (let sl = 0; sl < 4; sl++) {
+          const slot = ace && ace.slots ? ace.slots[sl] : null;
+          const empty = !slot || slot.state === "empty";
+          const mat = slot ? (slot.material || slot.type || "") : "";
+          const color = !empty && slot.color ? slot.color : null;
+          const desc = empty ? t("ui.common.empty")
+            : [mat, color ? colorName(color) : ""].filter(Boolean).join(" ") || "-";
+          out.push({value: a + ":" + sl, color,
+                    label: `MMU ${a + 1} / ${sl + 1}: ${desc}`});
+        }
+      }
+      if (vt && !out.some(o => o.value === vt.ace + ":" + vt.slot)) {
+        out.push({value: vt.ace + ":" + vt.slot, color: null,
+                  label: `MMU ${vt.ace + 1} / ${vt.slot + 1}`});
+      }
+      return out;
+    }
+    function setToolMapTarget(tool, value) {
+      const [ace, slot] = String(value).split(":").map(Number);
+      return setToolMap(tool, ace, slot);
+    }
+    // Both go through headSet: a refusal (e.g. while printing) lands in
+    // the macro log instead of vanishing, and the state reloads after.
+    function setToolMap(tool, ace, slot) {
+      return headSet("macro",
+        {name: "ACE_SET_TOOL", args: {TOOL: tool, ACE: Number(ace), SLOT: Number(slot)}},
+        `T${tool}`);
+    }
+    function resetToolMap(tool) {
+      return headSet("macro", {name: "ACE_SET_TOOL", args: {TOOL: tool, RESET: 1}},
+                     `T${tool}`);
+    }
     async function spoolImport(fileList) {
       const f = fileList && fileList[0];
       if (spoolFileInput.value) spoolFileInput.value.value = "";
@@ -3734,6 +4331,125 @@ createApp({
     // engine flag as quad_first - so the template inverts, not this. Keeping
     // the stored name means no config/save-variable migration: an [ace]
     // quad_first line that is no longer read would halt Klipper.
+    // D11 Devices: assignment of a unit (by its key) to a place, removal
+    // ("none") and forgetting a disconnected key. The engine applies the
+    // table at the next firmware restart and says so (units_restart_needed).
+    // A refused command reaches the alerts strip through Klipper's own
+    // error path; the tab shows nothing extra (it used to duplicate it).
+    async function assignUnit(key, place) {
+      if (!key) return;
+      const p = (place === "" || place === null || place === undefined)
+        ? "NONE" : String(Number(place) + 1);
+      await unitMacro("ACE_UNIT_ASSIGN", {KEY: key, PLACE: p});
+    }
+    function forgetUnit(dev) {
+      confirm({
+        title: t("ui.config.dev_forget"),
+        message: tHtml("ui.config.dev_forget_confirm", {key: dev.key}),
+        okLabel: t("ui.config.dev_forget"),
+        onOk: () => unitMacro("ACE_UNIT_FORGET", {KEY: dev.key}),
+      });
+    }
+    // Rename a unit: the name belongs to its key, the engine takes the
+    // place index. Klipper splits gcode parameters on blanks, so blanks
+    // become underscores.
+    // The name field is bound to POLLED printer state (devices arrive every
+    // second), so the typed text needs an edit buffer or the next poll
+    // overwrites it. Buffer wins while editing; released when the printer
+    // reports the committed name back (applyState), on an unchanged commit,
+    // or when the rename failed (the error box explains, the old name shows).
+    const devNameEdit = reactive({});
+    function devNameClean(name) {
+      return String(name || "").trim().replace(/\s+/g, "_").slice(0, 32);
+    }
+    function devNameValue(dev) {
+      const k = dev && dev.key;
+      return (k in devNameEdit) ? devNameEdit[k] : (dev.name || "");
+    }
+    function devNameInput(dev, ev) {
+      if (dev && dev.key) devNameEdit[dev.key] = ev.target.value;
+    }
+    async function devNameCommit(dev, ev) {
+      if (!dev || !dev.key) return;
+      const clean = devNameClean(ev.target.value);
+      if (clean === (dev.name || "")) { delete devNameEdit[dev.key]; return; }
+      devNameEdit[dev.key] = clean;
+      const ok = await renameUnit(dev, clean);
+      if (!ok) delete devNameEdit[dev.key];
+    }
+    function devNameSettle(devices) {
+      for (const d of devices || []) {
+        if (d && d.key in devNameEdit && (d.name || "") === devNameEdit[d.key]) {
+          delete devNameEdit[d.key];
+        }
+      }
+    }
+    // Locate: the engine blinks an ACE 2 or jogs a slot on an ACE Pro.
+    function locateUnit(dev) {
+      if (!dev || dev.place === null || dev.place === undefined) return;
+      return unitMacro("ACE_LOCATE", {ACE: dev.place});
+    }
+    async function renameUnit(dev, name) {
+      if (!dev || dev.place === null || dev.place === undefined) return false;
+      return unitMacro("ACE_UNIT_NAME", {ACE: dev.place, NAME: devNameClean(name)});
+    }
+    async function unitMacro(name, args) {
+      let ok = true;
+      try {
+        const r = await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name, args}),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(macroErrorText(j.detail || `${r.status}`));
+      } catch (e) {
+        console.warn(`${name}: ${macroErrorText(e.message || String(e))}`);
+        ok = false;
+      }
+      reloadState();
+      return ok;
+    }
+    // Driver switches: the engine refuses the last active driver and a
+    // driver whose unit feeds a loaded head (reason in the alerts strip);
+    // the checkbox only shows what the printer reports back.
+    function driverOnlyActive(drv) {
+      return drv.enabled
+        && !(state.driver_switches || []).some(d => d.name !== drv.name && d.enabled);
+    }
+    function driverToggle(drv, ev) {
+      ev.target.checked = !!drv.enabled;
+      return unitMacro("ACE_SET_DRIVER", {NAME: drv.name, ENABLE: drv.enabled ? 0 : 1});
+    }
+    function driverNote(drv) {
+      const parts = [];
+      if (drv.enabled !== drv.active) {
+        parts.push(t(drv.enabled ? "ui.config.driver_pending_on" : "ui.config.driver_pending_off"));
+      }
+      if (drv.places && drv.places.length) {
+        parts.push(t("ui.config.driver_serves",
+                     {list: drv.places.map(p => dispIdx(p)).join(", ")}));
+      }
+      if (!drv.tested) parts.push(t("ui.config.driver_untested"));
+      return parts.join(" · ");
+    }
+    const driversRestartNeeded = computed(() =>
+      (state.driver_switches || []).some(d => d.enabled !== d.active));
+    function deviceStatus(dev) {
+      if (dev.removed) return t("ui.config.dev_removed");
+      if (!dev.present) return t("ui.config.dev_not_connected");
+      return dev.connected ? t("ui.config.dev_connected") : t("ui.config.dev_present");
+    }
+    function deviceDriver(dev) {
+      return unitDriverLabel({kind: dev.kind});
+    }
+    // Places in the unit table (for the per-place [ace N] cards): the
+    // table decides, the old ace_device_count only on an engine without it.
+    function perAceCount() {
+      const places = (state.devices || []).filter(d => d.place !== null && d.place !== undefined);
+      if (places.length) return Math.min(4, Math.max(...places.map(d => d.place)) + 1);
+      return Math.max(1, Math.min(4, configForm.ace_device_count | 0));
+    }
     async function setQuadFirst(first) {
       try {
         await fetch(`${API}/macro`, {
@@ -3778,7 +4494,7 @@ createApp({
     const aceOptions = computed(() =>
       (state.aces || []).map(a => ({
         value: a.idx,
-        label: "ACE " + dispIdx(a.idx) + (a.protocol ? " (" + a.protocol.toUpperCase() + ")" : ""),
+        label: "MMU " + dispIdx(a.idx) + (unitDriverLabel(a) ? " (" + unitDriverLabel(a) + ")" : ""),
       })));
     // head mode: the ACE currently wired to a head (head_ace), defaulting to the
     // head index.
@@ -3790,6 +4506,15 @@ createApp({
     function aceCfwTitle(ace) {
       const key = ace.community_fw === "gen1_cfw" ? "ui.common.cfw_gen1" : "ui.common.cfw_ace2_open";
       return [t(key), ace.firmware].filter(Boolean).join(" · ");
+    }
+    // Driver label behind the place number (D11): the registry name of the
+    // codec that drives this unit, never the place. 'v1'/'v2' are the codec
+    // names ace.py reports as kind/protocol.
+    const DRIVER_LABELS = {v1: "AceV1", v2: "AceV2", cfs: "CFS Nano", ace2k: "Ace2k"};
+    function unitDriverLabel(ace) {
+      const k = String((ace && (ace.kind || ace.protocol)) || "");
+      if (!k) return "";
+      return DRIVER_LABELS[k] || k;
     }
     function aceProtoTitle(ace) {
       return [ace.model,
@@ -3853,6 +4578,17 @@ createApp({
       }
       return out;
     });
+    // Head mode hides ACEs no head is wired to. A connected one would then
+    // simply not exist on the dashboard, so it is shown after the wired
+    // ones, dimmed and inert (_unwired).
+    const unwiredAces = computed(() => {
+      if (state.mode !== "head") return [];
+      const shown = new Set(visibleAces.value.map(a => a.idx));
+      return (state.aces || []).filter(a => a.connected !== false
+                                           && !shown.has(a.idx));
+    });
+    const gridAces = computed(() => visibleAces.value.concat(
+      unwiredAces.value.map(a => Object.assign({}, a, {_unwired: true}))));
     function loadSlot(aceIdx, slotIdx) {
       if (_blockIfPrinting()) return;
       // Before anything is enqueued: an empty source slot cannot load, and
@@ -3991,7 +4727,7 @@ createApp({
     // {type, a, b}: move -> a@b, others -> type:a. Mirrors the token grammar
     // in ace_tipform.parse_table; the backend parse_table remains the strict
     // gate on save, so a half-built table can never reach Klipper.
-    const TIPFORM_STEP_TYPES = ["move", "pause", "temp", "waittemp", "fan", "unloadtemp", "loadtemp"];
+    const TIPFORM_STEP_TYPES = ["move", "pause", "temp", "waittemp", "fan", "unloadtemp", "loadtemp", "bgtemp", "prime", "primetemp"];
     function tipformParseSteps(tableStr) {
       const steps = [];
       for (let part of String(tableStr || "").split(",")) {
@@ -3999,7 +4735,7 @@ createApp({
         if (!part) continue;
         const low = part.toLowerCase();
         let m;
-        if ((m = /^(pause|waittemp|unloadtemp|loadtemp|temp|fan)\s*:\s*(.*)$/.exec(low))) {
+        if ((m = /^(pause|waittemp|unloadtemp|loadtemp|bgtemp|primetemp|prime|temp|fan)\s*:\s*(.*)$/.exec(low))) {
           steps.push({type: m[1], a: m[2].trim(), b: ""});
         } else if (part.includes("@")) {
           const [mm, f] = part.split("@");
@@ -4955,6 +5691,18 @@ createApp({
     const configLog = ref("");
     const configLoadError = ref("");
     const showRawConfig = ref(false);
+    // The button sits in the save bar, which sticks to the bottom of the
+    // window in the new design: open the editor and scroll to it.
+    function toggleRawConfig() {
+      showRawConfig.value = !showRawConfig.value;
+      if (!showRawConfig.value) return;
+      nextTick(() => {
+        const el = document.getElementById("raw-config");
+        if (!el) return;
+        el.open = true;
+        el.scrollIntoView({behavior: "smooth", block: "start"});
+      });
+    }
     const configForm = reactive({
       ace_device_count: 1,
       feed_speed: 80,
@@ -4990,7 +5738,7 @@ createApp({
       };
     }
     function _ensurePerAceLength() {
-      const n = Math.max(0, Math.min(4, configForm.ace_device_count | 0));
+      const n = Math.max(0, Math.min(4, perAceCount()));
       while (configForm.perAce.length < n) {
         configForm.perAce.push(_makePerAceEntry());
       }
@@ -4998,18 +5746,89 @@ createApp({
         configForm.perAce.pop();
       }
     }
-    watch(() => configForm.ace_device_count, _ensurePerAceLength, {immediate: true});
+    watch(() => [configForm.ace_device_count, (state.devices || []).length], _ensurePerAceLength, {immediate: true});
     watch([() => tab.value, calibrationRouteKnown], ([activePage, routeKnown]) => {
       if (activePage !== 'calibration' || calibrationUi.panelTouched
           || state.calibration?.state !== 'idle') return;
       calibrationSetPanel(routeKnown ? 'verify' : 'setup', false);
     }, {immediate: true});
+    // A new route (or the config arriving) starts the scope from the
+    // route's badge: own values -> this slot, otherwise the whole ACE. The
+    // undo bar of a clear belongs to the route it was made on.
+    watch(() => [calibrationUi.ace, calibrationUi.slot, calibrationUi.head, config.path],
+      (next, previous) => {
+        calibrationUi.scope = calibrationSavedKind.value === 'own' ? 'slot' : 'ace';
+        if (previous && next.slice(0, 3).some((v, i) => Number(v) !== Number(previous[i]))) {
+          _calibrationClearBarClose();
+        }
+      }, {immediate: true});
+    // Any other config write (or a reload of a changed file) ends the undo.
+    watch(() => config.sha1, (sha1) => {
+      if ((calibrationClear.undo || calibrationClear.restored)
+          && sha1 !== calibrationClear.sha1) _calibrationClearBarClose();
+    });
     // True after a config save, which needs a full printer restart to take
     // effect (a bare Klipper restart misses USB/serial + PAXX boot-script
     // changes). Drives the prominent top reboot banner; cleared once a restart
     // actually starts (klippy down). Mode changes do NOT use this - crossing
     // 'normal' raises a backend reboot error that reaches the display too.
     const rebootNeeded = ref(false);
+    // An update that could not restart the Klipper service itself: the new
+    // code only loads after a reboot. Same banner, other text.
+    const printerRebootNeeded = ref(false);
+    // Restart straight from a "please restart" hint: same endpoint and
+    // confirm dialog as the Control tab. Not offered while a print runs or
+    // when the platform manages the install (the server refuses both).
+    const restartNotice = ref("");
+    let _restartNoticeTimer = null;
+    // "restart requested" is cleared once the restart has visibly happened
+    // (klippy or the websocket went down and a state came back); the timer
+    // below is only the fallback.
+    let _restartAwaitDown = false, _restartSeenDown = false;
+    function restartNoticeClear() {
+      restartNotice.value = "";
+      _restartAwaitDown = _restartSeenDown = false;
+      if (_restartNoticeTimer) { clearTimeout(_restartNoticeTimer); _restartNoticeTimer = null; }
+    }
+    function restartNoteDown() { if (_restartAwaitDown) _restartSeenDown = true; }
+    function restartNoteBack() { if (_restartSeenDown) restartNoticeClear(); }
+    const restartOffered = computed(() => !updateState.managed
+      && !["printing", "paused"].includes(state.printer_state));
+    function restartNow(behavior) {
+      confirm({
+        title: t(`ui.restart.${behavior}_title`),
+        message: t(`ui.restart.${behavior}_msg`),
+        okLabel: t(`ui.restart.${behavior}_btn`),
+        onOk: async () => {
+          try {
+            const r = await fetch(`${API}/restart`, {
+              method: "POST", headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({behavior}),
+            });
+            const j = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(j.detail || `${r.status}`);
+            rebootNeeded.value = false;
+            printerRebootNeeded.value = false;
+            restartNotice.value = t(`ui.restart.${behavior}_sent`);
+            _restartAwaitDown = true; _restartSeenDown = false;
+          } catch (e) {
+            restartNotice.value = `${t("ui.restart.failed")}: ${e.message || e}`;
+            _restartAwaitDown = _restartSeenDown = false;
+          }
+          if (_restartNoticeTimer) clearTimeout(_restartNoticeTimer);
+          _restartNoticeTimer = setTimeout(() => {
+            restartNotice.value = "";
+            _restartNoticeTimer = null;
+            _restartAwaitDown = _restartSeenDown = false;
+          }, 60000);
+        },
+      });
+    }
+    // Klipper's own "please reboot" (SET_ACE_MODE across 'normal' swaps the
+    // feed modules) reaches the web as a notification.
+    function notifWantsReboot(n) {
+      return /please reboot/i.test((n && n.msg) || "");
+    }
     function paramsToForm(params, perAceParams) {
       if (!params) return;
       const num  = (k) => params[k] != null ? Number(params[k]) : configForm[k];
@@ -5333,6 +6152,7 @@ createApp({
             if (j.ok) {
               const reboot = (j.status_lines || []).some(l => String(l).startsWith("please_reboot"));
               setMacroLog(t(reboot ? "ui.config.update_done_reboot" : "ui.config.update_done"));
+              if (reboot) printerRebootNeeded.value = true;
             }
           } catch (e) {
             updateState.statusText = `${t("ui.config.update_failed")}: ${e.message || e}`;
@@ -5601,7 +6421,7 @@ createApp({
           else if (m.type === "error") conn.value = {state: "warn", text: m.error || t("ui.header.ws_error")};
         } catch (_) {}
       };
-      ws.onclose = () => { conn.value = {state: "warn", text: t("ui.header.offline")}; scheduleReconnect(); };
+      ws.onclose = () => { conn.value = {state: "warn", text: t("ui.header.offline")}; restartNoteDown(); scheduleReconnect(); };
       ws.onerror = () => { conn.value = {state: "err", text: t("ui.header.ws_error")}; };
     }
     function scheduleReconnect() {
@@ -6078,6 +6898,7 @@ createApp({
       preflight.slicerSwaps = realSwapCount(
         (preflight.report && preflight.report.events) || [],
         _slicerEffectiveMapping());
+      scheduleEstimate("slicer");
     }
     function slicerSwapsDisplay() {
       if (preflight.slicerSwaps !== null) return preflight.slicerSwaps;
@@ -6131,7 +6952,7 @@ createApp({
       if (!tg) return "";
       const mat = tg.material || "?";
       if (tg.kind === "pin") return pinLabel(tg.head) + " · " + mat;
-      return "ACE " + dispIdx(tg.ace) + " Slot " + dispIdx(tg.slot) + " · " + mat;
+      return "MMU " + dispIdx(tg.ace) + " Slot " + dispIdx(tg.slot) + " · " + mat;
     }
     // Background for a colour chip or select: the "no colour" placeholder
     // goes through a CSS variable (fallback #444), so the light shade can
@@ -6499,7 +7320,7 @@ createApp({
       return out;
     }
     function copySlotLabel(ace, slot) {
-      return "ACE " + dispIdx(ace) + " Slot " + dispIdx(slot);
+      return "MMU " + dispIdx(ace) + " Slot " + dispIdx(slot);
     }
     async function _setPreflightCopiesArgs(args) {
       try {
@@ -6524,6 +7345,7 @@ createApp({
       preflight.headSwaps = headSwapCount(
         (preflight.report && preflight.report.events) || [],
         _headEffectiveAssignment(), headCopiesEffective());
+      scheduleEstimate("loadout");
     }
     function headSwapsDisplay() {
       if (preflight.headSwaps !== null) return preflight.headSwaps;
@@ -6644,7 +7466,7 @@ createApp({
       // The proposed destination for a slicer colour (load that colour here).
       if (!m || m.kind === "none") return "";
       if (m.kind === "pin") return pinLabel(m.head);
-      return "ACE " + dispIdx(m.ace) + " Slot " + dispIdx(m.slot);
+      return "MMU " + dispIdx(m.ace) + " Slot " + dispIdx(m.slot);
     }
     // ---- Send-to-multiACE inbox -----------------------------------------
     // A slicer pushed a raw gcode to /api/preflight/inbox (store-only). The
@@ -6730,7 +7552,12 @@ createApp({
     function ensurePreflightWorker() {
       if (!window.Worker) throw new Error(t("ui.preflight.local_worker_missing"));
       if (preflightWorker && preflightWorkerReady) return preflightWorkerReady;
-      preflightWorker = new Worker("preflight_pyodide_worker.js?v=pyodide-20260624");
+      // Content hash from the served index.html; the fixed tag is the
+      // fallback for a shell that predates it.
+      const workerV = (window.MA_ASSET_V && window.MA_ASSET_V.worker)
+        || "pyodide-20260624";
+      preflightWorker = new Worker("preflight_pyodide_worker.js?v="
+        + encodeURIComponent(workerV));
       preflightWorkerReady = (async () => {
         const r = await fetch(`${API}/preflight/pysrc`);
         if (!r.ok) throw new Error("pysrc " + r.status);
@@ -6751,6 +7578,7 @@ createApp({
             pyodideIndexURL: PYODIDE_INDEX_URL,
             postprocessSrc: src.postprocess,
             coreSrc: src.core,
+            swapCostSrc: src.swap_cost || "",
           });
         });
       })();
@@ -6776,7 +7604,9 @@ createApp({
             return;
           }
           if ((type === "analyze" && msg.type === "analyze-done")
-              || (type === "rewrite" && msg.type === "rewrite-done")) {
+              || (type === "rewrite" && msg.type === "rewrite-done")
+              || (type === "estimate" && msg.type === "estimate-done")
+              || (type === "estimate-all" && msg.type === "estimate-all-done")) {
             worker.removeEventListener("message", onMsg);
             resolve(msg);
           }
@@ -6862,6 +7692,7 @@ createApp({
         const j = await runPreflightWorker("analyze", {
           jobId: preflightJobId, file: f,
           liveSlots: live.live_slots, headCtx: live.head_ctx,
+          costParams: live.cost_params,
         }, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -6944,69 +7775,6 @@ createApp({
       };
       return map[stage] || stage || "";
     }
-    // Mirror of the backend _prepend_print_prefs for the in-browser path: the
-    // prefs prepend lives in main.py (the I/O shell), not the shared core, so
-    // the local worker path applies it here before upload.
-    function _prependPrintPrefs(text) {
-      if (!preflight.bedMesh && !preflight.camera && !preflight.flowCal) return text || "";
-      const line = "SET_PRINT_PREFERENCES BED_LEVEL=" + (preflight.bedMesh ? 1 : 0)
-        + " FLOW_CALIBRATE=" + (preflight.flowCal ? 1 : 0)
-        + " TIME_LAPSE_CAMERA=" + (preflight.camera ? 1 : 0)
-        + " FORCE=1";
-      let body = (text || "").replace(
-        /^(\s*SET_PRINT_PREFERENCES\b.*)$/gim, "; multiACE disabled: $1");
-      if (preflight.flowCal) body = _relocateFlowCal(body);
-      return "; multiACE preflight: print preferences\n" + line + "\n" + body;
-    }
-    // Mirror of main.py _flow_cal_block: comment out the slicer's
-    // SM_PRINT_FLOW_CALIBRATE lines (they sit before the auto-load block, heads
-    // still empty) and re-emit one "T<h> A0 + FLOW_CALIBRATE" pair per physical
-    // head the processed file prints with, right behind the auto-load block,
-    // ending with the start gcode's own tool re-selected. The bare pair instead
-    // of the stock wrapper: the wrapper skips heads stock believes unused, and
-    // stock derives that from the slicer header's per-logical-T grams, which no
-    // longer matches the physical heads after our remap. No auto-load block
-    // (nothing to anchor on) -> file unchanged = stock placement.
-    function _relocateFlowCal(text) {
-      const lines = (text || "").split("\n");
-      const tRe = /^\s*T(\d+)\s*(?:;.*)?$/;
-      let endIdx = -1, initial = null;
-      const heads = new Set();
-      for (let i = 0; i < lines.length; i++) {
-        const m = tRe.exec(lines[i]);
-        if (m) {
-          const h = parseInt(m[1], 10);
-          if (h >= 0 && h <= 3) {
-            heads.add(h);
-            if (endIdx < 0) initial = h;
-          }
-          continue;
-        }
-        if (endIdx < 0 && /^\s*;\s*multiACE auto-load: end\b/.test(lines[i])) endIdx = i;
-      }
-      if (endIdx < 0 || heads.size === 0) return text || "";
-      if (initial === null) initial = Math.min(...heads);
-      const block = ["; multiACE preflight: flow calibration (moved behind the auto-load, heads loaded)"];
-      // Start tool LAST: the block ends with the head the start line needs
-      // already in the gripper, so the closing re-select is a no-op instead
-      // of one more tool change.
-      const order = [...heads].filter(h => h !== initial).sort((a, b) => a - b);
-      if (heads.has(initial)) order.push(initial);
-      for (const h of order) {
-        block.push("T" + h + " A0");
-        block.push("FLOW_CALIBRATE EXTRUDER=" + h);
-      }
-      block.push("T" + initial);
-      block.push("; multiACE preflight: flow calibration end");
-      const out = [];
-      for (let i = 0; i < lines.length; i++) {
-        let l = lines[i];
-        if (/^\s*SM_PRINT_FLOW_CALIBRATE\b/i.test(l)) l = "; multiACE moved: " + l.replace(/^\s+/, "");
-        out.push(l);
-        if (i === endIdx) out.push(...block);
-      }
-      return out.join("\n");
-    }
     // New design: the plans become comparison cards; one is selected, only
     // its table shows and a single footer button prints it. Default is the
     // first plan (as loaded), the same one the classic view lists first.
@@ -7032,6 +7800,10 @@ createApp({
     function pfPlanFlush(p) {
       return preflight.report && preflight.report.head_mode ? headPlanFlushG(p) : null;
     }
+    // Background swaps of a head-mode plan (bg_ok / unloads), null without.
+    function pfPlanBg(p) {
+      return preflight.report && preflight.report.head_mode ? headPlanBg(p) : null;
+    }
     function pfSelected() {
       const list = pfPlanList();
       return list.includes(pfPlanSel.value) ? pfPlanSel.value : (list[0] || null);
@@ -7044,6 +7816,76 @@ createApp({
       for (const p of list) if (pfPlanSwaps(p) < pfPlanSwaps(best)) best = p;
       return best === list[0] ? null : best;
     }
+    // ---- estimate card ----------------------------------------------------
+    // Every number is a model estimate (never measured). A plan's estimate
+    // comes with the report; after a mapping edit the browser worker
+    // recomputes it for the plan being edited (pfEstLive), without a re-parse.
+    const pfEstLive = reactive({});
+    let pfEstTimer = null;
+    let pfEstSeq = 0;
+    function pfEst(p) {
+      const live = pfEstLive[p];
+      if (live && live.estimate) return live.estimate;
+      const pl = preflight.report && preflight.report.plans && preflight.report.plans[p];
+      return (pl && pl.estimate) || null;
+    }
+    function pfTimeline(p) {
+      const live = pfEstLive[p];
+      if (live && live.timeline) return live.timeline;
+      const pl = preflight.report && preflight.report.plans && preflight.report.plans[p];
+      return (pl && pl.timeline) || [];
+    }
+    function pfEstDelta(e) {
+      return (e && e.added_s !== null && e.added_s !== undefined) ? "+" + fmtDuration(e.added_s) : "";
+    }
+    // Per-kind share of the added time, for the timeline strip.
+    function pfTimelineSegs(p) {
+      const evs = pfTimeline(p).filter(ev => ev.kind !== "first_load" && Number(ev.seconds) > 0);
+      const total = evs.reduce((a, ev) => a + (Number(ev.seconds) || 0), 0) || 1;
+      return evs.map((ev, i) => ({
+        key: i, kind: ev.kind, t: ev.t,
+        pct: Math.max(0.4, 100 * (Number(ev.seconds) || 0) / total),
+        tip: "T" + ev.t + " - " + swapKindLabel(ev.kind)
+             + " - " + fmtDuration(ev.seconds)
+             + (ev.purge_mm ? " - " + Math.round(ev.purge_mm) + " mm" : ""),
+      }));
+    }
+    function pfEstCounts(e) {
+      const parts = [];
+      if (e.inline_swaps)  parts.push(swapKindLabel("cross_ace_inline") + " x " + e.inline_swaps);
+      if (e.bg_swaps)      parts.push(swapKindLabel("cross_ace_bg") + " x " + e.bg_swaps);
+      if (e.head_changes)  parts.push(swapKindLabel("head_change") + " x " + e.head_changes);
+      return parts.join(" · ");
+    }
+    // Live recompute after a mapping/target edit. Only the in-browser path
+    // can do it (the server has no endpoint for it); otherwise the numbers
+    // keep showing the analysed assignment, flagged stale.
+    const pfEstStale = ref(false);
+    function scheduleEstimate(plan) {
+      if (!preflight.local || !preflightJobId) return;
+      pfEstStale.value = true;
+      clearTimeout(pfEstTimer);
+      pfEstTimer = setTimeout(async () => {
+        const seq = ++pfEstSeq;
+        const payload = {jobId: preflightJobId, plan};
+        if (plan === "slicer") {
+          payload.mapping = _slicerEffectiveMapping();
+        } else {
+          payload.targetIds = _headEffectiveAssignment();
+          payload.copyIds = headCopiesEffective();
+        }
+        try {
+          const j = await runPreflightWorker("estimate", payload);
+          if (seq !== pfEstSeq) return;
+          if (j.result) pfEstLive[plan] = j.result;
+          pfEstStale.value = false;
+        } catch (_) { /* keep the analysed numbers */ }
+      }, 200);
+    }
+    watch(() => preflight.report, () => {
+      for (const k of Object.keys(pfEstLive)) delete pfEstLive[k];
+      pfEstStale.value = false;
+    });
     function pfPlanTitle(p) {
       return t(preflight.report && preflight.report.head_mode
                ? "ui.preflight.head_plan_" + p : "ui.preflight.plan_" + p);
@@ -7103,6 +7945,11 @@ createApp({
         const live = await loadLiveSlotsForPreflight();
         payload.liveSlots = live.live_slots;
         payload.headCtx   = live.head_ctx;
+        // The worker writes the print-preference line (and moves the flow
+        // calibration) with the same preflight_core pass the printer uses.
+        payload.printPrefs = {bedMesh: !!preflight.bedMesh,
+                              camera: !!preflight.camera,
+                              flowCal: !!preflight.flowCal};
         const j = await runPreflightWorker("rewrite", payload, msg => {
           preflight.progress = {
             percent: Number(msg.percent || 0),
@@ -7112,9 +7959,7 @@ createApp({
         const fd = new FormData();
         fd.append("root", "gcodes");
         fd.append("print", "true");
-        fd.append("file",
-          new Blob([_prependPrintPrefs(j.text)], {type: "application/octet-stream"}),
-          rep.filename || preflightFile.name);
+        fd.append("file", j.blob, rep.filename || preflightFile.name);
         const r = await fetch("/server/files/upload", {method: "POST", body: fd});
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
@@ -7821,7 +8666,7 @@ createApp({
     // =================================================================
     const history = reactive({
       loaded: false, busy: false, error: "", jobs: [], detail: null,
-      reprinting: "", stats: [], minSamples: 5,
+      reprinting: "", stats: [], minSamples: 5, info: null,
     });
     async function loadHistory() {
       history.busy = true;
@@ -7863,16 +8708,25 @@ createApp({
       const key = historyRowKey(row);
       history.detail = history.detail === key ? null : key;
     }
-    function historyColors(row) {
+    // A head's entry is one slot (older records) or a list of every slot that
+    // fed it during the print; both come out as a list.
+    function historyLoadout(row) {
       const asn = (row && row.multiace && row.multiace.assignment) || {};
-      return Object.keys(asn).map(h => ({
-        head: h, ace: asn[h].ace_index, slot: asn[h].slot,
-        color: asn[h].color ? ("#" + String(asn[h].color).replace(/^#/, ""))
-                            : "#666",
-      }));
+      return Object.keys(asn).sort((a, b) => Number(a) - Number(b)).map(h => {
+        const v = asn[h];
+        return {head: h, slots: (Array.isArray(v) ? v : [v]).filter(Boolean).map(e => ({
+          ace: e.ace_index, slot: e.slot,
+          color: e.color ? ("#" + String(e.color).replace(/^#/, "")) : "#666",
+        }))};
+      });
+    }
+    function historyColors(row) {
+      return historyLoadout(row).flatMap(l => l.slots.map((s, i) => ({
+        head: l.head + "-" + i, th: l.head, ace: s.ace, slot: s.slot, color: s.color,
+      })));
     }
     function fmtDuration(sec) {
-      if (!sec || sec < 0) return "–";
+      if (!sec || sec < 0) return "-";
       if (sec < 120) return `${Math.round(sec)} s`;
       const m = Math.round(sec / 60);
       return m < 60 ? `${m} min`
@@ -7880,16 +8734,61 @@ createApp({
     }
     // Reprint: start the file exactly as it already sits on the printer, with
     // no preflight and no rewrite. The swaps baked in from its first run
-    // still apply; a loadout that has moved on since is the user's call.
+    // still apply, so the user gets to compare the loadout of that run with
+    // what sits on the machine now before confirming.
+    function reprintLoadoutHtml(row) {
+      const loadout = historyLoadout(row).filter(l => l.slots.length);
+      if (!loadout.length) {
+        return `<p class="muted small">${escapeHtml(t("ui.history.reprint_no_record"))}</p>`;
+      }
+      const items = loadout.map(l => {
+        const slots = l.slots.map(e => {
+          const hasAce = e.ace != null && e.slot != null;
+          const where = hasAce
+            ? `MMU ${dispIdx(e.ace)} / ${dispIdx(e.slot)}`
+            : t("ui.history.reprint_feeder");
+          const sp = hasAce ? spoolForSlot(e.ace, e.slot) : spoolForHead(Number(l.head));
+          const now = sp ? t("ui.history.reprint_now", {spool: spoolTitle(sp)})
+                         : t("ui.history.reprint_now_empty");
+          return `<span class="swatch" style="background:${escapeHtml(e.color)}"></span> ` +
+                 `${escapeHtml(where)} <span class="muted small">(${escapeHtml(now)})</span>`;
+        });
+        return `<li><b>T${escapeHtml(dispIdx(Number(l.head)))}</b> · ${slots.join(" → ")}</li>`;
+      });
+      return `<ul class="reprint-loadout">${items.join("")}</ul>`;
+    }
     function reprintJob(row) {
       if (!row || !row.filename || history.reprinting) return;
       confirm({
         title: t("ui.history.reprint_title"),
-        message: t("ui.history.reprint_msg", {name: row.filename}),
+        message: `<p><b>${escapeHtml(row.filename)}</b></p>` +
+                 `<p>${escapeHtml(t("ui.history.reprint_msg"))}</p>` +
+                 reprintLoadoutHtml(row) +
+                 `<p class="muted small">${escapeHtml(t("ui.history.reprint_note"))}</p>` +
+                 `<p>${escapeHtml(t("ui.history.reprint_confirm_q"))}</p>`,
         okLabel: t("ui.history.reprint_ok"),
         onOk: () => doReprint(row),
       });
     }
+    // Column header "i" button: a banner next to the header. Click toggles
+    // it (hover tooltips do not exist on touch); a click elsewhere, Escape or
+    // scrolling closes it. Fixed-position so the table's scroll box cannot
+    // clip it.
+    function historyColumnInfo(col, ev) {
+      if (history.info && history.info.col === col) { history.info = null; return; }
+      const r = ev.currentTarget.getBoundingClientRect();
+      const w = 260;
+      history.info = {
+        col,
+        left: Math.max(8, Math.min(r.left, window.innerWidth - w - 8)),
+        top: r.bottom + 6,
+      };
+    }
+    const closeHistoryInfo = () => { history.info = null; };
+    document.addEventListener("click", closeHistoryInfo);
+    const historyInfoKeydown = (e) => { if (e.key === "Escape") closeHistoryInfo(); };
+    document.addEventListener("keydown", historyInfoKeydown);
+    window.addEventListener("scroll", closeHistoryInfo, true);
     async function doReprint(row) {
       history.reprinting = historyRowKey(row);
       history.error = "";
@@ -7912,6 +8811,9 @@ createApp({
     if (tab.value === "history") loadHistory();
 
     onUnmounted(() => {
+      document.removeEventListener("click", closeHistoryInfo);
+      document.removeEventListener("keydown", historyInfoKeydown);
+      window.removeEventListener("scroll", closeHistoryInfo, true);
       clearTimeout(wsReconnectTimer);
       clearInterval(screenTimer);
       try { ws?.close(); } catch (_) {}
@@ -7921,7 +8823,7 @@ createApp({
     });
     return {
       history, loadHistory, openHistoryDetail, historyRowKey, historyColors,
-      fmtDuration, reprintJob, swapKindLabel,
+      fmtDuration, reprintJob, historyColumnInfo, swapKindLabel,
       subText,
       sourceLabel,
       tab, version, printerName, printerFw, connClass, connText, screenAvailable,
@@ -7929,28 +8831,44 @@ createApp({
       calibrationUi, connectedCalibrationAces, calibrationSelectedAce,
       calibrationSelectedSlot,
       calibrationSelectedToolhead, calibrationMoving, calibrationRouteLocked,
-      calibrationVerifyMoving, calibrationRouteKnown, calibrationRouteAnchors,
-      calibrationVerifyBlockedReason, calibrationTabStatus, CALIBRATION_TAB,
+      calibrationVerifyMoving, calibrationVerifyActive, calibrationRouteKnown,
+      calibrationRouteAnchors, calibrationRouteOccupied,
+      calibrationVerifyBlockedReason, calibrationStartBlockedReason,
+      calibrationTabStatus, CALIBRATION_TAB, ORCA_SECTION,
+      calibrationStatus, calibrationRecovery, calibrationMeasureStep,
+      calibrationVerifyStep, calibrationResultCase, calibrationNothingToSave,
+      calibrationVerifyOutsideTolerance,
+      calibrationOwnValueSlots, calibrationSlotBadge,
       calibrationTipPositionMm, calibrationTipSegment,
       calibrationTipSegmentPercent, calibrationTipLabel,
+      calibrationHubMm, calibrationRouteLengthMm, calibrationRouteGrid,
       calibrationSelectedHeadSensorKnown, calibrationSelectedHeadClear,
       calibrationCanPrepare,
       calibrationCanStart, calibrationCanVerifyConfigured, calibrationProposed,
+      calibrationTipEstimated,
       calibrationSetPanel, calibrationContinueRoute,
       calibrationBeginRecalibration, calibrationKeepSaved,
-      calibrationSetScope, calibrationRouteChanged, calibrationPrepare,
-      calibrationConfirmBaseline,
-      calibrationCancelPrepare, calibrationConfirmRoute,
+      calibrationSetScope, calibrationPrepare,
+      calibrationCancelPrepare,
       calibrationSelectAce, calibrationSelectSlot, calibrationSelectHead,
-      calibrationStart,
+      calibrationStart, calibrationMarkAndReturn, calibrationUndoMark,
+      calibrationDrag, calibrationTipNowMm, calibrationTrackHubMm,
+      calibrationTrackPercent, calibrationDragLabel, calibrationDragStart,
+      calibrationDragMove, calibrationDragEnd, calibrationDragCancel, calibrationJog,
+      calibrationNextRoute,
+      calibrationClear, calibrationSavedKind, calibrationSavedLevels,
+      calibrationClearPlan, calibrationClearBlocked, calibrationClearSession,
+      calibrationClearLead, calibrationClearOpen, calibrationClearConfirm,
+      calibrationClearUndo,
       calibrationVerifyConfigured, calibrationAction, calibrationApply,
+      calibrationVerifyValues,
       panelMode, panelAce, panelAceIdx, panelSlotHead, panelPages, panelPage, panelPageId, panelFeederHeads, setPanelPage,
       panelSlotHeadLoaded, panelSlotActive, panelSlotLabel, panelSlotOp,
       panelMini, fullUiHref, uiTheme, uiThemeChoice, uiLight, setUiTheme, spoolPct, gaugeColor, thSettingsOpen, slotGaugePct, slotGaugeLabel, headGaugePct, headGaugeText,
-      slotTitle, switchAce, loadSlot, slotIsEmpty, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, cancelUnloadAll, anyUnloading, setHeadManual, setHeadFeeder, setHeadAce, headToggle, headSelect, aceOptionsForHead, headAceOf, aceProtoTitle, aceCfwTitle, visibleAces, openHeadPicker, isToolheadOccupied, slotHeadHasNoAce, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setPaSync, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
+      slotTitle, switchAce, loadSlot, slotIsEmpty, aceFlashEngine, aceHasDryer, aceHasDecoder, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, cancelUnloadAll, anyUnloading, setHeadManual, setHeadFeeder, setHeadAce, headToggle, headSelect, aceOptionsForHead, headAceOf, aceProtoTitle, unitDriverLabel, assignUnit, forgetUnit, renameUnit, locateUnit, devNameValue, devNameInput, devNameCommit, deviceStatus, deviceDriver, driverOnlyActive, driverToggle, driverNote, driversRestartNeeded, perAceCount, aceCfwTitle, visibleAces, unwiredAces, gridAces, openHeadPicker, isToolheadOccupied, slotHeadHasNoAce, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setPaSync, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
-      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, knownColorChips, pickerHexInput, pickerGaugePct, pickerSubline, sameSwatch, pickerTouch, pickerRfidSku, pickerTagFormat, pickerCodeKind, pickerUidExtra, tagFormatLabel, pickerHeadTag, pickerHeadKind, spoolDdOpen, spoolDdPick, spoolDdCurrent, headRfidBusy, headRfidNote, readHeadRfid,
+      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, orcaProfile, virtualTools, virtualToolGroups, toolTargetOptions, setToolMapTarget, colorName, setToolMap, resetToolMap, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, knownColorChips, pickerHexInput, pickerGaugePct, pickerSubline, sameSwatch, pickerTouch, pickerRfidSku, pickerTagFormat, pickerCodeKind, pickerUidExtra, tagFormatLabel, pickerHeadTag, pickerHeadKind, spoolDdOpen, spoolDdPick, spoolDdCurrent, headRfidBusy, headRfidNote, readHeadRfid,
       addFluiddCamera, fluiddCamBusy, fluiddCamMsg,
       spoolForm, spoolImportMode, spoolFileInput,
       spoolMaterials, spoolVendors, spoolSubtypes,
@@ -7977,7 +8895,8 @@ createApp({
       isPrinting,
       dryerCfg, dryStart, dryStop, dryPanelOpen, toggleDryPanel, aceDrying,
       snapshots, selectedSnapshot, snapshotPreview, saveSnapshot, loadSnapshot, deleteSnapshot,
-      config, configLog, configLoadError, showRawConfig, configForm, rebootNeeded,
+      config, configLog, configLoadError, showRawConfig, toggleRawConfig, configForm, rebootNeeded,
+      printerRebootNeeded, restartNotice, restartOffered, restartNow, notifWantsReboot,
       aceHeadsRightSide,
       loadConfig, saveConfigForm, saveConfigRaw, setMode,
       tipform, loadTipform, tipformAddRow, tipformRemoveRow, saveTipform, tipformRestartPending, tipformNameOptions,
@@ -7993,7 +8912,7 @@ createApp({
       headTargets, headTargetOptions, headEffectiveTargetId, headTargetLabel,
       headTargetColor, chipBg, headTargetLabelById, onHeadTargetChange, headSwapsDisplay,
       hmDropOpen, hmDdToggle, hmDdClose, hmDdPick,
-      pfPlanSel, pfPlanList, pfPlanFeasible, pfPlanSwaps, pfPlanFlush, pfSelected, pfRecommended, pfPlanTitle, pfGoLabel, pfPrintSelected,
+      pfPlanSel, pfEst, pfTimelineSegs, pfEstCounts, pfEstDelta, pfEstStale, pfPlanList, pfPlanFeasible, pfPlanSwaps, pfPlanFlush, pfPlanBg, pfSelected, pfRecommended, pfPlanTitle, pfGoLabel, pfPrintSelected,
       headFeasible, headPlanFeasible, headPlanSwaps, headPlanBg, headPlanFlushG, headPlanBgLabel, headSlicerHex,
       headSlicerMat, headProposalLabel,
       headMaxCopies, headCopiesEffective, headCopyPlan, headCopyList, copySlotLabel, setPreflightCopies,
