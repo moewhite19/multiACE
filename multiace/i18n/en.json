@@ -67,6 +67,8 @@
       "control": "Control",
       "print_hub": "Print Hub",
       "history": "History",
+      "favorites": "Favorites",
+      "queue": "Queue",
       "dashboard": "Dashboard",
       "dry": "Dry",
       "config": "Config",
@@ -414,7 +416,12 @@
       "driver_pending_off": "off after restart",
       "driver_restart_hint": "A driver was switched - restart the firmware to apply it.",
       "dev_name_placeholder": "name",
-      "acefw_none": "No unit connected that can be flashed."
+      "acefw_none": "No unit connected that can be flashed.",
+      "purge_scale": "Purge scale (%)",
+      "purge_floor": "Purge minimum (mm, 0 = off)",
+      "purge_cap": "Purge maximum (mm, 0 = off)",
+      "purge_policy_hint": "Rescales every swap purge length (the per-pair stamp, the fixed length or the stock 80 mm) by the percent, then keeps it between the minimum and maximum (0 = no limit). Never below 40 mm. Tune the purge without re-slicing. Applies live, no restart.",
+      "purge_policy_range": "Value must be between {min} and {max}."
     },
     "dialog": {
       "load_already_loaded_title": "T{slot} is already loaded",
@@ -624,7 +631,8 @@
       "est_colour": "Colour",
       "est_print": "Print",
       "est_sum": "Total",
-      "est_assumptions": "Assumptions"
+      "est_assumptions": "Assumptions",
+      "thumbnail_alt": "Slicer preview"
     },
     "queue": {
       "clear_errors": "Clear errors",
@@ -1015,6 +1023,24 @@
       "sending": "sending request…",
       "starting": "starting"
     },
+    "queue": {
+      "title": "Print queue",
+      "hint": "Files already prepared for the loadout of that moment. Launching starts that single file, after the slots it uses are checked again. Nothing starts on its own.",
+      "empty": "Nothing queued. Use \"Add to queue\" in the preflight dialog to prepare a file now and print it later.",
+      "add": "Add to queue",
+      "add_hint": "Prepare the file now and keep it in the queue instead of printing it.",
+      "staged": "Queued: {name}",
+      "staged_at": "Prepared {time}",
+      "ready": "Loadout matches - ready to launch.",
+      "changed": "The loadout changed since this file was prepared. Restore these spools or prepare the file again:",
+      "unknown": "The printer could not be read, so the loadout is not checked yet.",
+      "slot_empty": "empty",
+      "launch": "Launch",
+      "remove": "Remove",
+      "remove_title": "Remove from queue?",
+      "remove_msg": "The prepared file is deleted from the printer.",
+      "busy": "A print is running."
+    },
     "history": {
       "title": "Print history",
       "empty": "No prints recorded yet.",
@@ -1050,6 +1076,13 @@
       "filament_info": "Filament length consumed, in metres.",
       "result_info": "How the print ended (completed, cancelled, error ...).",
       "reprint_ok": "Reprint",
+      "favorites_title": "Favorites",
+      "favorites_empty": "No favorites yet. Star a print in the History tab to keep it here.",
+      "favorite_add": "Add to favorites",
+      "favorite_remove": "Remove from favorites",
+      "favorite_gone": "No longer in the print history",
+      "favorite_gone_hint": "This print is not in the history list anymore. The file can still be reprinted if it is on the printer.",
+      "favorite_error": "Could not save the favorite",
       "reprint_started": "Reprint started: {name}",
       "stats_title": "Measured swap time",
       "stats_hint": "Median over recorded prints. A kind counts as calibrated once it has {n} samples.",

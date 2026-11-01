@@ -68,6 +68,8 @@
       "control": "控制",
       "print_hub": "打印中心",
       "history": "历史",
+      "favorites": "收藏",
+      "queue": "队列",
       "dashboard": "控制台",
       "dry": "烘干",
       "config": "配置",
@@ -199,7 +201,12 @@
       "debug_reboot_failed": "重启失败",
       "dev_name_placeholder": "名称",
       "acefw_none": "没有可刷写的设备连接。",
-      "dev_locate": "定位"
+      "dev_locate": "定位",
+      "purge_scale": "冲洗比例 (%)",
+      "purge_floor": "冲洗下限 (mm, 0 = 关)",
+      "purge_cap": "冲洗上限 (mm, 0 = 关)",
+      "purge_policy_hint": "按百分比缩放每次换料的冲洗长度（配对标记、固定长度或默认 80 mm），再限制在下限和上限之间（0 = 不限制）。不会低于 40 mm。无需重新切片即可调整冲洗。立即生效，无需重启。",
+      "purge_policy_range": "数值必须在 {min} 到 {max} 之间。"
     },
     "dialog": {
       "load_already_loaded_title": "T{slot} 已经进料",
@@ -304,12 +311,31 @@
       "est_colour": "颜色",
       "est_print": "打印",
       "est_sum": "合计",
-      "est_assumptions": "假设"
+      "est_assumptions": "假设",
+      "thumbnail_alt": "切片预览"
     },
     "queue": {
       "send_all_tooltip": "将所有排队命令发送到打印机（之后可以关闭界面）",
       "send_all_done": "已向打印机发送 {count} 条命令",
       "send_all_failed": "发送失败"
+    },
+    "queue": {
+      "title": "打印队列",
+      "hint": "已按当时的耗材配置准备好的文件。启动只会打印这一个文件,并会再次检查它用到的槽位。不会自动开始。",
+      "empty": "队列为空。在预检对话框中点击“加入队列”,即可先准备文件,稍后再打印。",
+      "add": "加入队列",
+      "add_hint": "现在准备好文件并保留在队列中,而不是立即打印。",
+      "staged": "已加入队列:{name}",
+      "staged_at": "准备于 {time}",
+      "ready": "耗材配置一致,可以启动。",
+      "changed": "自准备此文件以来耗材配置已改变。请恢复这些料盘,或重新准备文件:",
+      "unknown": "无法读取打印机,尚未检查耗材配置。",
+      "slot_empty": "空",
+      "launch": "启动",
+      "remove": "移除",
+      "remove_title": "从队列中移除?",
+      "remove_msg": "已准备的文件将从打印机上删除。",
+      "busy": "正在打印。"
     },
     "history": {
       "title": "打印历史",
@@ -346,6 +372,13 @@
       "filament_info": "消耗的耗材长度，单位为米。",
       "result_info": "打印的结束状态（完成、取消、出错等）。",
       "reprint_ok": "重新打印",
+      "favorites_title": "收藏",
+      "favorites_empty": "还没有收藏。在历史记录中点击星标即可保存到这里。",
+      "favorite_add": "加入收藏",
+      "favorite_remove": "取消收藏",
+      "favorite_gone": "已不在打印历史中",
+      "favorite_gone_hint": "该打印已不在历史列表中。如果文件仍在打印机上,仍可重新打印。",
+      "favorite_error": "无法保存收藏",
       "reprint_started": "已开始重新打印：{name}",
       "stats_title": "实测换料时间",
       "stats_hint": "已记录打印的中位数。某类换料达到 {n} 个样本后视为已校准。",

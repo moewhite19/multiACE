@@ -12,7 +12,7 @@ createApp({
     const CALIBRATION_TAB = true;
     // Orca profile section in Config (profile download + tool map).
     const ORCA_SECTION = true;
-    const _validTabs = new Set(["dashboard", "control", "history", "spools", "config", "devices"]);
+    const _validTabs = new Set(["dashboard", "control", "history", "queue", "favorites", "spools", "config", "devices"]);
     if (CALIBRATION_TAB) _validTabs.add("calibration");
     const _storedTab = localStorage.getItem("multiace.tab");
     const _isPluginTab = (s) => typeof s === "string" && s.startsWith("plugin:");
@@ -65,6 +65,10 @@ createApp({
       items.push({key: "control", group: "printhub", label: t("ui.tabs.control")});
       items.push({key: "history", group: "printhub",
                   label: t("ui.tabs.history")});
+      items.push({key: "queue", group: "printhub",
+                  label: t("ui.tabs.queue")});
+      items.push({key: "favorites", group: "printhub",
+                  label: t("ui.tabs.favorites")});
       items.push({key: "spools", label: t("ui.tabs.spools")});
       // Config children: Settings (the tab key stays "config"), Devices
       // (unit places, names, firmware flash) and Calibration (bowden path).
@@ -272,6 +276,9 @@ createApp({
       // Default TRUE, like the engine: the checkbox must not read as off
       // for the instant before the first state arrives.
       purge_matrix: true,
+      purge_scale: 100,
+      purge_floor: 0,
+      purge_cap: 0,
       // Default TRUE, like the engine, for the pre-first-state instant.
       pa_sync: true,
       rc522: false,
@@ -451,6 +458,9 @@ createApp({
       state.quad_first = !!s.quad_first;
       state.purge_matrix = (s.purge_matrix === undefined)
         ? true : !!s.purge_matrix;
+      state.purge_scale = Number(s.purge_scale || 100);
+      state.purge_floor = Number(s.purge_floor || 0);
+      state.purge_cap = Number(s.purge_cap || 0);
       state.pa_sync = (s.pa_sync === undefined) ? true : !!s.pa_sync;
       // RC522 tag read/write available - gates the picker's write button.
       state.rc522 = !!s.rc522;
@@ -4486,6 +4496,50 @@ createApp({
       }
       await reloadState();
     }
+    // Purge scale (percent) and floor/cap (mm, 0 = off): the engine writes
+    // the ace.cfg line itself and applies it live, like the matrix toggle.
+    // The inputs are bound to polled printer state, so a refresh landing
+    // mid-edit would overwrite what is being typed. Same edit buffer as the
+    // auto-dry fields: while a field is being edited the buffer wins, and it
+    // is released only after the state refresh that follows the send.
+    const purgePolicyEdit = reactive({});
+    function purgePolicyValue(arg, live) {
+      return (arg in purgePolicyEdit) ? purgePolicyEdit[arg] : live;
+    }
+    function purgePolicyInput(arg, ev) {
+      purgePolicyEdit[arg] = ev.target.value;
+    }
+    async function setPurgePolicy(arg, value) {
+      purgePolicyEdit[arg] = value;
+      try {
+        await _sendPurgePolicy(arg, value);
+      } finally {
+        delete purgePolicyEdit[arg];
+      }
+    }
+    async function _sendPurgePolicy(arg, value) {
+      const lim = {SCALE: [25, 200], FLOOR: [0, 200], CAP: [0, 200]}[arg];
+      const v = Math.round(Number(value));
+      if (!lim || isNaN(v) || v < lim[0] || v > lim[1]) {
+        setMacroLog(t("ui.config.purge_policy_range", {min: lim[0], max: lim[1]}));
+        await reloadState();
+        return;
+      }
+      try {
+        const r = await fetch(`${API}/macro`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({name: "ACE_SET_PURGE", args: {[arg]: v}}),
+        });
+        const j = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(j?.detail || `HTTP ${r.status}`);
+        const res = String(j?.result || "");
+        if (/WARNING|failed/i.test(res)) setMacroLog(res);
+      } catch (e) {
+        setMacroLog(String(e?.message || e));
+      }
+      await reloadState();
+    }
     async function setHeadAce(idx, ace) {
       await headSet("head-ace", {head: idx, ace: Number(ace)},
                     t("ui.dashboard.head_ace"));
@@ -7897,22 +7951,24 @@ createApp({
       return t(preflight.report.head_mode ? "ui.preflight.head_go_" + p
                                          : "ui.preflight.go_" + p);
     }
-    function pfPrintSelected() {
+    function pfPrintSelected(queue) {
       const p = pfSelected();
       if (!p || !pfPlanFeasible(p)) return;
-      if (preflight.report.head_mode) startPreflightPrint("head", p);
-      else startPreflightPrint(p);
+      if (preflight.report.head_mode) startPreflightPrint("head", p, !!queue);
+      else startPreflightPrint(p, undefined, !!queue);
     }
-    async function startPreflightPrint(mode, headPlan) {
+    // queue=true stages the rewritten file in the print queue instead of
+    // starting it (see the Queue tab).
+    async function startPreflightPrint(mode, headPlan, queue) {
       if (preflight.busy || preflight.sending) return;
       const rep = preflight.report;
       if (!rep) return;
-      if (rep.local) { await _startLocalPreflightPrint(mode, headPlan); return; }
-      await _startServerPreflightPrint(mode, headPlan);
+      if (rep.local) { await _startLocalPreflightPrint(mode, headPlan, queue); return; }
+      await _startServerPreflightPrint(mode, headPlan, queue);
     }
 
     // Browser path: rewrite in the worker, upload straight to Moonraker.
-    async function _startLocalPreflightPrint(mode, headPlan) {
+    async function _startLocalPreflightPrint(mode, headPlan, queue) {
       const rep = preflight.report;
       if (!rep || !preflightFile || !preflightJobId) return;
       preflight.sending = (mode === "head") ? (headPlan || "loadout") : mode;
@@ -7957,9 +8013,14 @@ createApp({
         });
         preflight.progress = {percent: 90, stage: "upload", running: true};
         const fd = new FormData();
+        const baseName = rep.filename || preflightFile.name;
+        const stagedName = queue
+          ? Math.random().toString(16).slice(2, 14).padEnd(12, "0") + "_" + baseName
+          : baseName;
         fd.append("root", "gcodes");
-        fd.append("print", "true");
-        fd.append("file", j.blob, rep.filename || preflightFile.name);
+        if (queue) fd.append("path", QUEUE_DIR);
+        fd.append("print", queue ? "false" : "true");
+        fd.append("file", j.blob, stagedName);
         const r = await fetch("/server/files/upload", {method: "POST", body: fd});
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
@@ -7967,11 +8028,31 @@ createApp({
             || `${r.status} ${r.statusText}`;
           throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
         }
+        if (queue) {
+          // The file is on the printer; the server records which slots it
+          // uses and what is in them now. If that fails the staged file is
+          // removed again rather than left behind unlisted.
+          const qr = await fetch(`${API}/queue`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({filename: baseName,
+                                  path: QUEUE_DIR + "/" + stagedName, mode,
+                                  used_slots: j.usedSlots || []}),
+          });
+          if (!qr.ok) {
+            const qj = await qr.json().catch(() => ({}));
+            try { await fetch(`/server/files/gcodes/${QUEUE_DIR}/${encodeURIComponent(stagedName)}`,
+                              {method: "DELETE"}); } catch (_) {}
+            throw new Error(qj.detail || `${qr.status} ${qr.statusText}`);
+          }
+          pq.loaded = false;
+        }
         preflight.progress = {percent: 100, stage: "done", running: true};
         const elapsed = Date.now() - startedAt;
         const wait = Math.max(0, MIN_VISIBLE_MS - elapsed);
         if (wait > 0) await new Promise(res => setTimeout(res, wait));
-        setMacroLog(t("ui.upload.started", {name: rep.filename || preflightFile.name}));
+        setMacroLog(queue ? t("ui.queue.staged", {name: baseName})
+                          : t("ui.upload.started", {name: baseName}));
         closePreflight();
       } catch (e) {
         preflight.error = e.message || String(e);
@@ -7981,7 +8062,7 @@ createApp({
       }
     }
 
-    async function _startServerPreflightPrint(mode, headPlan) {
+    async function _startServerPreflightPrint(mode, headPlan, queue) {
       const rep = preflight.report;
       if (!rep || !rep.token) return;
       // For head mode the button identity is the head plan (loadout/optimize/
@@ -7996,7 +8077,7 @@ createApp({
       try {
         const body = {token: rep.token, mode,
                       bed_mesh: !!preflight.bedMesh, camera: !!preflight.camera,
-                      flow_cal: !!preflight.flowCal};
+                      flow_cal: !!preflight.flowCal, queue: !!queue};
         if (mode === "slicer") {
           // Send the (possibly user-edited) slot assignment verbatim so the
           // print matches the preview exactly. Only entries differing from
@@ -8071,7 +8152,9 @@ createApp({
         if (wait > 0) {
           await new Promise(res => setTimeout(res, wait));
         }
-        setMacroLog(t("ui.upload.started", {name: rep.filename}));
+        if (queue) pq.loaded = false;
+        setMacroLog(queue ? t("ui.queue.staged", {name: rep.filename})
+                          : t("ui.upload.started", {name: rep.filename}));
         closePreflight();
       } catch (e) {
         preflight.error = e.message || String(e);
@@ -8667,6 +8750,7 @@ createApp({
     const history = reactive({
       loaded: false, busy: false, error: "", jobs: [], detail: null,
       reprinting: "", stats: [], minSamples: 5, info: null,
+      favorites: [], favLoaded: false, favBusy: false, favJobs: [],
     });
     async function loadHistory() {
       history.busy = true;
@@ -8807,8 +8891,180 @@ createApp({
         history.reprinting = "";
       }
     }
-    watch(tab, (v) => { if (v === "history" && !history.loaded) loadHistory(); });
-    if (tab.value === "history") loadHistory();
+    // Favorites. A star is stored on the printer (not in the browser), keyed
+    // by Moonraker's job id, or by the multiACE record id when Moonraker has
+    // none. Rows that carry neither (ambiguous matches) cannot be starred.
+    // Preview image of a print file, served by the backend from Moonraker's
+    // metadata scan (404 when the file has none - the <img> hides itself).
+    function thumbUrl(filename) {
+      return filename ? API + "/thumbnail?path=" + encodeURIComponent(filename) : "";
+    }
+    function hideBrokenThumb(ev) { ev.target.style.display = "none"; }
+
+    function favKey(row) {
+      if (!row) return "";
+      if (row.job_id) return "mr:" + row.job_id;
+      if (row.id) return "ma:" + row.id;
+      return "";
+    }
+    const favKeys = computed(() => new Set(history.favorites.map(f => f.key)));
+    function isFavorite(row) {
+      const k = favKey(row);
+      return !!k && favKeys.value.has(k);
+    }
+    async function loadFavorites() {
+      try {
+        const r = await fetch(`${API}/history/favorites`);
+        if (!r.ok) return;
+        const j = await r.json();
+        history.favorites = j.favorites || [];
+        history.favLoaded = true;
+      } catch (e) {}
+    }
+    async function toggleFavorite(row) {
+      const key = favKey(row);
+      if (!key || history.favBusy) return;
+      history.favBusy = true;
+      try {
+        const r = await fetch(`${API}/history/favorites`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({key, on: !favKeys.value.has(key),
+                                filename: row.filename || "",
+                                start_time: row.start_time || null}),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        history.favorites = j.favorites || [];
+      } catch (e) {
+        history.error = t("ui.history.favorite_error") + ": " + (e.message || e);
+      } finally {
+        history.favBusy = false;
+      }
+    }
+    // The favorites tab needs jobs older than the History table shows, so it
+    // fetches the full list itself. A star whose job is gone from that list
+    // stays as a card of its own (name and date) and can still be reprinted.
+    async function loadFavoritesTab() {
+      history.busy = true;
+      try {
+        await loadFavorites();
+        const r = await fetch(`${API}/history?limit=200`);
+        const j = await r.json().catch(() => ({}));
+        if (r.ok) history.favJobs = j.jobs || [];
+      } catch (e) {
+        history.error = e.message || String(e);
+      } finally {
+        history.busy = false;
+      }
+    }
+    const favoriteCards = computed(() => {
+      const byKey = new Map();
+      for (const row of history.favJobs) {
+        const k = favKey(row);
+        if (k) byKey.set(k, row);
+      }
+      return history.favorites.map(f => {
+        const row = byKey.get(f.key);
+        return row ? {key: f.key, gone: false, row}
+                   : {key: f.key, gone: true,
+                      row: {filename: f.filename, start_time: f.start_time,
+                            multiace: null}};
+      });
+    });
+    watch(tab, (v) => {
+      if (v === "history" && !history.loaded) loadHistory();
+      if (v === "history" && !history.favLoaded) loadFavorites();
+      if (v === "favorites") loadFavoritesTab();
+    });
+    if (tab.value === "history") { loadHistory(); loadFavorites(); }
+    if (tab.value === "favorites") loadFavoritesTab();
+    // =================================================================
+    // Print queue
+    //
+    // Files preflight already rewrote for the loadout of the moment, parked
+    // on the printer. Launching one starts that single file; the server
+    // checks the slots it uses again first. Not Moonraker's job queue.
+    // =================================================================
+    const QUEUE_DIR = "multiace_queue";
+    const pq = reactive({
+      loaded: false, busy: false, error: "", items: [], launching: "",
+      blocked: null,
+    });
+    async function loadQueue() {
+      pq.busy = true;
+      try {
+        const r = await fetch(`${API}/queue`);
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || `${r.status}`);
+        pq.items = j.queue || [];
+        pq.loaded = true;
+        pq.error = "";
+      } catch (e) {
+        pq.error = e.message || String(e);
+      } finally {
+        pq.busy = false;
+      }
+    }
+    function queueSlotLabel(sl) {
+      return `MMU ${dispIdx(sl.ace)} / ${dispIdx(sl.slot)}`;
+    }
+    function queueColor(c) {
+      const h = String(c || "").replace(/^#/, "");
+      return h ? "#" + h : "#666";
+    }
+    function queueChangeText(ch) {
+      const fmt = (x) => x ? `${x.material || "?"} #${x.color || "?"}` : t("ui.queue.slot_empty");
+      return `${queueSlotLabel(ch)}: ${fmt(ch.expected)} → ${fmt(ch.now)}`;
+    }
+    async function launchQueued(item) {
+      if (!item || pq.launching) return;
+      pq.launching = item.id;
+      pq.error = "";
+      pq.blocked = null;
+      try {
+        const r = await fetch(`${API}/queue/${encodeURIComponent(item.id)}/launch`,
+                              {method: "POST"});
+        const j = await r.json().catch(() => ({}));
+        if (r.status === 409 && j.detail && typeof j.detail === "object") {
+          pq.blocked = {id: item.id, message: j.detail.message,
+                                changes: j.detail.changes || []};
+          await loadQueue();
+          return;
+        }
+        if (!r.ok) throw new Error(
+          (j.detail && j.detail.message) || j.detail || `${r.status}`);
+        setMacroLog(t("ui.upload.started", {name: item.filename}));
+        await loadQueue();
+      } catch (e) {
+        pq.error = e.message || String(e);
+      } finally {
+        pq.launching = "";
+      }
+    }
+    function removeQueued(item) {
+      confirm({
+        title: t("ui.queue.remove_title"),
+        message: `<p><b>${escapeHtml(item.filename)}</b></p>` +
+                 `<p>${escapeHtml(t("ui.queue.remove_msg"))}</p>`,
+        okLabel: t("ui.queue.remove"),
+        onOk: async () => {
+          try {
+            const r = await fetch(`${API}/queue/${encodeURIComponent(item.id)}`,
+                                  {method: "DELETE"});
+            if (!r.ok) {
+              const j = await r.json().catch(() => ({}));
+              throw new Error(j.detail || `${r.status}`);
+            }
+          } catch (e) {
+            pq.error = e.message || String(e);
+          }
+          await loadQueue();
+        },
+      });
+    }
+    watch(tab, (v) => { if (v === "queue") loadQueue(); });
+    if (tab.value === "queue") loadQueue();
 
     onUnmounted(() => {
       document.removeEventListener("click", closeHistoryInfo);
@@ -8824,6 +9080,8 @@ createApp({
     return {
       history, loadHistory, openHistoryDetail, historyRowKey, historyColors,
       fmtDuration, reprintJob, historyColumnInfo, swapKindLabel,
+      thumbUrl, hideBrokenThumb, isFavorite, toggleFavorite, favKey, favoriteCards, loadFavoritesTab,
+      pq, loadQueue, launchQueued, removeQueued, queueSlotLabel, queueColor, queueChangeText,
       subText,
       sourceLabel,
       tab, version, printerName, printerFw, connClass, connText, screenAvailable,
@@ -8868,7 +9126,7 @@ createApp({
       slotTitle, switchAce, loadSlot, slotIsEmpty, aceFlashEngine, aceHasDryer, aceHasDecoder, loadFeederHead, slotLoadedInHead, loadAll, unloadHead, unloadAll, cancelUnloadAll, anyUnloading, setHeadManual, setHeadFeeder, setHeadAce, headToggle, headSelect, aceOptionsForHead, headAceOf, aceProtoTitle, unitDriverLabel, assignUnit, forgetUnit, renameUnit, locateUnit, devNameValue, devNameInput, devNameCommit, deviceStatus, deviceDriver, driverOnlyActive, driverToggle, driverNote, driversRestartNeeded, perAceCount, aceCfwTitle, visibleAces, unwiredAces, gridAces, openHeadPicker, isToolheadOccupied, slotHeadHasNoAce, needsReload, toolheadOps, bgEnabledFor, setBgHead, setPickupCleaning, setConfirmCommands, setPaSync, setAutoDry, autoDryValue, autoDryInput, autoDryCommit, autoDryPairInvalid, autoDryFieldError, autoDryEnable, autoDrySetMaster, autoDryMasters, spoolmanUrl, spoolmanBusy, spoolmanStatusText, saveSpoolmanUrl, setSpoolmanAuto, spoolmanSync,
       spoolmanConnected, spoolmanUrlSet, setSpoolMode, smQuery, smRows, smBusy, smOpen, smSearchDebounced, smAdopt,
       smPing, smPingInfo, spoolmanPing, spoolQuery, smPick, smPickTarget, smAdoptStaged,
-      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, orcaProfile, virtualTools, virtualToolGroups, toolTargetOptions, setToolMapTarget, colorName, setToolMap, resetToolMap, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, FILAMENT_SWATCHES, knownColors, knownColorChips, pickerHexInput, pickerGaugePct, pickerSubline, sameSwatch, pickerTouch, pickerRfidSku, pickerTagFormat, pickerCodeKind, pickerUidExtra, tagFormatLabel, pickerHeadTag, pickerHeadKind, spoolDdOpen, spoolDdPick, spoolDdCurrent, headRfidBusy, headRfidNote, readHeadRfid,
+      spoolBadgeCls, spoolBadgeLabel, headTileEmpty, orcaProfile, virtualTools, virtualToolGroups, toolTargetOptions, setToolMapTarget, colorName, setToolMap, resetToolMap, setAirprintDetection, setQuadReplenish, setQuadFirst, setPurgeMatrix, setPurgePolicy, purgePolicyValue, purgePolicyInput, FILAMENT_SWATCHES, knownColors, knownColorChips, pickerHexInput, pickerGaugePct, pickerSubline, sameSwatch, pickerTouch, pickerRfidSku, pickerTagFormat, pickerCodeKind, pickerUidExtra, tagFormatLabel, pickerHeadTag, pickerHeadKind, spoolDdOpen, spoolDdPick, spoolDdCurrent, headRfidBusy, headRfidNote, readHeadRfid,
       addFluiddCamera, fluiddCamBusy, fluiddCamMsg,
       spoolForm, spoolImportMode, spoolFileInput,
       spoolMaterials, spoolVendors, spoolSubtypes,

@@ -1306,6 +1306,11 @@ class AceBgSwap:
                                        for h in sorted(self._busy)))
         if getattr(ace, '_ace_mode', 'multi') != 'head':
             return _refuse('v0 requires head mode (1:1 MMU per head)')
+        _cut_for = getattr(ace, 'unload_cut_macro_for', None)
+        if _cut_for is not None and _cut_for(head):
+            return _refuse('head %d has a cutter (unload_cut_macro) - a '
+                           'parked head cannot reach it, the swap runs '
+                           'inline' % self._dh(head))
         if not ace.head_uses_ace(head):
             return _refuse('head %d is not MMU-driven' % self._dh(head))
         if getattr(ace, '_swap_in_progress', False):
@@ -1437,6 +1442,11 @@ class AceBgSwap:
                                        for h in sorted(self._busy)))
         if getattr(ace, '_ace_mode', 'multi') != 'head':
             return _refuse('requires head mode (1:1 MMU per head)')
+        _cut_for = getattr(ace, 'unload_cut_macro_for', None)
+        if _cut_for is not None and _cut_for(head):
+            return _refuse('head %d has a cutter (unload_cut_macro) - a '
+                           'parked head cannot reach it, the swap runs '
+                           'inline' % self._dh(head))
         if not ace.head_uses_ace(head):
             return _refuse('head %d is not MMU-driven' % self._dh(head))
         if getattr(ace, '_swap_in_progress', False):
@@ -2006,6 +2016,7 @@ class AceBgSwap:
             # (a V2 just BRAKES otherwise -> gear clicking).
             # After the pull the unwind completion is confirmed device-truth.
             reclaimed = 0.
+            net_move = 0.      # sum of every extruder move of the pull
             fwd_assist = False
             _fan_warned = False
             for tok in seq:
@@ -2067,6 +2078,7 @@ class AceBgSwap:
                     continue
                 dist, feedrate = float(tok[1]), float(tok[2])
                 speed = feedrate / 60.
+                net_move += dist
                 if dist < 0.:
                     ln = int(round(-dist))
                     if ln < 3:
@@ -2131,8 +2143,17 @@ class AceBgSwap:
                 self._ace_send(ace, ace_idx, {
                     'method': 'stop_feed_assist', 'params': {'index': slot}})
                 ace._feed_assist_per_ace[ace_idx] = -1
-            self._say('head %d: cold-pull done (%d mm confirmed reclaimed '
-                      'at MMU)' % (self._dh(head), int(reclaimed)))
+            # The unwinds only move the tip back as far as the pull does in
+            # net: the forward pushes (purge, pre-prime, table moves) took
+            # back part of it, and an unwind beyond the net retract just
+            # takes up bowden slack. Only the net retract counts against
+            # the swap length, else the tip stays short of the hub
+            # (HW 2026-10-30: 150 counted, ~50 net, NO TRANSPORT).
+            unwound = reclaimed
+            reclaimed = min(reclaimed, max(0., -net_move))
+            self._say('head %d: cold-pull done (%d mm unwound at MMU, '
+                      '%d mm net retract counted)'
+                      % (self._dh(head), int(unwound), int(reclaimed)))
 
             # 4. Heater back to the slicer's intent (stock does M104 S0
             # right after the pull; 0 only when nobody asked for more).
@@ -2634,6 +2655,9 @@ class AceBgSwap:
             # Per-pair PURGE= from the stamp wins (see cmd_ACE_BG_SWAP);
             # fallback = the global override/config knob, as before.
             if purge is not None:
+                _policy = getattr(ace, 'apply_purge_policy', None)
+                if _policy is not None:
+                    purge = _policy(purge)
                 prime_target = float(purge) + BG_LOAD_PRIME_EXTRA
             else:
                 prime_target = (float(ace.get_purge_length() or 0) or 80.) \

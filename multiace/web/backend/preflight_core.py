@@ -86,6 +86,30 @@ _PLAN_KEEP_RE = re.compile(
 # parsers ignore M73 lines, so keeping them is side-effect-free.
 
 
+# Slicer preview images sit in the header as base64 comment blocks:
+#   ; thumbnail begin 300x300 12345      (PNG; Prusa/Orca/Klipper style)
+#   ; thumbnail_JPG begin 300x300 12345
+#   ; <base64 line>  ...
+#   ; thumbnail end
+# A 300x300 PNG is hundreds of lines, so it can't ride in the 300-line head
+# window parse_meta keeps for the metadata - it is captured on the way past.
+# Only the first THUMB_SCAN_LINES lines are looked at (the header), and an
+# image over THUMB_MAX_B64 characters is skipped rather than shipped with
+# every report.
+_THUMB_BEGIN_RE = re.compile(
+    r"^;\s*thumbnail(_JPG)?\s+begin\s+(\d+)x(\d+)\s+(\d+)", re.IGNORECASE)
+THUMB_SCAN_LINES = 6000
+THUMB_MAX_B64 = 300_000
+
+
+def _pick_thumbnail(found):
+    """Largest of the captured images, as {mime, w, h, b64} (or None)."""
+    if not found:
+        return None
+    mime, w, h, parts = max(found, key=lambda t: t[1] * t[2])
+    return {"mime": mime, "w": w, "h": h, "b64": "".join(parts)}
+
+
 class PreflightRejected(ValueError):
     """The FILE is unacceptable and no amount of retrying will change that -
     as opposed to the environment failing to process an acceptable one.
@@ -118,17 +142,31 @@ def parse_meta(pp, line_iter, with_header=False):
     gate): parse_meta has four call sites - two here in the backend and two
     in the browser's Pyodide worker - and a positional 6th element would
     have to be threaded through all of them again on the next addition.
-    Keys: 'slicer' (banner text), 'forca' (bool), 'nozzles' ({T: mm}).
+    Keys: 'slicer' (banner text), 'forca' (bool), 'nozzles' ({T: mm}),
+    'thumbnail' (the largest header preview as {mime, w, h, b64}, or None).
     """
     head_lines: list = []
     tail_lines: deque = deque(maxlen=2000)
     plan_lines: list = []
     used: set = set()
+    thumbs: list = []      # finished (mime, w, h, [b64 lines])
+    thumb = None           # the block being read, same shape
     for i, line in enumerate(line_iter):
         if i < 300:
             head_lines.append(line)
         else:
             tail_lines.append(line)
+        if i < THUMB_SCAN_LINES and line[:1] == ";":
+            if thumb is None:
+                tm = _THUMB_BEGIN_RE.match(line)
+                if tm and int(tm.group(4)) <= THUMB_MAX_B64:
+                    thumb = ("image/jpeg" if tm.group(1) else "image/png",
+                             int(tm.group(2)), int(tm.group(3)), [])
+            elif "thumbnail" in line and "end" in line:
+                thumbs.append(thumb)
+                thumb = None
+            else:
+                thumb[3].append(line[1:].strip())
         m = _TOOLCHANGE_RE.match(line)
         if m:
             used.add(int(m.group(1)))
@@ -178,6 +216,7 @@ def parse_meta(pp, line_iter, with_header=False):
         'forca':   bool(slicer_name) and pp.is_forca_slicer(slicer_name)
                    if hasattr(pp, 'is_forca_slicer') else False,
         'nozzles': nozzles,
+        'thumbnail': _pick_thumbnail(thumbs),
     }
     if with_header:
         return (slicer_colors, slicer_types, num_aces, used, plan_proxy,
@@ -234,6 +273,28 @@ def used_tool_indices(pp, gcode: str) -> set:
         except Exception:
             used = set()
     return used
+
+
+_ACE_SLOT_RE = re.compile(
+    r"^ACE_(?:SWAP_HEAD|BG_SWAP)\s+HEAD=\d+\s+ACE=(\d+)\s+SLOT=(\d+)")
+
+
+def used_ace_slots_file(path: str) -> list:
+    """The (ace, slot) pairs a rewritten file draws filament from, as a
+    sorted [[ace, slot], ...]: the ACE= / SLOT= of its ACE_SWAP_HEAD and
+    ACE_BG_SWAP lines. Not the slicer's T numbers - the rewrite keeps those
+    in its '; Change Tool' comments on purpose and they say nothing about
+    which physical slot is used. Streamed line by line, and commented-out
+    swaps (the skipped 'already loaded' ones) do not count. Used by the
+    print queue to know which spools a prepared file depends on."""
+    used: set = set()
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line[:4] == "ACE_":
+                m = _ACE_SLOT_RE.match(line)
+                if m:
+                    used.add((int(m.group(1)), int(m.group(2))))
+    return [list(p) for p in sorted(used)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1202,6 +1263,7 @@ def head_mode_preview(pp, token, safe_name, upload_size, slicer_colors,
         # these - so it has to carry the display fields itself, or the UI
         # would never see a nozzle table in head mode.
         "slicer": (meta or {}).get("slicer") or "",
+        "thumbnail": (meta or {}).get("thumbnail"),
         "forca": bool((meta or {}).get("forca")),
         "nozzles": {str(t): d
                     for t, d in ((meta or {}).get("nozzles") or {}).items()},
@@ -1336,6 +1398,7 @@ def build_report(pp, *, slicer_colors, slicer_types, num_aces, plan_proxy,
     }
     nz_groups, nz_mixed = nozzle_context(pp, meta, head_ctx)
     out["slicer"] = (meta or {}).get("slicer") or ""
+    out["thumbnail"] = (meta or {}).get("thumbnail")
     out["forca"] = bool((meta or {}).get("forca"))
     out["nozzles"] = {str(t): d
                       for t, d in ((meta or {}).get("nozzles") or {}).items()}

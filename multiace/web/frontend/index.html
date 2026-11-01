@@ -1862,7 +1862,15 @@
             <template v-for="row in history.jobs" :key="historyRowKey(row)">
               <tr class="history-row" @click="openHistoryDetail(row)">
                 <td>{{ new Date((row.start_time || 0) * 1000).toLocaleString() }}</td>
-                <td>{{ row.filename }}
+                <td>
+                  <button type="button" class="fav-btn" :class="{on: isFavorite(row)}"
+                          :disabled="!favKey(row) || history.favBusy"
+                          :title="isFavorite(row) ? t('ui.history.favorite_remove') : t('ui.history.favorite_add')"
+                          :aria-pressed="isFavorite(row)"
+                          @click.stop="toggleFavorite(row)">{{ isFavorite(row) ? '★' : '☆' }}</button>
+                  <img v-if="row.filename" class="row-thumb" loading="lazy" alt=""
+                       :src="thumbUrl(row.filename)" @error="hideBrokenThumb">
+                  {{ row.filename }}
                   <span v-if="row.ambiguous" class="muted small"
                         :title="t('ui.history.ambiguous_hint')">· {{ t('ui.history.ambiguous') }}</span>
                 </td>
@@ -1915,6 +1923,106 @@
            :style="{left: history.info.left + 'px', top: history.info.top + 'px'}">
         <b>{{ t('ui.history.' + history.info.col) }}</b>
         <div>{{ t('ui.history.' + history.info.col + '_info') }}</div>
+      </div>
+    </section>
+    <!-- FAVORITES: starred prints as cards; Reprint reuses the History
+         dialog, so the loadout comparison is the same. -->
+    <section v-show="tab==='favorites'" class="favorites-tab">
+      <div class="row">
+        <h3>{{ t('ui.history.favorites_title') }}</h3>
+        <button @click="loadFavoritesTab" :disabled="history.busy">
+          {{ history.busy ? t('ui.common.saving') : t('ui.common.reload') }}
+        </button>
+      </div>
+      <p v-if="history.error" class="error">{{ history.error }}</p>
+      <p v-if="history.favLoaded && !history.favorites.length" class="muted">
+        {{ t('ui.history.favorites_empty') }}
+      </p>
+      <div class="fav-grid">
+        <div v-for="c in favoriteCards" :key="c.key" class="fav-card" :class="{gone: c.gone}">
+          <img v-if="c.row.filename && !c.gone" class="fav-thumb" loading="lazy" alt=""
+               :src="thumbUrl(c.row.filename)" @error="hideBrokenThumb">
+          <div class="fav-head">
+            <b class="fav-name" :title="c.row.filename">{{ c.row.filename }}</b>
+            <button type="button" class="fav-btn on" :disabled="history.favBusy"
+                    :title="t('ui.history.favorite_remove')"
+                    @click="toggleFavorite({job_id: c.key.startsWith('mr:') ? c.key.slice(3) : null, id: c.key.startsWith('ma:') ? c.key.slice(3) : null})">★</button>
+          </div>
+          <div class="muted small">{{ new Date((c.row.start_time || 0) * 1000).toLocaleString() }}</div>
+          <div v-if="!c.gone" class="fav-meta">
+            <span v-for="col in historyColors(c.row)" :key="'fc-'+col.head"
+                  class="swatch" :style="{background: col.color}"
+                  :title="'T' + col.th + ' · MMU ' + col.ace + ' / slot ' + col.slot"></span>
+            <span class="small">{{ fmtDuration(c.row.duration) }}</span>
+            <span v-if="c.row.status" class="pill">{{ c.row.status }}</span>
+          </div>
+          <p v-else class="muted small" :title="t('ui.history.favorite_gone_hint')">
+            {{ t('ui.history.favorite_gone') }}</p>
+          <button v-if="c.row.filename" class="reprint-btn"
+                  :disabled="isPrinting || history.reprinting !== ''"
+                  :title="t('ui.history.reprint_hint')"
+                  @click="reprintJob(c.row)">
+            {{ history.reprinting === historyRowKey(c.row)
+               ? t('ui.preflight.sending') : t('ui.history.reprint') }}
+          </button>
+        </div>
+      </div>
+    </section>
+    <!-- QUEUE: files preflight already rewrote, waiting to be started. Not
+         a job queue: Launch starts that one file, after the slots it uses
+         are checked against what is loaded now. -->
+    <section v-show="tab==='queue'" class="queue-tab">
+      <div class="row">
+        <h3>{{ t('ui.queue.title') }}</h3>
+        <button @click="loadQueue" :disabled="pq.busy">
+          {{ pq.busy ? t('ui.common.saving') : t('ui.common.reload') }}
+        </button>
+      </div>
+      <p class="muted small">{{ t('ui.queue.hint') }}</p>
+      <p v-if="pq.error" class="error">{{ pq.error }}</p>
+      <p v-if="pq.loaded && !pq.items.length" class="muted">
+        {{ t('ui.queue.empty') }}
+      </p>
+      <div class="queue-list">
+        <div v-for="it in pq.items" :key="it.id" class="queue-item"
+             :class="{stale: it.changes && it.changes.length}">
+          <img v-if="it.path" class="queue-thumb" loading="lazy" alt=""
+               :src="thumbUrl(it.path)" @error="hideBrokenThumb">
+          <div class="queue-main">
+            <b class="queue-name" :title="it.filename">{{ it.filename }}</b>
+            <div class="muted small">
+              {{ t('ui.queue.staged_at', {time: new Date((it.ts || 0) * 1000).toLocaleString()}) }}
+            </div>
+            <div class="queue-slots">
+              <span v-for="sl in it.slots" :key="it.id + '-' + sl.ace + '-' + sl.slot"
+                    class="queue-slot" :title="queueSlotLabel(sl) + ' · ' + sl.material">
+                <span class="swatch" :style="{background: queueColor(sl.color)}"></span>
+                <span class="small">{{ queueSlotLabel(sl) }}</span>
+              </span>
+            </div>
+            <p v-if="it.changes && it.changes.length" class="queue-warn small">
+              {{ t('ui.queue.changed') }}
+            </p>
+            <ul v-if="it.changes && it.changes.length" class="queue-changes small">
+              <li v-for="ch in it.changes" :key="'ch-' + ch.ace + '-' + ch.slot">
+                {{ queueChangeText(ch) }}</li>
+            </ul>
+            <p v-else-if="it.changes === null" class="muted small">{{ t('ui.queue.unknown') }}</p>
+            <p v-else class="ok small">{{ t('ui.queue.ready') }}</p>
+            <p v-if="pq.blocked && pq.blocked.id === it.id && !(it.changes && it.changes.length)"
+               class="queue-warn small">{{ pq.blocked.message }}</p>
+          </div>
+          <div class="queue-actions">
+            <button class="primary"
+                    :disabled="isPrinting || pq.launching !== '' || (it.changes && it.changes.length > 0)"
+                    :title="isPrinting ? t('ui.queue.busy') : ''"
+                    @click="launchQueued(it)">
+              {{ pq.launching === it.id ? t('ui.preflight.sending') : t('ui.queue.launch') }}
+            </button>
+            <button :disabled="pq.launching !== ''" @click="removeQueued(it)">
+              {{ t('ui.queue.remove') }}</button>
+          </div>
+        </div>
       </div>
     </section>
     <section v-show="tab==='spools'" class="nt-spools-tab">
@@ -2375,6 +2483,25 @@
           </label>
         </div>
         <p class="muted small config-row-hint">{{ t('ui.config.purge_matrix_hint') }}</p>
+        <!-- Live like the matrix toggle: the engine rescales and bounds
+             every resolved purge length (stamp, swap_purge_length or the
+             stock 80 mm). The preflight estimate follows. -->
+        <div class="config-row">
+          <label>{{ t('ui.config.purge_scale') }}</label>
+          <input type="number" :value="purgePolicyValue('SCALE', state.purge_scale)" @input="purgePolicyInput('SCALE', $event)" min="25" max="200" step="5"
+                 @change="setPurgePolicy('SCALE', $event.target.value)">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.purge_floor') }}</label>
+          <input type="number" :value="purgePolicyValue('FLOOR', state.purge_floor)" @input="purgePolicyInput('FLOOR', $event)" min="0" max="200" step="1" placeholder="0"
+                 @change="setPurgePolicy('FLOOR', $event.target.value)">
+        </div>
+        <div class="config-row">
+          <label>{{ t('ui.config.purge_cap') }}</label>
+          <input type="number" :value="purgePolicyValue('CAP', state.purge_cap)" @input="purgePolicyInput('CAP', $event)" min="0" max="200" step="1" placeholder="0"
+                 @change="setPurgePolicy('CAP', $event.target.value)">
+        </div>
+        <p class="muted small config-row-hint">{{ t('ui.config.purge_policy_hint') }}</p>
         </div>
         <div class="config-sep"></div>
         <div class="nt-pgroup nt-pg-dryer">
@@ -3423,6 +3550,10 @@ reboot</pre>
         </div>
       </div>
       <template v-if="preflight.report">
+        <img v-if="preflight.report.thumbnail" class="pf-thumb"
+             :src="'data:' + preflight.report.thumbnail.mime + ';base64,' + preflight.report.thumbnail.b64"
+             :width="preflight.report.thumbnail.w" :height="preflight.report.thumbnail.h"
+             :alt="t('ui.preflight.thumbnail_alt')">
         <div class="preflight-prefs">
           <label><input type="checkbox" v-model="preflight.bedMesh"> {{ t('ui.preflight.pref_bed_mesh') }}</label>
           <label><input type="checkbox" v-model="preflight.camera"> {{ t('ui.preflight.pref_camera') }}</label>
@@ -4095,6 +4226,10 @@ reboot</pre>
       <div class="row nt-dlg-foot nt-pf-foot">
         <button class="nt-cancel-r" @click="closePreflight"
                 :disabled="preflight.sending !== ''">{{ t('ui.common.cancel') }}</button>
+        <button v-if="uiTheme === 'new' && pfSelected()" class="nt-queue-add"
+                :disabled="preflight.sending !== '' || !pfPlanFeasible(pfSelected())"
+                :title="t('ui.queue.add_hint')"
+                @click="pfPrintSelected(true)">{{ t('ui.queue.add') }}</button>
         <button v-if="uiTheme === 'new' && pfSelected()" class="primary nt-main"
                 :disabled="preflight.sending !== '' || !pfPlanFeasible(pfSelected())"
                 @click="pfPrintSelected()">{{ pfGoLabel() }}</button>

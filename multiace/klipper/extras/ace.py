@@ -427,6 +427,9 @@ AUTO_DRY_INTERVAL = 60.0
 # this only bounds the case where we stop asking (restart, unplugged unit),
 # so the ACE cannot keep heating on its own forever.
 AUTO_DRY_MAX_MINUTES = 600
+# A cycle we booked that the device reports as not running for this long,
+# while the reading still asks for drying, is released (see _auto_dry_tick).
+AUTO_DRY_STALE_S = 300.
 # Soft start. Starting the ACE 2 dryer straight at a high
 # target can trip a ptc_error inside the ACE firmware; the heater then stays
 # blocked until the unit is power cycled. The threshold is unit-specific -
@@ -741,8 +744,31 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
         # Lower it to reduce purge waste ("poop"). multiACE Pro can override
         # it per swap (e.g. per colour-pair) via ACE_SET_PURGE.
         self.swap_purge_length = config.getint('swap_purge_length', 0, minval=0, maxval=200)
+        # Purge policy applied to the RESOLVED length (the per-pair stamp,
+        # else swap_purge_length, else the stock 80) by get_purge_length:
+        # a percent scale, then an optional floor and cap in mm (0 = off).
+        # Write-through settings: ACE_SET_PURGE SCALE= / FLOOR= / CAP=
+        # edit the config line and apply live.
+        self.swap_purge_scale = config.getint('swap_purge_scale', 100, minval=25, maxval=200)
+        self.swap_purge_floor = config.getint('swap_purge_floor', 0, minval=0, maxval=200)
+        self.swap_purge_cap = config.getint('swap_purge_cap', 0, minval=0, maxval=200)
 
         self.seat_overshoot_length = config.getint('seat_overshoot_length', 0, minval=0, maxval=100)
+        # Name of a gcode macro that cuts the filament at the toolhead (a
+        # cutter mod). Set: every inline unload calls it instead of the tip
+        # forming, then retracts as usual; background unloads are refused
+        # (a parked head cannot reach the cutter). Empty = off.
+        self.unload_cut_macro = (config.get('unload_cut_macro', '') or '').strip()
+        # Heads that carry a cutter, in display numbering ("1,2"); empty =
+        # every head. Heads not listed keep the normal tip forming.
+        _cut_heads = config.get('unload_cut_heads', '') or ''
+        try:
+            self.unload_cut_heads = set(
+                int(x) for x in _cut_heads.replace(',', ' ').split())
+        except ValueError:
+            raise config.error(
+                "unload_cut_heads must be head numbers like '1,2', got %r"
+                % _cut_heads)
         self.swap_default_temp = config.getint('swap_default_temp', 250, minval=180, maxval=300)
 
         self.swap_retract_length = config.getint('swap_retract_length', 0, minval=0, maxval=2000)
@@ -1195,6 +1221,8 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
         # backstop with no stop path left.
         self._auto_dry_follow_until = {}
         self._auto_dry_seen = {}
+        # idx -> reactor time since when an owned cycle reads as not running.
+        self._auto_dry_stale_since = {}
         # Pushed external humidity (ACE_SET_HUMIDITY): idx -> {'rh', 'temp',
         # 'ts', 'ttl'}. Monotonic ts, and the store deliberately dies with
         # the process - a reading that outlived a Klipper restart has no age
@@ -4443,6 +4471,20 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
 
     def _handle_ready(self):
         self.toolhead = self.printer.lookup_object('toolhead')
+        cut = getattr(self, 'unload_cut_macro', '')
+        if cut:
+            if self.printer.lookup_object('gcode_macro %s' % cut,
+                                          None) is None:
+                self.log_warn('[multiACE] unload_cut_macro %s is not '
+                              'defined - every unload will fail' % cut)
+                logging.warning('[multiACE] unload_cut_macro %s is not '
+                                'defined' % cut)
+            else:
+                logging.info('[multiACE] unloads cut via %s on head(s) %s '
+                             '(tip forming and background unloads off there)'
+                             % (cut, ', '.join(str(h) for h in
+                                               sorted(self.unload_cut_heads))
+                                or 'all'))
 
         # Settings write-through migration: fold the
         # legacy ace__* settings twins into their config lines, then
@@ -15836,6 +15878,27 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
                                     else 'internal',
                                     drying, ours,
                                     cfg['rh_start'], cfg['rh_end']))
+                # A booked cycle the device is not running ended without us
+                # (ACE power cycle, firmware flash, device backstop). The
+                # booking survives restarts, and with it set neither branch
+                # below fires, so the unit never dries again. Once it has
+                # read as not running for AUTO_DRY_STALE_S while the reading
+                # still asks for drying, drop the booking: the start branch
+                # below then starts a fresh cycle in the same tick, so a
+                # misread dryer state only restarts the cycle, it never
+                # leaves one running without an owner.
+                if ours and not drying and rh >= float(cfg['rh_start']):
+                    since = self._auto_dry_stale_since.setdefault(
+                        idx, eventtime)
+                    if eventtime - since >= AUTO_DRY_STALE_S:
+                        self._auto_dry_stale_since.pop(idx, None)
+                        self._auto_dry_ramp.pop(idx, None)
+                        self._auto_dry_release(
+                            idx, 'device not drying for %.0f s'
+                                 % (eventtime - since))
+                        ours = False
+                else:
+                    self._auto_dry_stale_since.pop(idx, None)
                 # OUR OWN bookkeeping decides, not the device status. The
                 # reported dryer state falls back to 'stop' whenever the
                 # status frame carries no dryer block or an unmapped state
@@ -17683,6 +17746,10 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
         '[multiACE] Set the swap/load flush length (mm) for the next '
         'flush(es). Usage: ACE_SET_PURGE LENGTH=<mm>  or  ACE_SET_PURGE '
         'RESET=1 to fall back to the swap_purge_length config value. '
+        'SCALE=<25-200> (percent), FLOOR=<mm> and CAP=<mm> (0 = off) '
+        'rescale and bound every resolved flush length; they write the '
+        'swap_purge_scale / swap_purge_floor / swap_purge_cap config '
+        'lines (write-through). '
         'MATRIX=0|1 ignores/honors the per-pair LENGTH stamps the '
         'preflight writes from the slicer flush matrix - MATRIX=0 = '
         'fixed swap_purge_length for every flush. Writes the purge_matrix '
@@ -17691,7 +17758,40 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
         'Intended for multiACE Pro to set per-colour-pair purge from the '
         'slicer. LENGTH=0 = use the stock default (80mm).')
 
+    def _set_purge_policy(self, gcmd):
+        """SCALE= / FLOOR= / CAP= of ACE_SET_PURGE: apply in RAM, then
+        write the config line. A failed write is reported, the RAM value
+        stays applied for this session."""
+        # Ranges are checked by hand (see _gcode_num) and ALL values before
+        # any is applied, so a bad CAP cannot leave SCALE half set, and the
+        # error names the option instead of Klipper's bare "System error".
+        vals = [(attr, self._gcode_num(gcmd, arg, lo, hi, int))
+                for arg, attr, lo, hi in (
+                    ('SCALE', 'swap_purge_scale', 25, 200),
+                    ('FLOOR', 'swap_purge_floor', 0, 200),
+                    ('CAP', 'swap_purge_cap', 0, 200))]
+        for attr, val in vals:
+            if val is None:
+                continue
+            setattr(self, attr, val)
+            err = self._cfg_write_ace_option(attr, str(val))
+            msg = '[multiACE] %s set to %d' % (attr, val)
+            if err is not None:
+                msg += (' - WARNING: config write failed (%s), applied '
+                        'for this session only' % err)
+            self.log_always(msg)
+            logging.info(msg)
+        floor, cap = self.swap_purge_floor, self.swap_purge_cap
+        if floor and cap and floor > cap:
+            self.log_always('[multiACE] swap_purge_floor %d is above '
+                            'swap_purge_cap %d - the cap wins'
+                            % (floor, cap))
+
     def cmd_ACE_SET_PURGE(self, gcmd):
+        policy = [a for a in ('SCALE', 'FLOOR', 'CAP')
+                  if gcmd.get(a, None) is not None]
+        if policy:
+            self._set_purge_policy(gcmd)
         matrix = gcmd.get_int('MATRIX', None, minval=0, maxval=1)
         if matrix is not None:
             persist = gcmd.get_int('PERSIST', 1, minval=0, maxval=1)
@@ -17742,9 +17842,10 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
             return
         length = gcmd.get_int('LENGTH', None, minval=0, maxval=200)
         if length is None:
-            if matrix is None:
+            if matrix is None and not policy:
                 raise gcmd.error(
-                    'ACE_SET_PURGE needs LENGTH=<mm>, RESET=1 or MATRIX=0|1')
+                    'ACE_SET_PURGE needs LENGTH=<mm>, RESET=1, MATRIX=0|1 '
+                    'or SCALE=/FLOOR=/CAP=')
             return
         if not self.purge_matrix:
             # Stamped files carry one LENGTH per swap - QUIET ignore
@@ -18444,8 +18545,27 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
             return True
         return str(resp.get('msg', '')).strip().upper() == 'FORBIDDEN'
 
+    def unload_cut_macro_for(self, head):
+        """The cut macro for this head, or '' when it has no cutter (no
+        macro set, or the head is not in unload_cut_heads)."""
+        cut = getattr(self, 'unload_cut_macro', '')
+        heads = getattr(self, 'unload_cut_heads', None)
+        if not cut or (heads and self._disp(head) not in heads):
+            return ''
+        return cut
+
     def _run_tipform(self, head, temp, soft, nozzle_diameter):
         self._check_calibration_unload_cancel()
+        cut = self.unload_cut_macro_for(head)
+        if cut:
+            # A cutter replaces the tip forming entirely; the macro owns
+            # its moves and temperatures, the retract loop follows as usual.
+            logging.info('[multiACE] head %d: unload cut via %s'
+                         % (self._disp(head), cut))
+            self.gcode.run_script_from_command(
+                '%s HEAD=%d\r\n' % (cut, head))
+            self._check_calibration_unload_cancel()
+            return
         # Inline tip form: the stock INNER_FILAMENT_UNLOAD macro, OR the
         # same FRAME with a per-material pull table replacing only the
         # CONTROL_RETRACT_ACTION move step ([ace_tipform] mode: custom).
@@ -22261,6 +22381,9 @@ class MultiAce(DisplayMixin, SpoolMixin, SwapMixin, SettingsMixin,
                                                False)),
             'quad_replenish': bool(getattr(self, 'quad_replenish', False)),
             'purge_matrix': bool(getattr(self, 'purge_matrix', True)),
+            'purge_scale': int(getattr(self, 'swap_purge_scale', 100)),
+            'purge_floor': int(getattr(self, 'swap_purge_floor', 0)),
+            'purge_cap': int(getattr(self, 'swap_purge_cap', 0)),
             'pa_sync': bool(getattr(self, 'pa_sync', True)),
             # RC522 tag read/write available on at least one unit (ACE2-Open
             # firmware); gates the web tag settings.
