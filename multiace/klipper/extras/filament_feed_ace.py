@@ -3050,7 +3050,8 @@ class FilamentFeed:
                                     else:
                                         self.ace._dwell_fan(True)
                                         self.ace.wait_ace_ready()
-                                        _rmseq = self._unit_motion_seq()_rsp = self.ace._retract_with_decoder_span(
+                                        _rmseq = self._unit_motion_seq()
+                                        _rsp = self.ace._retract_with_decoder_span(
                                             self.ace._active_device_index, _ace_slot,
                                             lambda: self.ace._retract(
                                                 _ace_slot, _rest,
@@ -3070,10 +3071,11 @@ class FilamentFeed:
                                         if self._unload_dec_stalled(
                                                 head_idx, _ace_slot, _rest, _rsp):
                                             unload_ok = False
-                                            unload_reason = 'bowden_stall'elif self._unit_retract_short(
-                                            head_idx, _ace_slot, _rmseq):
-                                        unload_ok = False
-                                        unload_reason = 'bowden_stall'
+                                            unload_reason = 'bowden_stall'
+                                        elif self._unit_retract_short(
+                                                head_idx, _ace_slot, _rmseq):
+                                            unload_ok = False
+                                            unload_reason = 'bowden_stall'
                             if not unload_ok:
                                 logging.info("[feed][unload] filament genuinely stuck after %d unload attempts (sensor never cleared)", unload_max)
 
@@ -3548,7 +3550,8 @@ class FilamentFeed:
                                     else:
                                         self.ace._dwell_fan(True)
                                         self.ace.wait_ace_ready()
-                                        _rmseq = self._unit_motion_seq()_rsp = self.ace._retract_with_decoder_span(
+                                        _rmseq = self._unit_motion_seq()
+                                        _rsp = self.ace._retract_with_decoder_span(
                                             self.ace._active_device_index, _ace_slot,
                                             lambda: self.ace._retract(
                                                 _ace_slot, _rest,
@@ -3568,10 +3571,11 @@ class FilamentFeed:
                                         if self._unload_dec_stalled(
                                                 head_idx, _ace_slot, _rest, _rsp):
                                             unload_ok = False
-                                            unload_reason = 'bowden_stall'elif self._unit_retract_short(
-                                            head_idx, _ace_slot, _rmseq):
-                                        unload_ok = False
-                                        unload_reason = 'bowden_stall'
+                                            unload_reason = 'bowden_stall'
+                                        elif self._unit_retract_short(
+                                                head_idx, _ace_slot, _rmseq):
+                                            unload_ok = False
+                                            unload_reason = 'bowden_stall'
                             if not unload_ok:
                                 logging.info("[feed][unload] filament genuinely stuck after %d unload attempts (sensor never cleared)", unload_max)
                             if self.ace is not None:
