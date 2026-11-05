@@ -378,6 +378,9 @@ def _parse_state(status: dict) -> dict:
     fr = status.get("filament_feed right", {}) or {}
     bg = status.get("ace_bg_swap", {}) or {}
     tf = status.get("ace_tipform", {}) or {}
+    # Opt-in (default OFF = the old behaviour: a slot that stays empty drops
+    # its hand-set label). An older ace.py has no field -> off.
+    remember_filament = bool(ace.get("remember_filament", False))
 
     device_count = int(ace.get("device_count", 1))
     active_device = int(ace.get("active_device", 0))
@@ -514,12 +517,30 @@ def _parse_state(status: dict) -> dict:
                 if _pending is None:
                     _eject_pending_since[(i, s)] = _now
                 elif _now - _pending >= EJECT_DEBOUNCE_S:
-                    if _drop_override_if_present(i, s):
+                    if not remember_filament and _drop_override_if_present(i, s):
                         overrides_dirty = True
+                    if remember_filament:
+                        # the kept label's spool is gone: a tagged spool
+                        # read here next is a refill (see below)
+                        _kept_slot_emptied.add((i, s))
                     _eject_pending_since.pop((i, s), None)
             else:
                 _eject_pending_since.pop((i, s), None)
             rfid_status = sd.get("rfid", 0)
+            # "Remember last filament" only: a chip read wins over the kept
+            # label when the slot was seen EMPTY since (a refill with a
+            # tagged spool, which would otherwise be shadowed by the old
+            # label). Not on any 0 -> 2 change: after a backend restart or a
+            # unit reconnect the first read of an unchanged spool looks like
+            # one, and would drop a label the user set by hand to correct
+            # the chip. Off: gate == 0 already dropped the label.
+            if (remember_filament and rfid_status == 2
+                    and _last_rfid_status.get((i, s)) != 2
+                    and (i, s) in _kept_slot_emptied):
+                _kept_slot_emptied.discard((i, s))
+                if _drop_override_if_present(i, s):
+                    overrides_dirty = True
+            _last_rfid_status[(i, s)] = rfid_status
             rfid_data = None
             if rfid_status == 2:
                 rfid_data = {
@@ -875,6 +896,8 @@ def _parse_state(status: dict) -> dict:
                      else {}),
         # Default TRUE like the engine; an older ace.py has no field.
         "pa_sync": bool(ace.get("pa_sync", True)),
+        # Opt-in switch, default OFF; an older ace.py has no field.
+        "remember_filament": remember_filament,
         # RC522 tag read/write enabled - gates the picker "write to tag" button.
         "rc522": bool(ace.get("rc522", False)),
         # D11 Devices list (engine, additive since 1.30b): every place of
@@ -1386,6 +1409,17 @@ async def _head_mode_context() -> dict:
     # Colour copies (Multifilament-Optimierung): the EMPTY slots the planner
     # may suggest a second spool for, and the max targets per colour. Empty
     # = the slot's own presence gate reads empty (not merely "no identity").
+    # MMUs that are connected right now. A head-mode head wired to any
+    # other place gets no targets (its unit is absent, removed or not
+    # assigned), and multi plans only over these units. None = no unit
+    # list at all (Klipper not answering): the preflight then plans as
+    # before instead of dropping every head.
+    _aces = [a for a in (parsed.get("aces", []) or []) if isinstance(a, dict)]
+    connected_aces = ([int(a["idx"]) for a in _aces
+                       if isinstance(a.get("idx"), int)
+                       and a.get("connected")
+                       and a.get("unit_present", True)]
+                      if _aces else None)
     empty_slots = []
     for a in parsed.get("aces", []) or []:
         for sl in a.get("slots", []) or []:
@@ -1410,9 +1444,13 @@ async def _head_mode_context() -> dict:
                                   for h, v in
                                   (await _machine_nozzle_types()).items()},
             "pickup_cleaning": bool(parsed.get("pickup_cleaning")),
+            # [ace] swap_purge_floor: the smallest per-pair purge the
+            # rewrite stamps (0 = the post-processor default).
+            "purge_floor": _int_or(parsed.get("purge_floor", 0), 0),
             "max_copies": _int_or(parsed.get("preflight_max_copies", 1), 1),
             "copies_strict": bool(parsed.get("preflight_copies_strict")),
             "empty_slots": empty_slots,
+            "connected_aces": connected_aces,
             "bg_available": bool(bgs.get("available")),
             "bg_heads": [int(h) for h in (bgs.get("enabled_heads") or [])]}
 
@@ -1529,7 +1567,9 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                                   head_plan: str = "loadout",
                                   flow_cal: bool = False,
                                   head_copies: dict | None = None,
-                                  queue: bool = False) -> None:
+                                  queue: bool = False,
+                                  queue_snapshot: dict | None = None,
+                                  queue_replaces: str | None = None) -> None:
     state = _PREFLIGHT_JOBS[job_id]
     pp = _load_post_processor()
     src = _PREFLIGHT_DIR / (token + ".gcode")
@@ -1557,12 +1597,15 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
         # ACE_PICKUP_CLEAN after bare-T picks with no cleaning move only when it
         # is on (the runtime command also no-ops unless enabled). Read from the
         # live state that _parse_state surfaces.
-        if "pickup_cleaning" not in head_ctx:
+        if "pickup_cleaning" not in head_ctx or "purge_floor" not in head_ctx:
             try:
-                head_ctx["pickup_cleaning"] = bool(_parse_state(
-                    await _query_state_gated()).get("pickup_cleaning"))
+                _st = _parse_state(await _query_state_gated())
             except Exception:
-                head_ctx["pickup_cleaning"] = False
+                _st = {}
+            head_ctx.setdefault("pickup_cleaning",
+                                bool(_st.get("pickup_cleaning")))
+            head_ctx.setdefault("purge_floor",
+                                _int_or(_st.get("purge_floor", 0), 0))
 
         # The rewrite pipeline (apply_remap -> rewrite -> inject_auto_load, the
         # head-mode variants and the slicer/optimize/layer dispatch) lives in
@@ -1619,7 +1662,8 @@ async def _run_preflight_pipeline(job_id: str, token: str, mode: str,
                 preflight_core.used_ace_slots_file, str(cur))
             try:
                 await _queue_enqueue(safe_name, f"{_QUEUE_DIR}/{upload_name}",
-                                     mode, used_slots)
+                                     mode, used_slots, queue_snapshot,
+                                     replaces=queue_replaces, original_src=src)
             except HTTPException as e:
                 raise RuntimeError(str(e.detail))
 
@@ -1667,8 +1711,16 @@ class _PreflightPrint(BaseModel):
     # head choice matches the previewed swap count. None (older frontend)
     # -> the pipeline detects them from the loaded slots itself.
     head_copies: dict[str, list[str]] | None = None
+    # The estimate the preview showed, kept with a queued file (see
+    # _queue_snapshot). Ignored unless queue is set.
+    estimate: Any = None
+    swaps: Any = None
     # Stage the rewritten file in the print queue instead of starting it.
     queue: bool = False
+    # Queue only: id of the entry this one replaces (Reassign). The old
+    # entry, its staged file and its stored original go once the new one is
+    # in.
+    replaces: str | None = None
 
 @app.post("/api/preflight/print")
 async def preflight_print(req: _PreflightPrint) -> dict:
@@ -1701,7 +1753,9 @@ async def preflight_print(req: _PreflightPrint) -> dict:
     asyncio.create_task(_run_preflight_pipeline(
         job_id, req.token, req.mode, safe_name, req.bed_mesh, req.camera,
         req.remap, req.head_assignment, head_plan, req.flow_cal,
-        req.head_copies, req.queue))
+        req.head_copies, req.queue,
+        _queue_snapshot(req.estimate, req.swaps) if req.queue else None,
+        req.replaces if req.queue else None))
     return {"job_id": job_id, "filename": safe_name, "mode": req.mode}
 
 @app.get("/api/preflight/print/status")
@@ -2184,24 +2238,38 @@ def _abs_webcam_url(url: str) -> str:
         return url
     return f"{_webcam_base()}/{url.lstrip('/')}"
 
-async def _resolve_webcam() -> dict:
-    """First real camera Moonraker knows about.
+def _webcam_kind(service: str) -> str:
+    svc = service.lower()
+    if svc == "iframe":
+        return "iframe"
+    if "webrtc" in svc:
+        return "webrtc"
+    return "mjpeg"
 
-    Skips our own Fluidd panel entry: it is an iframe pointing back at
-    this UI, and embedding it in the UI's own page would be a mirror
-    tunnel rather than a webcam.
-    """
+def _iframe_url(url: str) -> str:
+    """An iframe camera is a page the BROWSER loads, so it keeps a
+    relative URL relative to the printer's web root (same host as this
+    UI behind nginx) instead of the backend's view of the host."""
+    if url.startswith(("http://", "https://")):
+        return url
+    return "/" + url.lstrip("/")
+
+async def _list_webcams() -> tuple[list, str]:
+    """Every camera the Control tab can show, in Moonraker's order.
+
+    Our own Fluidd panel entry is never listed: it is an iframe pointing
+    back at this UI, and embedding it in the UI's own page would be a
+    mirror tunnel rather than a camera. Disabled and URL-less entries are
+    skipped too. Returns (cameras, reason-if-none)."""
     try:
         listing = await _mr_get("/server/webcams/list")
     except Exception as e:
         # httpx timeouts have an empty message: name the error then.
-        return {"available": False, "reason": f"moonraker: {str(e) or type(e).__name__}"}
-    cams = (listing.get("result") or {}).get("webcams") or []
-    for cam in cams:
+        return [], f"moonraker: {str(e) or type(e).__name__}"
+    out = []
+    for cam in (listing.get("result") or {}).get("webcams") or []:
         name = str(cam.get("name", ""))
         if name.strip().lower() == FLUIDD_CAMERA_NAME.lower():
-            continue
-        if str(cam.get("service", "")).lower() == "iframe":
             continue
         if cam.get("enabled") is False:
             continue
@@ -2209,26 +2277,56 @@ async def _resolve_webcam() -> dict:
         if not stream:
             continue
         service = str(cam.get("service") or "mjpegstreamer")
-        return {
+        kind = _webcam_kind(service)
+        out.append({
             "available": True,
             "name": name,
             "service": service,
-            "webrtc": "webrtc" in service.lower(),
-            "stream_url": _abs_webcam_url(stream),
+            "kind": kind,
+            "webrtc": kind == "webrtc",
+            "stream_url": (_iframe_url(stream) if kind == "iframe"
+                           else _abs_webcam_url(stream)),
             "snapshot_url": _abs_webcam_url(str(cam.get("snapshot_url") or "")),
             "aspect_ratio": cam.get("aspect_ratio") or "16:9",
-        }
-    return {"available": False,
-            "reason": "no camera configured in Moonraker"}
+        })
+    return out, ("" if out else "no camera configured in Moonraker")
+
+async def _resolve_webcam(name: str = "") -> dict:
+    """The camera called `name`, else the first real one.
+
+    The default prefers a streamed camera over an iframe page; an
+    unknown name (camera removed or renamed in Fluidd) falls back to the
+    default instead of failing, so a stale browser choice heals itself.
+    """
+    cams, reason = await _list_webcams()
+    if not cams:
+        return {"available": False, "reason": reason}
+    want = (name or "").strip().lower()
+    if want:
+        for cam in cams:
+            if cam["name"].strip().lower() == want:
+                return cam
+    for cam in cams:
+        if cam["kind"] != "iframe":
+            return cam
+    return cams[0]
 
 @app.get("/api/webcam/info")
-async def webcam_info(request: Request) -> dict:
+async def webcam_info(request: Request, cam: str = "") -> dict:
     if _mock_enabled(request):
         return {**(_mock_load("mock_webcam.json") or {"available": False,
                                                       "reason": "no fixture"}),
                 "mock": True}
-    info = await _resolve_webcam()
-    if info.get("available"):
+    cams, _ = await _list_webcams()
+    info = dict(await _resolve_webcam(cam))
+    # The picker's list: names and kinds only, never addresses.
+    info["cameras"] = [{"name": c["name"], "kind": c["kind"]} for c in cams]
+    if info.get("available") and info.get("kind") == "iframe":
+        # An iframe page is loaded by the browser itself; there is no
+        # stream to proxy.
+        info["iframe_url"] = info.pop("stream_url", "")
+        info.pop("snapshot_url", None)
+    elif info.get("available"):
         # The browser always goes through our proxy: the camera may live
         # on a host/port the UI's origin cannot reach, and https pages
         # refuse plain-http streams. The path is relative to the client's
@@ -2247,14 +2345,14 @@ async def webcam_info(request: Request) -> dict:
     return info
 
 @app.get("/api/webcam/stream")
-async def webcam_stream(request: Request):
+async def webcam_stream(request: Request, cam: str = ""):
     """Pipe the camera's MJPEG stream through this service."""
     from fastapi.responses import StreamingResponse
 
     if _mock_enabled(request):
         raise HTTPException(503, "webcam stream unavailable in mock mode")
-    info = await _resolve_webcam()
-    if not info.get("available") or info.get("webrtc"):
+    info = await _resolve_webcam(cam)
+    if not info.get("available") or info.get("kind") != "mjpeg":
         raise HTTPException(503, info.get("reason") or "no MJPEG webcam")
 
     client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None))
@@ -2282,7 +2380,7 @@ async def webcam_stream(request: Request):
                              headers={"Cache-Control": "no-store"})
 
 @app.post("/api/webcam/webrtc-signal")
-async def webcam_webrtc_signal(request: Request) -> dict:
+async def webcam_webrtc_signal(request: Request, cam: str = "") -> dict:
     """Relay one leg of the browser<->camera SDP handshake.
 
     camera-streamer sends no CORS headers and answers OPTIONS with 501, so
@@ -2291,7 +2389,7 @@ async def webcam_webrtc_signal(request: Request) -> dict:
     where CORS does not apply."""
     if _mock_enabled(request):
         raise HTTPException(503, "webrtc signalling unavailable in mock mode")
-    info = await _resolve_webcam()
+    info = await _resolve_webcam(cam)
     if not info.get("available") or not info.get("webrtc"):
         raise HTTPException(503, info.get("reason") or "no WebRTC camera")
     try:
@@ -2307,10 +2405,10 @@ async def webcam_webrtc_signal(request: Request) -> dict:
         raise HTTPException(502, f"webrtc signal: {e}")
 
 @app.get("/api/webcam/snapshot")
-async def webcam_snapshot(request: Request):
+async def webcam_snapshot(request: Request, cam: str = ""):
     if _mock_enabled(request):
         raise HTTPException(503, "webcam snapshot unavailable in mock mode")
-    info = await _resolve_webcam()
+    info = await _resolve_webcam(cam)
     url = info.get("snapshot_url") or ""
     if not info.get("available") or not url:
         raise HTTPException(503, info.get("reason") or "no webcam snapshot")
@@ -4739,6 +4837,21 @@ def _read_bg_load_mode(text: str) -> str:
                 return "transport" if v == "transport" else "false"
     return "true"
 
+def _read_bg_option(text: str, key: str):
+    """An active `key:` line in [ace_bg_swap], or None."""
+    rx = re.compile(r"^\s*%s\s*[:=]\s*(\S+)" % re.escape(key), re.IGNORECASE)
+    in_section = False
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_section = s[1:-1].strip() == "ace_bg_swap"
+            continue
+        if in_section:
+            m = rx.match(raw)
+            if m:
+                return m.group(1)
+    return None
+
 def _swap_cost_params() -> dict:
     """The cost model's inputs, straight out of [ace] / [ace N].
 
@@ -4760,6 +4873,9 @@ def _swap_cost_params() -> dict:
     if raw:
         out["purge_matrix"] = raw in ("1", "true", "yes", "on")
     out["bg_load"] = _read_bg_load_mode(text)
+    pe = _as_float(_read_bg_option(text, "prime_extra"))
+    if pe is not None:
+        out["bg_prime_extra"] = pe
     per: dict = {}
     for ace_idx, section in (per_ace or {}).items():
         vals = {}
@@ -4773,8 +4889,9 @@ def _swap_cost_params() -> dict:
     return {"main": out, "per_ace": per}
 
 _TIPFORM_SECTION_RE = re.compile(r"^\[\s*ace_tipform\s*\]\s*$")
-_TIPFORM_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_\-]*)\s*:\s*(.*)$")
-_TIPFORM_NAME_RE = re.compile(r"^[a-z0-9_\-]{1,32}$")
+_TIPFORM_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_\-@]*)\s*:\s*(.*)$")
+# Optional "@<driver>" suffix = a row for heads fed by that driver only.
+_TIPFORM_NAME_RE = re.compile(r"^[a-z0-9_\-]{1,32}(@[a-z0-9_]{1,16})?$")
 _tipform_mod_cache: dict = {"sig": None, "mod": None}
 
 def _load_tipform_module():
@@ -4902,7 +5019,8 @@ async def set_tipform(payload: TipformUpdate) -> dict:
             continue
         if key == "mode" or not _TIPFORM_NAME_RE.match(key):
             raise HTTPException(
-                400, "invalid table name %r (a-z, 0-9, _ and -, max 32)"
+                400, "invalid table name %r (a-z, 0-9, _ and -, max 32, "
+                "optionally @<driver>)"
                 % name)
         try:
             mod.parse_table(raw)
@@ -5462,6 +5580,11 @@ def _drop_override_if_present(ace: int, slot: int) -> bool:
 
 EJECT_DEBOUNCE_S = 0.5
 _eject_pending_since: dict[tuple[int, int], float] = {}
+# Last RFID read state per slot, and the slots seen empty since their label
+# was set: only a read that becomes successful (2) on such a slot drops the
+# kept hand-set label (see the remember-last-filament note in _parse_state).
+_last_rfid_status: dict[tuple[int, int], int] = {}
+_kept_slot_emptied: set[tuple[int, int]] = set()
 
 def _override_for(ace: int, slot: int) -> dict | None:
     """Return the override dict for this (ace, slot) if any meaningful
@@ -5513,6 +5636,7 @@ async def set_slot_override(req: SlotOverride) -> dict:
     }
     old = _slot_overrides.get(key)
     _slot_overrides[key] = new
+    _kept_slot_emptied.discard((req.ace, req.slot))     # a fresh label
     _trace.info("override SET via picker POST MMU %d / slot %d: %s -> %s",
                 req.ace, req.slot, old, new)
     _save_overrides_to_disk()
@@ -5622,7 +5746,162 @@ def _record_notification(text: str) -> dict | None:
             note["ttl"] = 8
     _notifications.append(note)
     _trace.info("notification %d captured: %s", note["id"], note["msg"])
+    _push_notification(note)
     return note
+
+# ---------------------------------------------------------------------------
+# Push notifications. The notifications above are captured here, in the
+# backend's Moonraker websocket loop, whether or not a browser is open. An
+# optional push URL forwards the errors (and, if chosen, the warnings) to a
+# phone: ntfy-style, one POST per message with the text as the body and the
+# title/priority/tags as headers. ntfy takes that as it is; any other
+# webhook receives the text body. Nothing is sent while the URL is empty.
+# Same directory and atomic-write pattern as OVERRIDE_FILE.
+# ---------------------------------------------------------------------------
+NOTIFY_FILE = os.environ.get(
+    "MULTIACE_NOTIFY_FILE",
+    os.path.join(_CFG_EXT_DIR, "multiace", "push_notify.json"),
+)
+_NOTIFY_LEVELS = ("error", "warn")      # error = errors only; warn = both
+_NOTIFY_URL_MAX = 500
+_NOTIFY_DEDUPE_S = 300.0                # the same text again within this
+_NOTIFY_BURST = (10, 60.0)              # at most 10 pushes per 60 s
+_notify_cfg: dict = {"url": "", "level": "error"}
+_notify_recent: dict = {}
+_notify_sent: deque = deque()
+
+def _notify_check_url(url: str) -> str:
+    """Normalised push URL or "" (off). http(s) only, no whitespace; anything
+    else is a 422."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if len(url) > _NOTIFY_URL_MAX or re.search(r"\s", url):
+        raise HTTPException(status_code=422, detail="invalid push URL")
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.netloc or not u.hostname:
+        raise HTTPException(status_code=422,
+                            detail="the push URL must start with http:// or https://")
+    return url
+
+def _notify_load() -> None:
+    try:
+        d = json.loads(Path(NOTIFY_FILE).read_text(encoding="utf-8"))
+        url = _notify_check_url(str(d.get("url") or ""))
+        level = d.get("level") if d.get("level") in _NOTIFY_LEVELS else "error"
+        _notify_cfg.update({"url": url, "level": level})
+    except Exception:
+        _notify_cfg.update({"url": "", "level": "error"})
+
+def _notify_save() -> None:
+    p = Path(NOTIFY_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(_notify_cfg, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(p))
+
+_notify_load()
+
+async def _notify_post(url: str, msg: str, level: str) -> tuple[bool, str]:
+    """One push. Never raises; (ok, short detail for the Test button)."""
+    heads = {
+        "Title": "multiACE warning" if level == "warn" else "multiACE error",
+        "Priority": "default" if level == "warn" else "high",
+        "Tags": "warning" if level == "warn" else "rotating_light",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=False) as c:
+            r = await c.post(url, content=msg.encode("utf-8"), headers=heads)
+        if r.status_code >= 400:
+            return False, "HTTP %d" % r.status_code
+        return True, "HTTP %d" % r.status_code
+    except httpx.TimeoutException:
+        return False, "timeout"
+    except Exception as e:
+        _trace.info("push notification failed: %s", type(e).__name__)
+        return False, "connection failed"
+
+def _notify_wanted(note: dict, now: float) -> bool:
+    """Level filter, repeat filter and burst cap for one captured note."""
+    if not _notify_cfg["url"]:
+        return False
+    lvl = note.get("level")
+    if lvl == "error":
+        pass
+    elif lvl == "warn" and _notify_cfg["level"] == "warn":
+        pass
+    else:
+        return False
+    msg = str(note.get("msg") or "")
+    for k in [k for k, t in _notify_recent.items() if now - t > _NOTIFY_DEDUPE_S]:
+        del _notify_recent[k]
+    if msg in _notify_recent:
+        return False
+    while _notify_sent and now - _notify_sent[0] > _NOTIFY_BURST[1]:
+        _notify_sent.popleft()
+    if len(_notify_sent) >= _NOTIFY_BURST[0]:
+        return False
+    _notify_recent[msg] = now
+    _notify_sent.append(now)
+    return True
+
+_notify_tasks: set = set()
+
+async def _notify_deliver(url: str, msg: str, level: str) -> None:
+    """One push for a note _notify_wanted accepted. A failed send gives the
+    repeat reservation back, so the same error is retried the next time it
+    comes in instead of being suppressed for five minutes. (The burst cap
+    keeps counting the attempt, so a dead receiver stays bounded.)"""
+    ok, _detail = await _notify_post(url, msg, level)
+    if not ok:
+        _notify_recent.pop(msg, None)
+
+def _push_notification(note: dict) -> None:
+    """Forward a captured notification when a push URL is set. Fire and
+    forget on the running loop: a slow or dead receiver never holds up the
+    websocket loop."""
+    if not _notify_cfg["url"]:
+        return
+    if not _notify_wanted(note, time.time()):
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # no loop to send on: undo the repeat reservation _notify_wanted made
+        _notify_recent.pop(str(note.get("msg") or ""), None)
+        return
+    t = loop.create_task(_notify_deliver(
+        _notify_cfg["url"], str(note.get("msg") or ""),
+        str(note.get("level") or "error")))
+    _notify_tasks.add(t)                  # asyncio keeps tasks only weakly
+    t.add_done_callback(_notify_tasks.discard)
+
+class _NotifySave(BaseModel):
+    url: str = ""
+    level: str = "error"
+
+@app.get("/api/notify-settings")
+async def get_notify_settings() -> dict:
+    return dict(_notify_cfg)
+
+@app.put("/api/notify-settings")
+async def put_notify_settings(req: _NotifySave) -> dict:
+    url = _notify_check_url(req.url)
+    if req.level not in _NOTIFY_LEVELS:
+        raise HTTPException(status_code=422, detail="level must be error or warn")
+    _notify_cfg.update({"url": url, "level": req.level})
+    _notify_save()
+    return {"ok": True, **_notify_cfg}
+
+@app.post("/api/notify-settings/test")
+async def test_notify_settings() -> dict:
+    """Send one test push to the SAVED url and report what the receiver
+    answered (the Config tab's Test button)."""
+    if not _notify_cfg["url"]:
+        raise HTTPException(status_code=409, detail="no push URL is set")
+    ok, detail = await _notify_post(
+        _notify_cfg["url"], "Test push from the multiACE web UI", "error")
+    return {"ok": ok, "detail": detail}
 
 _print_state_last = ""
 
@@ -6478,7 +6757,26 @@ async def history_list(request: Request, limit: int = 50) -> dict:
     hist = _require_history()
     records = hist.load_records(MULTIACE_DATA_DIR, limit=limit)
     jobs = hist.join_history(await _moonraker_history(limit), records)
+    hist.attach_estimates(jobs, hist.load_estimates(MULTIACE_DATA_DIR))
     return {"jobs": jobs[:limit]}
+
+
+class _EstimateNote(BaseModel):
+    filename: str
+    total_s: float
+    base_s: float | None = None
+
+
+@app.post("/api/history/estimate")
+async def history_note_estimate(request: Request, req: _EstimateNote) -> dict:
+    """Remember the estimate a file is being sent (or queued) with, so
+    History can show it next to the real duration once the print ends.
+    Best effort: the browser ignores a failure here."""
+    if _mock_enabled(request):
+        return {"ok": True, "mock": True}
+    entry = _require_history().record_estimate(
+        MULTIACE_DATA_DIR, req.filename, req.total_s, req.base_s)
+    return {"ok": entry is not None}
 
 
 class _ReprintRequest(BaseModel):
@@ -6635,6 +6933,86 @@ class _QueueAdd(BaseModel):
     # [ace, slot] pairs the rewritten file swaps in (the ACE= / SLOT= of its
     # swap lines). None snapshots every identified slot.
     used_slots: list[list[int]] | None = None
+    # The preflight's estimate and swap count for this file, so the Queue tab
+    # can show them without the file being opened (see _queue_snapshot).
+    estimate: Any = None
+    swaps: Any = None
+    # Id of the entry this one replaces (Reassign), see _queue_replace.
+    replaces: str | None = None
+
+
+# The slicer export each entry came from, gzip-compressed, so Reassign can
+# reopen the preflight on it (the rewritten file cannot be turned back: the
+# rewrite drops and remaps lines). One file per entry id under the data
+# directory, removed with the entry. g-code packs to roughly 10-20 %.
+_QUEUE_ORIG_DIR = "queue_originals"
+_QUEUE_ORIG_MAX = 400 * 1024 * 1024      # compressed bytes accepted per entry
+_QUEUE_ORIG_HEADROOM = 200 * 1024 * 1024  # free space kept on top of the write
+_QUEUE_ID_RE = re.compile(r"[0-9a-f]{12}")
+
+
+def _queue_orig_path(queue_id: str) -> str | None:
+    if not _QUEUE_ID_RE.fullmatch(queue_id or ""):
+        return None
+    return os.path.join(MULTIACE_DATA_DIR, _QUEUE_ORIG_DIR,
+                        queue_id + ".gcode.gz")
+
+
+def _queue_orig_drop(queue_id: str) -> None:
+    p = _queue_orig_path(queue_id)
+    if p:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _queue_orig_room(size: int) -> bool:
+    d = os.path.join(MULTIACE_DATA_DIR, _QUEUE_ORIG_DIR)
+    try:
+        os.makedirs(d, exist_ok=True)
+        return shutil.disk_usage(d).free >= size + _QUEUE_ORIG_HEADROOM
+    except OSError:
+        return False
+
+
+def _queue_orig_store_file(queue_id: str, src) -> bool:
+    """Compress a source file on disk into the entry's original (the
+    printer-side preflight path). False when it does not fit or fails; the
+    entry then just has no Reassign."""
+    import gzip
+    dst = _queue_orig_path(queue_id)
+    if not dst:
+        return False
+    try:
+        if not _queue_orig_room(os.path.getsize(src) // 4):
+            return False
+        tmp = dst + ".tmp"
+        with open(src, "rb") as fi, gzip.open(tmp, "wb", compresslevel=6) as fo:
+            shutil.copyfileobj(fi, fo, 1024 * 1024)
+        os.replace(tmp, dst)
+        return True
+    except OSError:
+        _queue_orig_drop(queue_id)
+        return False
+
+
+def _queue_snapshot(estimate, swaps) -> dict | None:
+    """What the preflight said about a file when it was queued: the
+    estimated total and base seconds and the swap count. Sanitised, since it
+    comes from the browser; None when there is nothing usable (an older
+    client, or a file the model could not estimate)."""
+    out: dict = {}
+    if isinstance(estimate, dict):
+        for k in ("total_s", "base_s"):
+            v = estimate.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool)                     and 0 < v < 10_000_000:
+                out[k] = round(float(v), 1)
+    if "total_s" not in out:
+        out.pop("base_s", None)
+    if isinstance(swaps, int) and not isinstance(swaps, bool)             and 0 <= swaps < 100_000:
+        out["swaps"] = swaps
+    return out or None
 
 
 def _queue_path_ok(path: str) -> bool:
@@ -6643,28 +7021,52 @@ def _queue_path_ok(path: str) -> bool:
 
 
 def _queue_entry(filename: str, path: str, mode: str,
-                 used_slots: list[list[int]] | None, live: list[dict]) -> dict:
+                 used_slots: list[list[int]] | None, live: list[dict],
+                 snapshot: dict | None = None) -> dict:
     """A queue record with the identity of the slots the file uses."""
     if used_slots is None:
         used = list(live)
     else:
         want = {(int(p[0]), int(p[1])) for p in used_slots if len(p) == 2}
         used = [s for s in live if (s["ace"], s["slot"]) in want]
-    return {"id": uuid.uuid4().hex[:12], "filename": filename, "path": path,
-            "mode": mode, "ts": time.time(),
-            "slots": [{k: s[k] for k in ("ace", "slot", "material", "color")}
-                      for s in used]}
+    entry = {"id": uuid.uuid4().hex[:12], "filename": filename, "path": path,
+             "mode": mode, "ts": time.time(),
+             "slots": [{k: s[k] for k in ("ace", "slot", "material", "color")}
+                       for s in used]}
+    if snapshot:
+        entry["estimate"] = snapshot
+    return entry
 
 
 async def _queue_enqueue(filename: str, path: str, mode: str,
-                         used_slots: list[list[int]] | None) -> dict:
+                         used_slots: list[list[int]] | None,
+                         snapshot: dict | None = None,
+                         replaces: str | None = None,
+                         original_src=None) -> dict:
     entry = _queue_entry(filename, path, mode, used_slots,
-                         await _live_slots_async())
+                         await _live_slots_async(), snapshot)
     if not _require_history().add_queue_entry(MULTIACE_DATA_DIR, entry):
         await _queue_delete_file(path)
         raise HTTPException(status_code=409,
                             detail="queue is full or could not be saved")
+    if original_src is not None:
+        await asyncio.to_thread(_queue_orig_store_file, entry["id"],
+                                original_src)
+    if replaces:
+        await _queue_replace(replaces, entry["id"])
     return entry
+
+
+async def _queue_replace(old_id: str, new_id: str) -> None:
+    """Reassign: the new entry is in, so the one it replaces goes, with its
+    staged file and stored original. Only after the add succeeded, so a
+    failed re-queue never loses the old entry."""
+    if not old_id or old_id == new_id:
+        return
+    gone = _require_history().remove_queue_entry(MULTIACE_DATA_DIR, old_id)
+    if gone is not None:
+        await _queue_delete_file(gone.get("path") or "")
+    _queue_orig_drop(old_id)
 
 
 async def _queue_delete_file(path: str) -> None:
@@ -6686,8 +7088,14 @@ async def _queue_with_changes(entries: list[dict]) -> list[dict]:
         live = await _live_slots_async()
     except Exception:
         live = None
-    return [{**e, "changes": (None if live is None
-                              else hist.loadout_changes(e.get("slots"), live))}
+
+    def has_original(e) -> bool:
+        p = _queue_orig_path(str(e.get("id") or ""))
+        return bool(p) and os.path.isfile(p)
+
+    return [{**e, "has_original": has_original(e),
+             "changes": (None if live is None
+                         else hist.loadout_changes(e.get("slots"), live))}
             for e in entries]
 
 
@@ -6697,7 +7105,27 @@ async def queue_list(request: Request) -> dict:
         return {"queue": await _queue_with_changes(list(_mock_queue)),
                 "mock": True}
     entries = _require_history().load_queue(MULTIACE_DATA_DIR)
+    _queue_orig_sweep({str(e.get("id")) for e in entries})
     return {"queue": await _queue_with_changes(entries)}
+
+
+def _queue_orig_sweep(live_ids: set) -> None:
+    """Originals whose entry is gone (a crash between the two removals, or
+    an entry dropped by hand) would otherwise sit in the data folder
+    forever."""
+    d = os.path.join(MULTIACE_DATA_DIR, _QUEUE_ORIG_DIR)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        qid = n.split(".", 1)[0]
+        if qid not in live_ids and (n.endswith(".gcode.gz")
+                                    or n.endswith(".tmp")):
+            try:
+                os.remove(os.path.join(d, n))
+            except OSError:
+                pass
 
 
 @app.post("/api/queue")
@@ -6710,11 +7138,80 @@ async def queue_add(request: Request, req: _QueueAdd) -> dict:
         raise HTTPException(status_code=400, detail="invalid queue path")
     if _mock_enabled(request):
         entry = _queue_entry(req.filename, req.path, req.mode, req.used_slots,
-                             await _live_slots_async())
+                             await _live_slots_async(),
+                             _queue_snapshot(req.estimate, req.swaps))
         _mock_queue.append(entry)
+        if req.replaces:
+            _mock_queue[:] = [e for e in _mock_queue
+                              if e["id"] != req.replaces]
         return {"ok": True, "entry": entry, "mock": True}
-    entry = await _queue_enqueue(req.filename, req.path, req.mode, req.used_slots)
+    entry = await _queue_enqueue(req.filename, req.path, req.mode,
+                                 req.used_slots,
+                                 _queue_snapshot(req.estimate, req.swaps),
+                                 replaces=req.replaces)
     return {"ok": True, "entry": entry}
+
+
+@app.put("/api/queue/{queue_id}/original")
+async def queue_original_put(request: Request, queue_id: str) -> dict:
+    """Keep the slicer export an entry was made from (gzip, sent by the
+    browser) so Reassign can reopen it. Streamed to disk; refused when it is
+    too big or the printer's storage is short. The entry stays usable
+    without it."""
+    dst = _queue_orig_path(queue_id)
+    if not dst:
+        raise HTTPException(status_code=400, detail="invalid queue id")
+    if _mock_enabled(request):
+        entries = list(_mock_queue)
+    else:
+        entries = _require_history().load_queue(MULTIACE_DATA_DIR)
+    if not any(e.get("id") == queue_id for e in entries):
+        raise HTTPException(status_code=404, detail="queue entry not found")
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > _QUEUE_ORIG_MAX:
+        raise HTTPException(status_code=413, detail="original too large")
+    if not _queue_orig_room(declared):
+        raise HTTPException(status_code=507, detail="not enough free space")
+    tmp = dst + ".tmp"
+    size = 0
+    head = b""
+    try:
+        with open(tmp, "wb") as fh:
+            async for chunk in request.stream():
+                if len(head) < 2:
+                    head = (head + chunk)[:2]
+                size += len(chunk)
+                if size > _QUEUE_ORIG_MAX:
+                    raise HTTPException(status_code=413,
+                                        detail="original too large")
+                fh.write(chunk)
+        if size == 0 or head != b"\x1f\x8b":
+            raise HTTPException(status_code=400, detail="expected gzip data")
+        os.replace(tmp, dst)
+    except HTTPException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise HTTPException(status_code=507, detail=f"could not store: {e}")
+    return {"ok": True, "size": size}
+
+
+@app.get("/api/queue/{queue_id}/original")
+async def queue_original_get(queue_id: str):
+    p = _queue_orig_path(queue_id)
+    if not p or not os.path.isfile(p):
+        raise HTTPException(status_code=404, detail="no original kept")
+    return FileResponse(p, media_type="application/gzip")
 
 
 @app.post("/api/queue/{queue_id}/launch")
@@ -6751,6 +7248,7 @@ async def queue_launch(request: Request, queue_id: str) -> dict:
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"moonraker: {e}")
     hist.remove_queue_entry(MULTIACE_DATA_DIR, queue_id)
+    _queue_orig_drop(queue_id)
     return {"ok": True, "filename": entry["filename"]}
 
 
@@ -6763,6 +7261,7 @@ async def queue_remove(request: Request, queue_id: str) -> dict:
     if gone is None:
         raise HTTPException(status_code=404, detail="queue entry not found")
     await _queue_delete_file(gone.get("path") or "")
+    _queue_orig_drop(queue_id)
     return {"ok": True}
 
 
@@ -6815,7 +7314,8 @@ async def history_clear() -> dict:
 # a 304 with no body - unnoticeable on a LAN. The shell and the assets
 # index.html loads; icons and manifest keep StaticFiles' defaults.
 _SHELL_PATHS = {"/", "/index.html", "/app.js", "/style.css", "/style-new.css",
-                "/vendor/vue.global.prod.js", "/preflight_pyodide_worker.js"}
+                "/vendor/vue.global.prod.js", "/preflight_pyodide_worker.js",
+                "/gcode_preview.js", "/gcode_preview_worker.js"}
 
 # Assets index.html loads with a content-hash query (?v=<md5>). A cache
 # entry stored before no-cache existed is heuristically fresh and never
@@ -6823,10 +7323,11 @@ _SHELL_PATHS = {"/", "/index.html", "/app.js", "/style.css", "/style-new.css",
 # (StaticFiles' ETag is then the size alone) - a new URL per content is
 # the only key no old entry can hit.
 _SHELL_ASSETS = ("app.js", "vendor/vue.global.prod.js", "style.css",
-                 "style-new.css", "preflight_pyodide_worker.js")
+                 "style-new.css", "preflight_pyodide_worker.js",
+                 "gcode_preview.js", "gcode_preview_worker.js")
 _SHELL_REF_RE = re.compile(
     r'\b(src|href)="(app\.js|vendor/vue\.global\.prod\.js|style\.css|'
-    r'style-new\.css)"')
+    r'style-new\.css|gcode_preview\.js)"')
 _asset_hash_cache: dict = {}
 _shell_html_cache: dict = {}
 
@@ -6883,7 +7384,8 @@ def _render_shell() -> str | None:
     html = _SHELL_REF_RE.sub(_ref, html)
     inject = ("<script>window.MA_ASSET_V = "
               + json.dumps({"worker": hashes.get(
-                  "preflight_pyodide_worker.js", "")})
+                  "preflight_pyodide_worker.js", ""),
+                  "gpreview": hashes.get("gcode_preview_worker.js", "")})
               + ";</script>\n")
     html = html.replace("</head>", inject + "</head>", 1)
     _shell_html_cache.update(key=ckey, html=html)
